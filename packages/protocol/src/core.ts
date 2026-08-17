@@ -136,6 +136,25 @@ export const memberViewSchema = z.object({
 });
 export type MemberView = z.infer<typeof memberViewSchema>;
 
+/**
+ * The cast of avatars. Each id maps to a palette variant of the character
+ * spritesheet in the web app; the server hands new members a random one.
+ */
+export const AVATAR_IDS = [
+  'clementine',
+  'juniper',
+  'marlow',
+  'sable',
+  'biscuit',
+  'pixel',
+  'mochi',
+  'rusty',
+  'fern',
+  'ziggy',
+  'plum',
+  'comet',
+] as const;
+
 export const roomCodeSchema = z
   .string()
   .min(3)

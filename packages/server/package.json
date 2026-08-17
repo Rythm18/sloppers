@@ -1,0 +1,35 @@
+{
+  "name": "@sloppers/server",
+  "version": "0.1.0",
+  "description": "The sloppers office server: rooms, presence, token ledger, and the web app",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "sloppers-server": "./dist/main.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "dev": "node --watch --experimental-strip-types src/main.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.9",
+    "@sloppers/protocol": "workspace:*",
+    "better-sqlite3": "^12.6.0",
+    "hono": "^4.11.9",
+    "picocolors": "^1.1.1",
+    "ws": "^8.18.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.10.1",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
