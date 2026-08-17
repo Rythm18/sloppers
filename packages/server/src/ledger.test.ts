@@ -73,6 +73,8 @@ describe('TokenLedger', () => {
     };
     ledger.ingest('m1', [oldSession], T0);
     expect(ledger.todayFor('m1', T0).tokens.input).toBe(0);
+    // ...and a zero-delta first sighting is not a "session run today".
+    expect(ledger.todayFor('m1', T0).sessionsRun).toBe(0);
     // ...but growth from here on counts.
     const grown: SessionSnapshot = {
       ...oldSession,

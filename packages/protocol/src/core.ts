@@ -161,4 +161,8 @@ export const roomCodeSchema = z
   .max(32)
   .regex(/^[a-z0-9][a-z0-9-]*$/i, 'letters, digits, dashes');
 export const displayNameSchema = z.string().trim().min(1).max(32);
-export const avatarIdSchema = z.string().min(1).max(32);
+export const avatarIdSchema = z
+  .string()
+  .min(1)
+  .max(32)
+  .regex(/^[a-z0-9][a-z0-9-]*$/, 'lowercase kebab-case');

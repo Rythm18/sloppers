@@ -38,6 +38,8 @@ export function createSloppersServer(opts: SloppersServerOptions): Promise<Slopp
       { fetch: app.fetch, port: opts.port ?? 8787, hostname: opts.hostname ?? '0.0.0.0' },
       (info) => {
         const sweep = setInterval(() => rooms.sweep(), SWEEP_MS);
+        rooms.cleanupStaleMembers();
+        const cleanup = setInterval(() => rooms.cleanupStaleMembers(), 24 * 60 * 60 * 1000);
         const stopDemo = opts.demo ? startDemo(rooms) : null;
         resolve({
           server: server as Server,
@@ -46,6 +48,7 @@ export function createSloppersServer(opts: SloppersServerOptions): Promise<Slopp
           port: info.port,
           async close() {
             clearInterval(sweep);
+            clearInterval(cleanup);
             stopDemo?.();
             await sockets.close();
             rooms.close();

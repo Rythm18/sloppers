@@ -57,8 +57,9 @@ pnpm build
 node packages/server/dist/main.js            # http://localhost:8787
 ```
 
-Add `--demo` to either to get a `demo` room full of simulated teammates —
-useful for trying the thing without three friends online:
+Demo mode adds a `demo` room full of simulated teammates — useful for trying
+the thing without three friends online. From source, pass `--demo`; in
+Docker, set the `SLOPPERS_DEMO=1` environment variable:
 
 ```sh
 node packages/server/dist/main.js --demo

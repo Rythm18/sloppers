@@ -145,9 +145,11 @@ Built-in adapters:
   `session_meta` line gives cwd/model/CLI version; `event_msg` entries of
   type `token_count` give cumulative usage.
 
-State derivation is shared: appended <20 s ago → `working`; last event is an
-agent waiting on the human → `waiting`; quiet ≥10 min → `idle`; harness
-process gone → session dropped from the snapshot.
+State derivation is shared and time-based: a finished agent turn reads as
+`waiting` immediately; an unanswered tool call reads as `working` until it
+stalls ~90 s (then `waiting` — usually a permission prompt); anything else
+reads as `working`. Quiet ≥10 min is `idle`; quiet ≥30 min drops the session
+from snapshots entirely.
 
 ## Server
 

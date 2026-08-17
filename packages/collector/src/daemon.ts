@@ -26,6 +26,10 @@ export function startDaemon(opts: {
   collectorVersion: string;
   home?: string;
   log: (message: string) => void;
+  /** Device key rejected; the daemon has stopped and needs re-pairing. */
+  onUnknownDevice?: () => void;
+  /** Another machine took over this member; the daemon has stopped. */
+  onSuperseded?: () => void;
 }): Daemon {
   let config = loadConfig(opts.home);
   if (!config) {
@@ -34,12 +38,15 @@ export function startDaemon(opts: {
 
   const adapters = builtinAdapters(opts.home);
   const tracker = new SessionTracker(adapters);
-  const client = new CollectorClient({
+  const clientOptions: ConstructorParameters<typeof CollectorClient>[0] = {
     wsUrl: config.server.wsUrl,
     deviceKey: config.deviceKey,
     collectorVersion: opts.collectorVersion,
     log: opts.log,
-  });
+  };
+  if (opts.onUnknownDevice) clientOptions.onUnknownDevice = opts.onUnknownDevice;
+  if (opts.onSuperseded) clientOptions.onSuperseded = opts.onSuperseded;
+  const client = new CollectorClient(clientOptions);
 
   let idleSeconds: number | undefined;
 

@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "The sloppers office server: rooms, presence, token ledger, and the web app",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rythm18/sloppers.git",
+    "directory": "packages/server"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "sloppers-server": "./dist/main.js"

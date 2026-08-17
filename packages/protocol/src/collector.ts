@@ -45,7 +45,7 @@ export type CollectorHelloOk = z.infer<typeof collectorHelloOkSchema>;
 
 export const collectorErrorSchema = z.object({
   type: z.literal('error'),
-  code: z.enum(['unknown-device', 'bad-message', 'server-error']),
+  code: z.enum(['unknown-device', 'superseded', 'bad-message', 'server-error']),
   message: z.string(),
 });
 export type CollectorError = z.infer<typeof collectorErrorSchema>;

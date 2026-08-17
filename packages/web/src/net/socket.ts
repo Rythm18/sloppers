@@ -134,6 +134,10 @@ export class OfficeSocket {
     ws.onclose = () => {
       if (this.closed) return;
       useStore.getState().setConnection('reconnecting');
+      if (!this.joined) {
+        // Never made it into the office — say so instead of a silent button.
+        useStore.getState().setJoinError("Can't reach the office server — retrying…");
+      }
       const backoff = Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** this.attempts);
       this.attempts += 1;
       setTimeout(() => this.connect(), backoff / 2 + Math.random() * (backoff / 2));

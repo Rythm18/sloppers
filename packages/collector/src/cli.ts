@@ -81,7 +81,15 @@ async function share(args: string[]): Promise<void> {
 }
 
 function runForeground(): void {
-  const daemon = startDaemon({ collectorVersion: VERSION, log });
+  const daemon = startDaemon({
+    collectorVersion: VERSION,
+    log,
+    // Exit non-zero so launchd/systemd restart us; once the user re-pairs,
+    // the restarted daemon reads the new config and recovers on its own.
+    onUnknownDevice: () => process.exit(1),
+    // Another machine took over — exit clean so the service does NOT restart.
+    onSuperseded: () => process.exit(0),
+  });
   const shutdown = () => {
     void daemon.stop().then(() => process.exit(0));
   };

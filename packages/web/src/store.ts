@@ -98,9 +98,16 @@ export const useStore = create<SloppersStore>((set) => ({
         set({ leaderboard: msg.rows });
         break;
       case 'error':
-        if (msg.code === 'name-taken' || msg.code === 'bad-join') {
-          set({ joinError: msg.message, phase: 'join' });
-        }
+        set((s) => {
+          if (msg.code === 'name-taken' || msg.code === 'bad-join') {
+            return { joinError: msg.message, phase: 'join' as Phase };
+          }
+          // A server-side failure before we're in only matters on the door.
+          if (msg.code === 'server-error' && s.phase === 'join') {
+            return { joinError: msg.message };
+          }
+          return s;
+        });
         break;
       default:
         break;

@@ -105,6 +105,10 @@ export class TokenLedger {
             session.tokens.cacheWrite,
             now,
           );
+          // Count a session toward "sessions run today" only when its first
+          // sighting actually moves tokens: a pre-existing session being
+          // seeded, or a resumed transcript whose copied history was
+          // deduplicated away, is not a new session run.
           bumpDay.run(
             memberIdValue,
             day,
@@ -113,7 +117,7 @@ export class TokenLedger {
             delta.output,
             delta.cacheRead,
             delta.cacheWrite,
-            isNewSession ? 1 : 0,
+            isNewSession && hasDelta ? 1 : 0,
           );
           changed = true;
         }

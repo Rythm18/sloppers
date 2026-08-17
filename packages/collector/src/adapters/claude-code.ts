@@ -19,7 +19,16 @@ import { newAccumulator } from '../core/types.js';
  *
  * "Who acts next" is read off the last assistant entry: a text-only message
  * ends the turn (the human acts); a message with a `tool_use` block means a
- * tool is running or a permission prompt is blocking.
+ * tool is running or a permission prompt is blocking. Only a `user` entry
+ * resets the classification — `system` entries (turn_duration, hook
+ * summaries) and attachments trail the assistant's final message, and
+ * treating them as activity would mask the "agent needs you" signal.
+ *
+ * `--resume` copies a transcript into a NEW file with a new sessionId but
+ * the ORIGINAL usage entries and requestIds. Usage is therefore attributed
+ * across files: the first file to report a requestId owns it, and copies in
+ * other files don't count, so a resumed session reports only post-resume
+ * usage and the server's ledger never double-counts the copied history.
  */
 
 interface ClaudeUsage {
@@ -55,6 +64,8 @@ function toTotals(u: ClaudeUsage): TokenTotals {
 
 export function createClaudeCodeAdapter(home: string = homedir()): HarnessAdapter {
   const root = join(home, '.claude', 'projects');
+  /** requestId → transcript file that first reported it (resume dedup). */
+  const requestOwner = new Map<string, string>();
   return {
     id: 'claude-code',
     roots: () => [root],
@@ -105,8 +116,6 @@ export function createClaudeCodeAdapter(home: string = homedir()): HarnessAdapte
           if (typeof entry.customTitle === 'string') acc.title = entry.customTitle;
           break;
         case 'user':
-        case 'attachment':
-        case 'system':
           acc.lastEventKind = 'other';
           break;
         case 'assistant': {
@@ -117,19 +126,23 @@ export function createClaudeCodeAdapter(home: string = homedir()): HarnessAdapte
             const usage = message.usage as ClaudeUsage | undefined;
             const requestId = entry.requestId;
             if (usage && typeof requestId === 'string') {
-              const s = scratchOf(acc);
-              const next = toTotals(usage);
-              const prev = s.usageByRequest.get(requestId);
-              s.usageByRequest.set(requestId, next);
-              // Keep a running sum with O(1) updates: replace this request's
-              // previous contribution instead of resumming every request.
-              s.running = {
-                input: s.running.input - (prev?.input ?? 0) + next.input,
-                output: s.running.output - (prev?.output ?? 0) + next.output,
-                cacheRead: s.running.cacheRead - (prev?.cacheRead ?? 0) + next.cacheRead,
-                cacheWrite: s.running.cacheWrite - (prev?.cacheWrite ?? 0) + next.cacheWrite,
-              };
-              acc.tokens = s.running;
+              const owner = requestOwner.get(requestId) ?? acc.filePath;
+              requestOwner.set(requestId, owner);
+              if (owner === acc.filePath) {
+                const s = scratchOf(acc);
+                const next = toTotals(usage);
+                const prev = s.usageByRequest.get(requestId);
+                s.usageByRequest.set(requestId, next);
+                // Keep a running sum with O(1) updates: replace this
+                // request's previous contribution instead of resumming.
+                s.running = {
+                  input: s.running.input - (prev?.input ?? 0) + next.input,
+                  output: s.running.output - (prev?.output ?? 0) + next.output,
+                  cacheRead: s.running.cacheRead - (prev?.cacheRead ?? 0) + next.cacheRead,
+                  cacheWrite: s.running.cacheWrite - (prev?.cacheWrite ?? 0) + next.cacheWrite,
+                };
+                acc.tokens = s.running;
+              }
             }
           }
           const content = message.content;
@@ -140,8 +153,9 @@ export function createClaudeCodeAdapter(home: string = homedir()): HarnessAdapte
           break;
         }
         default:
-          // Bookkeeping entries (titles, modes, snapshots...) say nothing
-          // about who acts next; leave the classification alone.
+          // Bookkeeping entries (titles, modes, snapshots, and the system/
+          // attachment entries that trail a finished turn) say nothing about
+          // who acts next; leave the classification alone.
           break;
       }
     },

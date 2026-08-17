@@ -16,23 +16,27 @@ export function PhaserStage() {
     let game: Phaser.Game | null = null;
     let cancelled = false;
 
-    void document.fonts.load('8px Silkscreen').then(() => {
-      if (cancelled) return;
-      game = new Phaser.Game({
-        type: Phaser.AUTO,
-        parent: el,
-        pixelArt: true,
-        backgroundColor: '#1a1423',
-        scale: {
-          mode: Phaser.Scale.RESIZE,
-          width: '100%',
-          height: '100%',
-        },
-        scene: [OfficeScene],
+    // A failed font load should never block the office; labels fall back.
+    void document.fonts
+      .load('8px Silkscreen')
+      .catch(() => {})
+      .then(() => {
+        if (cancelled) return;
+        game = new Phaser.Game({
+          type: Phaser.AUTO,
+          parent: el,
+          pixelArt: true,
+          backgroundColor: '#1a1423',
+          scale: {
+            mode: Phaser.Scale.RESIZE,
+            width: '100%',
+            height: '100%',
+          },
+          scene: [OfficeScene],
+        });
+        // Debug handle for bug reports: inspect the live game from devtools.
+        (window as Window & { __sloppers?: Phaser.Game }).__sloppers = game;
       });
-      // Debug handle for bug reports: inspect the live game from devtools.
-      (window as Window & { __sloppers?: Phaser.Game }).__sloppers = game;
-    });
 
     return () => {
       cancelled = true;

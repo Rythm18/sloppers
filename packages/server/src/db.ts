@@ -26,7 +26,8 @@ export function openDb(path: string): Db {
       secret TEXT NOT NULL,
       display_name TEXT NOT NULL,
       avatar TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL DEFAULT 0
     );
     CREATE UNIQUE INDEX IF NOT EXISTS members_room_name
       ON members(room_code, lower(display_name));
@@ -64,5 +65,10 @@ export function openDb(path: string): Db {
       PRIMARY KEY (member_id, day, harness)
     );
   `);
+  // Databases created before last_seen_at existed get the column added.
+  const memberColumns = db.prepare('PRAGMA table_info(members)').all() as { name: string }[];
+  if (!memberColumns.some((c) => c.name === 'last_seen_at')) {
+    db.exec('ALTER TABLE members ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0');
+  }
   return db;
 }

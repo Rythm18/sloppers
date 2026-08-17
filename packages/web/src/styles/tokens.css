@@ -11,9 +11,9 @@
   --dusk-raised: #37324a;
   --panel-line: #4a4458;
 
-  /* text */
+  /* text — --wire stays ≥4.5:1 against --dusk for small labels */
   --parchment: #f3ebdd;
-  --wire: #8a80a5;
+  --wire: #9b92b6;
 
   /* accents */
   --lamp: #ffb454;

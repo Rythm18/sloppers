@@ -126,7 +126,7 @@ class AvatarActor {
 
 export class OfficeScene extends Phaser.Scene {
   private office!: OfficeMap;
-  private player!: AvatarActor;
+  private player: AvatarActor | null = null;
   private actors = new Map<string, AvatarActor>();
   private keys!: Record<
     'up' | 'down' | 'left' | 'right' | 'w' | 'a' | 's' | 'd',
@@ -161,24 +161,19 @@ export class OfficeScene extends Phaser.Scene {
     this.buildTilemap();
     this.buildAnimations();
 
-    const state = useStore.getState();
-    const you = state.you;
-    for (const view of Object.values(state.members)) {
-      if (view.id === you) {
-        // Clicking yourself opens your own card — a mirror of what you share.
-        this.player = new AvatarActor(this, view);
-      } else {
-        this.actors.set(view.id, new AvatarActor(this, view));
-      }
-    }
-    if (!this.player && you) {
-      // World said we exist but the member list raced; wait for upsert.
-    }
-
     const cam = this.cameras.main;
     cam.setBounds(0, 0, WORLD_W, WORLD_H);
     cam.setRoundPixels(true);
-    if (this.player) cam.startFollow(this.player.sprite, true);
+
+    const state = useStore.getState();
+    const you = state.you;
+    for (const view of Object.values(state.members)) {
+      if (view.id === you) this.ensurePlayer(view);
+      else this.actors.set(view.id, new AvatarActor(this, view));
+    }
+    // If our own member view raced the world message, the 'member' bridge
+    // handler below creates the player when it arrives.
+
     this.applyZoom();
     this.scale.on('resize', () => this.applyZoom());
 
@@ -193,7 +188,8 @@ export class OfficeScene extends Phaser.Scene {
       }),
       bridge.on('member', (view) => {
         if (view.id === useStore.getState().you) {
-          this.player?.applyView(view);
+          if (this.player) this.player.applyView(view);
+          else this.ensurePlayer(view);
           return;
         }
         const existing = this.actors.get(view.id);
@@ -213,14 +209,29 @@ export class OfficeScene extends Phaser.Scene {
         for (const actor of this.actors.values()) actor.destroy();
         this.actors.clear();
         for (const view of members) {
-          if (view.id === youId) this.player?.applyView(view);
-          else this.actors.set(view.id, new AvatarActor(this, view));
+          if (view.id === youId) {
+            if (this.player) this.player.applyView(view);
+            else this.ensurePlayer(view);
+          } else {
+            this.actors.set(view.id, new AvatarActor(this, view));
+          }
         }
+        // The server respawned us at a default position; re-assert where we
+        // actually stand so others don't see us parked at spawn.
+        if (this.player && this.lastSent) bridge.emit('self-move', this.lastSent);
       }),
     );
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       for (const unsubscribe of this.unsubscribes.splice(0)) unsubscribe();
     });
+  }
+
+  /** Create the local player (possibly late, if the world message raced). */
+  private ensurePlayer(view: MemberView): void {
+    if (this.player) return;
+    // Clicking yourself opens your own card — a mirror of what you share.
+    this.player = new AvatarActor(this, view);
+    this.cameras.main.startFollow(this.player.sprite, true);
   }
 
   private buildTilemap(): void {

@@ -15,6 +15,8 @@ export interface CollectorClientOptions {
   log: (message: string) => void;
   /** Called when the server rejects our device key (re-pairing needed). */
   onUnknownDevice?: () => void;
+  /** Called when another machine paired for this member took over. */
+  onSuperseded?: () => void;
 }
 
 /**
@@ -95,6 +97,10 @@ export class CollectorClient {
         this.opts.log('server does not recognize this device — run `sloppers share` again');
         this.stop();
         this.opts.onUnknownDevice?.();
+      } else if (msg.type === 'error' && msg.code === 'superseded') {
+        this.opts.log('another machine took over sharing for this member — standing down');
+        this.stop();
+        this.opts.onSuperseded?.();
       } else if (msg.type === 'error') {
         this.opts.log(`server rejected a message (${msg.code}): ${msg.message}`);
       }

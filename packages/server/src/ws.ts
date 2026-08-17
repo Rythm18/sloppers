@@ -12,16 +12,84 @@ import type { Room, WebClient } from './room.js';
 import type { RoomManager } from './rooms.js';
 
 const MAX_PAYLOAD = 256 * 1024;
+const HEARTBEAT_MS = 30_000;
+/** Join attempts allowed per IP per minute — generous for humans and
+ * reconnect storms, hostile to member-minting scripts. */
+const JOINS_PER_MINUTE = 30;
 
 /**
  * Wires both WebSocket endpoints onto the HTTP server:
  *
  * - `/ws/web`      browsers; first message must be `join`
  * - `/ws/collector` daemons; first message must be `hello` with a device key
+ *
+ * Both endpoints run a standard ping/pong heartbeat: a peer that misses a
+ * round gets terminated, so half-open sockets (sleeping laptops, dropped
+ * networks) can't hold presence 'active' or buffer broadcasts forever.
  */
 export interface WebSocketsHandle {
   /** Terminate every client and let their close handlers drain. */
   close(): Promise<void>;
+}
+
+interface AliveSocket extends WebSocket {
+  isAlive?: boolean;
+}
+
+function startHeartbeat(wss: WebSocketServer): NodeJS.Timeout {
+  wss.on('connection', (ws: AliveSocket) => {
+    ws.isAlive = true;
+    ws.on('pong', () => {
+      ws.isAlive = true;
+    });
+  });
+  return setInterval(() => {
+    for (const client of wss.clients as Set<AliveSocket>) {
+      if (client.isAlive === false) {
+        client.terminate();
+        continue;
+      }
+      client.isAlive = false;
+      client.ping();
+    }
+  }, HEARTBEAT_MS);
+}
+
+/** Sliding one-minute window of join attempts per IP. */
+class JoinLimiter {
+  private attempts = new Map<string, number[]>();
+
+  allow(ip: string, now: number = Date.now()): boolean {
+    const windowStart = now - 60_000;
+    const list = (this.attempts.get(ip) ?? []).filter((t) => t > windowStart);
+    if (list.length >= JOINS_PER_MINUTE) {
+      this.attempts.set(ip, list);
+      return false;
+    }
+    list.push(now);
+    this.attempts.set(ip, list);
+    if (this.attempts.size > 10_000) this.attempts.clear();
+    return true;
+  }
+}
+
+function clientIp(req: IncomingMessage): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.length > 0) {
+    return forwarded.split(',')[0]?.trim() ?? 'unknown';
+  }
+  return req.socket.remoteAddress ?? 'unknown';
+}
+
+/** Browsers send Origin; when present it must match the host we serve. */
+function originAllowed(req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === req.headers.host;
+  } catch {
+    return false;
+  }
 }
 
 export function attachWebSockets(
@@ -30,13 +98,22 @@ export function attachWebSockets(
 ): WebSocketsHandle {
   const webWss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD });
   const collectorWss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD });
+  const limiter = new JoinLimiter();
+  const heartbeats = [startHeartbeat(webWss), startHeartbeat(collectorWss)];
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const path = new URL(req.url ?? '/', 'http://internal').pathname;
     if (path === '/ws/web') {
-      webWss.handleUpgrade(req, socket, head, (ws) => handleWeb(ws, deps));
+      if (!originAllowed(req)) return socket.destroy();
+      webWss.handleUpgrade(req, socket, head, (ws) => {
+        webWss.emit('connection', ws, req);
+        handleWeb(ws, clientIp(req), { rooms: deps.rooms, limiter });
+      });
     } else if (path === '/ws/collector') {
-      collectorWss.handleUpgrade(req, socket, head, (ws) => handleCollector(ws, deps));
+      collectorWss.handleUpgrade(req, socket, head, (ws) => {
+        collectorWss.emit('connection', ws, req);
+        handleCollector(ws, deps);
+      });
     } else {
       socket.destroy();
     }
@@ -44,6 +121,7 @@ export function attachWebSockets(
 
   return {
     async close() {
+      for (const timer of heartbeats) clearInterval(timer);
       for (const wss of [webWss, collectorWss]) {
         for (const client of wss.clients) client.terminate();
         wss.close();
@@ -63,7 +141,11 @@ function sendCollector(ws: WebSocket, message: ServerToCollector): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
 }
 
-function handleWeb(ws: WebSocket, deps: { rooms: RoomManager }): void {
+function handleWeb(
+  ws: WebSocket,
+  ip: string,
+  deps: { rooms: RoomManager; limiter: JoinLimiter },
+): void {
   let room: Room | null = null;
   let client: WebClient | null = null;
 
@@ -82,6 +164,10 @@ function handleWeb(ws: WebSocket, deps: { rooms: RoomManager }): void {
 
     if (msg.type === 'join') {
       if (client) return; // already joined
+      if (!deps.limiter.allow(ip)) {
+        sendWeb(ws, { type: 'error', code: 'bad-join', message: 'too many joins; slow down' });
+        return ws.close();
+      }
       const { rooms } = deps;
 
       if (msg.memberId && msg.memberSecret) {
@@ -91,6 +177,10 @@ function handleWeb(ws: WebSocket, deps: { rooms: RoomManager }): void {
           return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'unknown member' });
         }
         room = rooms.getOrCreate(member.roomCode);
+        if (!room) {
+          return sendWeb(ws, { type: 'error', code: 'server-error', message: 'room unavailable' });
+        }
+        rooms.touchMember(member.id);
         room.memberJoined(member);
         client = { ws, memberId: member.id, present: true };
         const world = room.addWebClient(client);
@@ -102,6 +192,13 @@ function handleWeb(ws: WebSocket, deps: { rooms: RoomManager }): void {
         return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'displayName required' });
       }
       room = rooms.getOrCreate(msg.roomCode);
+      if (!room) {
+        return sendWeb(ws, {
+          type: 'error',
+          code: 'bad-join',
+          message: 'this server is not accepting new rooms',
+        });
+      }
       const created = rooms.createMember(msg.roomCode, msg.displayName, msg.avatar);
       if (created === 'name-taken') {
         room = null;
@@ -110,6 +207,10 @@ function handleWeb(ws: WebSocket, deps: { rooms: RoomManager }): void {
           code: 'name-taken',
           message: `someone here is already called ${msg.displayName}`,
         });
+      }
+      if (created === 'room-full') {
+        room = null;
+        return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'this room is full' });
       }
       room.memberJoined(created);
       client = { ws, memberId: created.id, present: true };
@@ -153,6 +254,7 @@ function handleCollector(ws: WebSocket, deps: { db: Db; rooms: RoomManager }): v
     const msg = parsed.data;
 
     if (msg.type === 'hello') {
+      if (memberId) return; // duplicate hello on the same socket
       const row = deps.db
         .prepare('SELECT member_id FROM devices WHERE key = ?')
         .get(msg.deviceKey) as { member_id: string } | undefined;
@@ -166,6 +268,11 @@ function handleCollector(ws: WebSocket, deps: { db: Db; rooms: RoomManager }): v
         return ws.close();
       }
       room = deps.rooms.getOrCreate(member.roomCode);
+      if (!room) {
+        sendCollector(ws, { type: 'error', code: 'server-error', message: 'room unavailable' });
+        return ws.close();
+      }
+      deps.rooms.touchMember(member.id);
       room.memberJoined(member);
       memberId = member.id;
       room.attachCollector(member.id, ws);
@@ -179,7 +286,7 @@ function handleCollector(ws: WebSocket, deps: { db: Db; rooms: RoomManager }): v
     }
 
     if (msg.type === 'snapshot' && room && memberId) {
-      room.ingestSnapshot(memberId, msg, Date.now());
+      room.ingestSnapshot(memberId, ws, msg, Date.now());
     }
   });
 

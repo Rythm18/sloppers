@@ -23,8 +23,9 @@ at `http://localhost:8787/?room=demo`. To run against your own live agent
 sessions, click **Share agents** in the office and run the command with
 `node packages/collector/dist/cli.js share <code>`.
 
-Before opening a PR: `pnpm lint && pnpm typecheck && pnpm test`. CI runs the
-same three.
+Before opening a PR: `pnpm lint && pnpm build && pnpm test` — build first so
+the e2e suite exercises fresh output. CI runs lint (`biome ci`), build, and
+the full test suite.
 
 ## Writing a harness adapter
 

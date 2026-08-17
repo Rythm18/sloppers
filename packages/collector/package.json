@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "description": "Share what your coding agents are doing with your sloppers office",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rythm18/sloppers.git",
+    "directory": "packages/collector"
+  },
+  "homepage": "https://github.com/Rythm18/sloppers#readme",
   "type": "module",
   "bin": {
     "sloppers": "./dist/cli.js"

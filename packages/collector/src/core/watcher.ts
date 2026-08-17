@@ -57,7 +57,10 @@ export function watchSessions(opts: {
   seedWindowMs?: number;
 }): WatchHandle {
   const { adapters, tracker, onChange } = opts;
-  const roots = adapters.flatMap((a) => a.roots()).filter((r) => existsSync(r));
+  // Watch every root, including ones that don't exist yet — installing a
+  // second harness mid-run should just start working. (Seeding filters for
+  // existence itself.)
+  const roots = adapters.flatMap((a) => a.roots());
 
   if (seedTracker(adapters, tracker, opts.seedWindowMs)) onChange();
 

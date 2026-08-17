@@ -11,6 +11,7 @@ import type { RoomManager } from './rooms.js';
 
 interface Bot {
   memberId: string;
+  socket: WebSocket;
   harness: 'claude-code' | 'codex';
   title: string;
   project: string;
@@ -44,10 +45,12 @@ function fakeSocket(): WebSocket {
 
 export function startDemo(rooms: RoomManager, roomCode = 'demo'): () => void {
   const room = rooms.getOrCreate(roomCode);
+  if (!room) throw new Error('demo room unavailable (room cap reached)');
   const bots: Bot[] = [];
 
   for (const [i, cast] of CAST.entries()) {
     const created = rooms.createMember(roomCode, cast.name);
+    if (created === 'room-full') continue;
     const memberId =
       created === 'name-taken'
         ? // Server restarted onto an existing demo db; reuse the member.
@@ -55,9 +58,11 @@ export function startDemo(rooms: RoomManager, roomCode = 'demo'): () => void {
         : created.id;
     if (!memberId) continue;
     if (created !== 'name-taken') room.memberJoined(created);
-    room.attachCollector(memberId, fakeSocket());
+    const socket = fakeSocket();
+    room.attachCollector(memberId, socket);
     bots.push({
       memberId,
+      socket,
       harness: i % 2 === 0 ? 'claude-code' : 'codex',
       title: cast.title,
       project: cast.project,
@@ -110,7 +115,7 @@ export function startDemo(rooms: RoomManager, roomCode = 'demo'): () => void {
         bot.tokens.output += Math.floor(Math.random() * 800);
         bot.tokens.cacheRead += Math.floor(Math.random() * 30_000);
       }
-      room.ingestSnapshot(bot.memberId, snapshotFor(bot, now), now);
+      room.ingestSnapshot(bot.memberId, bot.socket, snapshotFor(bot, now), now);
     }
   }, 5_000);
 

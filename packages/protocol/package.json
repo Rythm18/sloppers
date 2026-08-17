@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Wire contract shared by the sloppers collector, server, and web app",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rythm18/sloppers.git",
+    "directory": "packages/protocol"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -126,6 +126,39 @@ describe('claude-code adapter', () => {
     expect(bookkeepingAfter.lastEventKind).toBe('agent-final');
   });
 
+  it('turn-end system and attachment entries do not mask a finished turn', () => {
+    const acc = ingest([
+      assistant({ requestId: 'r-sys' }),
+      { ...base, type: 'system', subtype: 'turn_duration', content: '12s' },
+      { ...base, type: 'attachment', attachment: {} },
+    ]);
+    expect(acc.lastEventKind).toBe('agent-final');
+  });
+
+  it('a resumed transcript does not re-count copied usage (cross-file dedup)', () => {
+    const fresh = createClaudeCodeAdapter(HOME);
+    const original = `${HOME}/.claude/projects/-home-dev-myapp/original.jsonl`;
+    const resumed = `${HOME}/.claude/projects/-home-dev-myapp/resumed.jsonl`;
+    const usage = { input_tokens: 100, output_tokens: 50 };
+
+    const accA = fresh.newAccumulator(original);
+    fresh.ingestLine(JSON.stringify(assistant({ requestId: 'shared-1', usage })), accA);
+    expect(accA.tokens).toMatchObject({ input: 100, output: 50 });
+
+    // Resume copies history (same requestIds) into a new file, then adds new work.
+    const accB = fresh.newAccumulator(resumed);
+    fresh.ingestLine(JSON.stringify(assistant({ requestId: 'shared-1', usage })), accB);
+    fresh.ingestLine(
+      JSON.stringify(
+        assistant({ requestId: 'new-2', usage: { input_tokens: 7, output_tokens: 3 } }),
+      ),
+      accB,
+    );
+    expect(accB.tokens).toMatchObject({ input: 7, output: 3 });
+    // The original file's totals are untouched.
+    expect(accA.tokens).toMatchObject({ input: 100, output: 50 });
+  });
+
   it('survives malformed lines', () => {
     const acc = adapter.newAccumulator(FILE);
     adapter.ingestLine('{"broken', acc);

@@ -132,8 +132,21 @@ export class Room {
   attachCollector(memberId: string, ws: WebSocket): boolean {
     const runtime = this.members.get(memberId);
     if (!runtime) return false;
-    // Latest collector wins; an old daemon on another machine gets dropped.
-    runtime.collector?.ws.close();
+    const previous = runtime.collector;
+    if (previous && previous.ws !== ws) {
+      // Latest collector wins. Tell the old daemon it was superseded so it
+      // stops instead of reconnecting and fighting over the slot forever.
+      if (previous.ws.readyState === previous.ws.OPEN) {
+        previous.ws.send(
+          JSON.stringify({
+            type: 'error',
+            code: 'superseded',
+            message: 'another machine paired for this member took over',
+          }),
+        );
+      }
+      previous.ws.close();
+    }
     runtime.collector = { ws, lastSeenAt: Date.now(), idleSeconds: undefined, sessions: [] };
     runtime.sharing = true;
     this.refreshPresence(memberId);
@@ -148,9 +161,11 @@ export class Room {
     }
   }
 
-  ingestSnapshot(memberId: string, snapshot: CollectorSnapshot, now: number): void {
+  ingestSnapshot(memberId: string, ws: WebSocket, snapshot: CollectorSnapshot, now: number): void {
     const runtime = this.members.get(memberId);
     if (!runtime?.collector) return;
+    // A superseded socket may still have snapshots in flight; ignore them.
+    if (runtime.collector.ws !== ws) return;
     runtime.collector.lastSeenAt = now;
     runtime.collector.idleSeconds = snapshot.machine.idleSeconds;
     runtime.collector.sessions = snapshot.sessions;
@@ -165,6 +180,16 @@ export class Room {
     if (!runtime) return;
     runtime.position = position;
     this.broadcast({ type: 'pos', memberId, position }, memberId);
+  }
+
+  /** Remove a member entirely (stale cleanup): sockets, runtime, broadcast. */
+  forgetMember(memberId: string): void {
+    const runtime = this.members.get(memberId);
+    if (!runtime) return;
+    for (const client of runtime.webClients) client.ws.close();
+    runtime.collector?.ws.close();
+    this.members.delete(memberId);
+    this.broadcast({ type: 'member-left', memberId });
   }
 
   /** Recompute time-driven presence (timeouts, idle drift) for everyone. */
