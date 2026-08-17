@@ -92,10 +92,12 @@ export function buildOffice(): OfficeMap {
   setFurniture(2, 16, TILE.coffee);
   setFurniture(2, 19, TILE.plant);
 
-  // A few more plants to breathe.
+  // A few more plants to breathe. Keep tiles 13–19 × 13–16 clear: that's
+  // the spawn envelope (SPAWN ± jitter in the server), and furniture there
+  // can pin a freshly-spawned avatar against a blocked tile.
   setFurniture(29, 2, TILE.plant);
   setFurniture(1, 2, TILE.plant);
-  setFurniture(14, 15, TILE.plant);
+  setFurniture(8, 14, TILE.plant);
 
   return { floor, furniture, blocked };
 }

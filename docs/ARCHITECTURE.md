@@ -113,8 +113,8 @@ leaderboard; history is retained for future dashboards.
 
 An adapter teaches the collector to read one harness's on-disk session
 format. The core owns everything hard — filesystem watching, byte-offset
-cursors (only appended bytes are ever re-parsed), debouncing, process
-liveness, state timers — so an adapter is a small, pure module:
+cursors (only appended bytes are ever re-parsed, UTF-8-safely), debouncing,
+state timers, snapshot projection — so an adapter is a pure per-line fold:
 
 ```ts
 interface HarnessAdapter {
@@ -122,13 +122,18 @@ interface HarnessAdapter {
   /** Directories to watch, e.g. ~/.claude/projects. May not exist. */
   roots(): string[];
   /** Is this path a session file this adapter understands? */
-  matches(path: string): boolean;
-  /** Parse appended bytes, fold into per-session accumulator. */
-  ingest(chunk: Buffer, acc: SessionAccumulator): void;
-  /** Project a finished accumulator into a normalized snapshot. */
-  snapshot(acc: SessionAccumulator, now: number): SessionSnapshot | null;
+  matches(filePath: string): boolean;
+  newAccumulator(filePath: string): SessionAccumulator;
+  /** Fold one complete transcript line into the accumulator. */
+  ingestLine(line: string, acc: SessionAccumulator): void;
 }
 ```
+
+The core projects accumulators into wire snapshots, deriving each session's
+state from the adapter's last-event classification plus elapsed quiet time.
+There is deliberately no process-liveness check — `ps` is unreliable in
+sandboxes — so sessions age out on recency alone: quiet 10 minutes reads as
+idle, quiet 30 drops the session from snapshots.
 
 Built-in adapters:
 

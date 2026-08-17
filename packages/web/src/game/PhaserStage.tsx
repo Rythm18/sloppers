@@ -30,6 +30,8 @@ export function PhaserStage() {
         },
         scene: [OfficeScene],
       });
+      // Debug handle for bug reports: inspect the live game from devtools.
+      (window as Window & { __sloppers?: Phaser.Game }).__sloppers = game;
     });
 
     return () => {
