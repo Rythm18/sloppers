@@ -52,11 +52,7 @@ export function App() {
   if (phase === 'join') {
     return (
       <div className="app">
-        <JoinScreen
-          initialRoom={room}
-          connecting={connection === 'connecting'}
-          onJoin={join}
-        />
+        <JoinScreen initialRoom={room} connecting={connection === 'connecting'} onJoin={join} />
       </div>
     );
   }

@@ -39,7 +39,11 @@ export class RoomManager {
     return this.rooms.get(code);
   }
 
-  createMember(roomCode: string, displayName: string, avatar?: string): MemberRecord | 'name-taken' {
+  createMember(
+    roomCode: string,
+    displayName: string,
+    avatar?: string,
+  ): MemberRecord | 'name-taken' {
     const record: MemberRecord = {
       id: memberId(),
       roomCode,

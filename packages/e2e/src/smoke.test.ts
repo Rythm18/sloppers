@@ -1,15 +1,11 @@
 import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  serverToWebSchema,
-  type ServerToWeb,
-  type WebWorld,
-} from '@sloppers/protocol';
+import { type ServerToWeb, serverToWebSchema, type WebWorld } from '@sloppers/protocol';
 import { createSloppersServer, type SloppersServer } from '@sloppers/server';
 import { newConfig, redeemPairingCode, saveConfig, startDaemon } from 'sloppers';
-import WebSocket from 'ws';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import WebSocket from 'ws';
 
 /**
  * The whole product, headless: synthetic Claude Code and Codex session
@@ -192,9 +188,7 @@ describe('end-to-end smoke', () => {
 
     daemon = startDaemon({ collectorVersion: 'e2e', home, log: () => {} });
 
-    const presence = await probe.next(
-      (m) => m.type === 'presence' && m.sessions.length === 2,
-    );
+    const presence = await probe.next((m) => m.type === 'presence' && m.sessions.length === 2);
     if (presence.type !== 'presence') throw new Error('unreachable');
 
     const claude = presence.sessions.find((s) => s.harness === 'claude-code');

@@ -1,5 +1,5 @@
 import { AVATAR_IDS } from '@sloppers/protocol';
-import { useState, type FormEvent } from 'react';
+import { type FormEvent, useState } from 'react';
 import { useStore } from '../store.js';
 import { AvatarThumb } from './AvatarThumb.js';
 
@@ -71,13 +71,12 @@ export function JoinScreen({
 
         <div className="join-field">
           <span className="join-label">Avatar</span>
-          <div className="avatar-grid" role="radiogroup" aria-label="avatar">
+          <fieldset className="avatar-grid" aria-label="avatar">
             {AVATAR_IDS.map((id) => (
               <button
                 key={id}
                 type="button"
-                role="radio"
-                aria-checked={avatar === id}
+                aria-pressed={avatar === id}
                 aria-label={id}
                 title={id}
                 className={`avatar-choice${avatar === id ? ' selected' : ''}`}
@@ -86,7 +85,7 @@ export function JoinScreen({
                 <AvatarThumb avatar={id} />
               </button>
             ))}
-          </div>
+          </fieldset>
         </div>
 
         {joinError ? <p className="join-error">{joinError}</p> : null}

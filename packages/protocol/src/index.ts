@@ -8,6 +8,6 @@
  */
 export const PROTOCOL_VERSION = 1;
 
-export * from './core.js';
 export * from './collector.js';
+export * from './core.js';
 export * from './web.js';

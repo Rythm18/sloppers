@@ -8,7 +8,7 @@ import {
 import Phaser from 'phaser';
 import { useStore } from '../store.js';
 import { bridge, positionAnchor } from './bridge.js';
-import { buildOffice, isBlocked, WORLD_H, WORLD_W, type OfficeMap } from './map.js';
+import { buildOffice, isBlocked, type OfficeMap, WORLD_H, WORLD_W } from './map.js';
 import { TILE_SIZE } from './tiles.gen.js';
 
 const SPEED = 110;
@@ -40,13 +40,18 @@ class AvatarActor {
   private avatar: string;
 
   constructor(
-    private scene: Phaser.Scene,
+    scene: Phaser.Scene,
     public view: MemberView,
   ) {
     this.avatar = view.avatar;
     this.target = view.position;
     this.sprite = scene.add
-      .sprite(view.position.x, view.position.y, `char-${view.avatar}`, DIR_ROW[view.position.dir] * 4)
+      .sprite(
+        view.position.x,
+        view.position.y,
+        `char-${view.avatar}`,
+        DIR_ROW[view.position.dir] * 4,
+      )
       .setOrigin(0.5, 0.85);
     this.sprite.setInteractive({ useHandCursor: true });
     this.sprite.on('pointerdown', () => bridge.emit('avatar-click', view.id));
@@ -123,7 +128,10 @@ export class OfficeScene extends Phaser.Scene {
   private office!: OfficeMap;
   private player!: AvatarActor;
   private actors = new Map<string, AvatarActor>();
-  private keys!: Record<'up' | 'down' | 'left' | 'right' | 'w' | 'a' | 's' | 'd', Phaser.Input.Keyboard.Key>;
+  private keys!: Record<
+    'up' | 'down' | 'left' | 'right' | 'w' | 'a' | 's' | 'd',
+    Phaser.Input.Keyboard.Key
+  >;
   private lastSent: Position | null = null;
   private nearbyAt = 0;
   private unsubscribes: (() => void)[] = [];
@@ -227,16 +235,14 @@ export class OfficeScene extends Phaser.Scene {
     const floorLayer = map.createBlankLayer('floor', tileset);
     const stuffLayer = map.createBlankLayer('stuff', tileset);
     if (!floorLayer || !stuffLayer) throw new Error('tilemap layers failed');
-    this.office.floor.forEach((row, y) =>
-      row.forEach((tile, x) => {
-        floorLayer.putTileAt(tile, x, y);
-      }),
-    );
-    this.office.furniture.forEach((row, y) =>
-      row.forEach((tile, x) => {
+    for (const [y, row] of this.office.floor.entries()) {
+      for (const [x, tile] of row.entries()) floorLayer.putTileAt(tile, x, y);
+    }
+    for (const [y, row] of this.office.furniture.entries()) {
+      for (const [x, tile] of row.entries()) {
         if (tile >= 0) stuffLayer.putTileAt(tile, x, y);
-      }),
-    );
+      }
+    }
     floorLayer.setDepth(-2);
     stuffLayer.setDepth(-1);
   }
@@ -338,7 +344,10 @@ export class OfficeScene extends Phaser.Scene {
       const x = (actor.sprite.x - cam.worldView.x) * zoom;
       const y = (actor.sprite.y - HEAD_OFFSET - cam.worldView.y) * zoom;
       const visible =
-        x > -200 && x < this.scale.gameSize.width + 200 && y > -120 && y < this.scale.gameSize.height + 120;
+        x > -200 &&
+        x < this.scale.gameSize.width + 200 &&
+        y > -120 &&
+        y < this.scale.gameSize.height + 120;
       positionAnchor(id, x, y, visible);
     };
     for (const [id, actor] of this.actors) place(id, actor);

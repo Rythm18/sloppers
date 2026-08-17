@@ -17,10 +17,14 @@ export function HUD() {
       </div>
 
       <div className="hud-actions">
-        <button className="btn btn-quiet" onClick={() => setLeaderboardOpen(!leaderboardOpen)}>
+        <button
+          type="button"
+          className="btn btn-quiet"
+          onClick={() => setLeaderboardOpen(!leaderboardOpen)}
+        >
           {leaderboardOpen ? 'Hide board' : 'Board'}
         </button>
-        <button className="btn" onClick={() => setShareOpen(true)}>
+        <button type="button" className="btn" onClick={() => setShareOpen(true)}>
           {sharing ? 'Sharing on' : 'Share agents'}
         </button>
       </div>

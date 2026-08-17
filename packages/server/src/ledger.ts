@@ -1,7 +1,7 @@
 import {
   addTokens,
-  emptyTokens,
   type DailyStats,
+  emptyTokens,
   type SessionSnapshot,
   type TokenTotals,
 } from '@sloppers/protocol';

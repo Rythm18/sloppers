@@ -1,11 +1,11 @@
 import {
-  serverToWebSchema,
   type PairRedeemResponse,
   type ServerToWeb,
+  serverToWebSchema,
   type WebWorld,
 } from '@sloppers/protocol';
-import WebSocket from 'ws';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import WebSocket from 'ws';
 import { createSloppersServer, type SloppersServer } from './index.js';
 
 /**

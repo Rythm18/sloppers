@@ -26,9 +26,7 @@ export interface OfficeMap {
 export function buildOffice(): OfficeMap {
   const floor = grid(0);
   const furniture = grid(EMPTY);
-  const blocked = Array.from({ length: MAP_H }, () =>
-    Array.from({ length: MAP_W }, () => false),
-  );
+  const blocked = Array.from({ length: MAP_H }, () => Array.from({ length: MAP_W }, () => false));
 
   const setFurniture = (x: number, y: number, tile: number, solid = true) => {
     const row = furniture[y];

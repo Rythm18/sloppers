@@ -2,8 +2,8 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { SessionTracker } from './tracker.js';
 import { EXPIRE_MS } from './state.js';
+import { SessionTracker } from './tracker.js';
 import type { HarnessAdapter } from './types.js';
 import { newAccumulator } from './types.js';
 

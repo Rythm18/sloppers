@@ -2,11 +2,11 @@ import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import {
   collectorToServerSchema,
-  webToServerSchema,
   type ServerToCollector,
   type ServerToWeb,
+  webToServerSchema,
 } from '@sloppers/protocol';
-import { WebSocketServer, type WebSocket } from 'ws';
+import { type WebSocket, WebSocketServer } from 'ws';
 import type { Db } from './db.js';
 import type { Room, WebClient } from './room.js';
 import type { RoomManager } from './rooms.js';

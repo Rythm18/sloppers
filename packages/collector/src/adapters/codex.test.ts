@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { createCodexAdapter } from './codex.js';
 import type { SessionAccumulator } from '../core/types.js';
+import { createCodexAdapter } from './codex.js';
 
 const HOME = '/home/dev';
 const adapter = createCodexAdapter(HOME);

@@ -70,10 +70,7 @@ export function createCodexAdapter(home: string = homedir()): HarnessAdapter {
         case 'event_msg': {
           const kind = payload.type;
           if (kind === 'token_count') {
-            const info = payload.info as
-              | { total_token_usage?: CodexTokenUsage }
-              | null
-              | undefined;
+            const info = payload.info as { total_token_usage?: CodexTokenUsage } | null | undefined;
             const usage = info?.total_token_usage;
             if (usage) {
               const cached = usage.cached_input_tokens ?? 0;

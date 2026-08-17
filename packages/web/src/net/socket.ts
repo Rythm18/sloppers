@@ -1,4 +1,4 @@
-import { serverToWebSchema, type Position, type WebToServer } from '@sloppers/protocol';
+import { type Position, serverToWebSchema, type WebToServer } from '@sloppers/protocol';
 import { bridge } from '../game/bridge.js';
 import { useStore } from '../store.js';
 

@@ -1,4 +1,4 @@
-import { pairRedeemResponseSchema, type PairRedeemResponse } from '@sloppers/protocol';
+import { type PairRedeemResponse, pairRedeemResponseSchema } from '@sloppers/protocol';
 
 /**
  * Share targets come from the web app as `CODE@host[:port]`, one paste-able
@@ -9,9 +9,7 @@ import { pairRedeemResponseSchema, type PairRedeemResponse } from '@sloppers/pro
 export function parseShareTarget(arg: string): { code: string; httpUrl: string } {
   const at = arg.indexOf('@');
   if (at <= 0 || at === arg.length - 1) {
-    throw new Error(
-      `Expected a share code like ABC-123@office.example.com, got: ${arg}`,
-    );
+    throw new Error(`Expected a share code like ABC-123@office.example.com, got: ${arg}`);
   }
   const code = arg.slice(0, at);
   let host = arg.slice(at + 1).replace(/\/+$/, '');

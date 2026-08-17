@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { createClaudeCodeAdapter } from './claude-code.js';
 import type { SessionAccumulator } from '../core/types.js';
+import { createClaudeCodeAdapter } from './claude-code.js';
 
 const HOME = '/home/dev';
 const adapter = createClaudeCodeAdapter(HOME);

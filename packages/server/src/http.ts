@@ -53,9 +53,9 @@ export function createApp(deps: { db: Db; rooms: RoomManager; webDist?: string }
     const body = pairRedeemRequestSchema.safeParse(await c.req.json().catch(() => null));
     if (!body.success) return c.json({ error: 'bad request' }, 400);
     const code = body.data.pairingCode.toUpperCase();
-    const row = db
-      .prepare('SELECT member_id, expires_at FROM pairings WHERE code = ?')
-      .get(code) as { member_id: string; expires_at: number } | undefined;
+    const row = db.prepare('SELECT member_id, expires_at FROM pairings WHERE code = ?').get(code) as
+      | { member_id: string; expires_at: number }
+      | undefined;
     if (!row) return c.json({ error: 'unknown code' }, 404);
     db.prepare('DELETE FROM pairings WHERE code = ?').run(code);
     if (row.expires_at < Date.now()) return c.json({ error: 'expired code' }, 410);
@@ -88,7 +88,11 @@ export function createApp(deps: { db: Db; rooms: RoomManager; webDist?: string }
     app.get('*', (c) => {
       const requested = normalize(new URL(c.req.url).pathname).replace(/^(\.\.[/\\])+/, '');
       let filePath = join(webDist, requested);
-      if (!filePath.startsWith(webDist) || !existsSync(filePath) || statSync(filePath).isDirectory()) {
+      if (
+        !filePath.startsWith(webDist) ||
+        !existsSync(filePath) ||
+        statSync(filePath).isDirectory()
+      ) {
         filePath = join(webDist, 'index.html');
       }
       const type = MIME[extname(filePath)] ?? 'application/octet-stream';

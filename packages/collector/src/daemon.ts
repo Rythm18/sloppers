@@ -1,11 +1,11 @@
-import { watch as watchFs, type FSWatcher as NodeFsWatcher } from 'node:fs';
+import { type FSWatcher as NodeFsWatcher, watch as watchFs } from 'node:fs';
 import type { CollectorSnapshot } from '@sloppers/protocol';
 import { builtinAdapters } from './adapters/index.js';
 import { type CollectorConfig, configDir, loadConfig } from './config.js';
 import { machineIdleSeconds } from './core/idle.js';
 import { SessionTracker } from './core/tracker.js';
 import { applyVisibility } from './core/visibility.js';
-import { watchSessions, type WatchHandle } from './core/watcher.js';
+import { type WatchHandle, watchSessions } from './core/watcher.js';
 import { CollectorClient } from './net/client.js';
 
 const DEBOUNCE_MS = 1000;

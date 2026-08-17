@@ -89,9 +89,7 @@ export class CollectorClient {
       const msg = result.data;
       if (msg.type === 'hello-ok') {
         this.ready = true;
-        this.opts.log(
-          `connected: sharing as ${msg.displayName} in room ${msg.roomCode}`,
-        );
+        this.opts.log(`connected: sharing as ${msg.displayName} in room ${msg.roomCode}`);
         this.flush();
       } else if (msg.type === 'error' && msg.code === 'unknown-device') {
         this.opts.log('server does not recognize this device — run `sloppers share` again');

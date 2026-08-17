@@ -1,6 +1,6 @@
 import type { Server } from 'node:http';
 import { serve } from '@hono/node-server';
-import { openDb, type Db } from './db.js';
+import { type Db, openDb } from './db.js';
 import { startDemo } from './demo.js';
 import { createApp } from './http.js';
 import { RoomManager } from './rooms.js';

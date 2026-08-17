@@ -20,9 +20,9 @@ const base = {
 describe('derivePresence', () => {
   it('offline when nothing is connected', () => {
     expect(derivePresence({ ...base, collectorSeenAt: undefined })).toBe('offline');
-    expect(
-      derivePresence({ ...base, collectorSeenAt: NOW - COLLECTOR_TIMEOUT_MS - 1 }),
-    ).toBe('offline');
+    expect(derivePresence({ ...base, collectorSeenAt: NOW - COLLECTOR_TIMEOUT_MS - 1 })).toBe(
+      'offline',
+    );
   });
 
   it('a blocked agent outranks everything', () => {
@@ -35,15 +35,15 @@ describe('derivePresence', () => {
     expect(derivePresence({ ...base, browserPresent: true, sessions: [s('working')] })).toBe(
       'active',
     );
-    expect(
-      derivePresence({ ...base, machineIdleSeconds: 30, sessions: [s('working')] }),
-    ).toBe('active');
+    expect(derivePresence({ ...base, machineIdleSeconds: 30, sessions: [s('working')] })).toBe(
+      'active',
+    );
   });
 
   it('grinding when agents work but the human is away', () => {
-    expect(
-      derivePresence({ ...base, machineIdleSeconds: 900, sessions: [s('working')] }),
-    ).toBe('grinding');
+    expect(derivePresence({ ...base, machineIdleSeconds: 900, sessions: [s('working')] })).toBe(
+      'grinding',
+    );
     // No idle signal and no browser → assume away.
     expect(derivePresence({ ...base, sessions: [s('working')] })).toBe('grinding');
   });

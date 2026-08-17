@@ -42,6 +42,15 @@ export function ShareModal() {
     return () => clearInterval(timer);
   }, [open, code, expiresAt]);
 
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShareOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, setShareOpen]);
+
   if (!open) return null;
 
   const command = code ? `npx sloppers@latest share ${code}@${location.host}` : null;
@@ -53,14 +62,19 @@ export function ShareModal() {
   };
 
   return (
-    <div className="modal-scrim" onClick={() => setShareOpen(false)}>
-      <div
-        className="share-modal panel"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-label="share your agents"
-      >
-        <span className="panel-title">Share your agents</span>
+    <div className="modal-scrim">
+      <div className="share-modal panel" role="dialog" aria-label="share your agents">
+        <div className="share-modal-head">
+          <span className="panel-title">Share your agents</span>
+          <button
+            type="button"
+            className="close"
+            onClick={() => setShareOpen(false)}
+            aria-label="close"
+          >
+            ×
+          </button>
+        </div>
         <div className="share-steps">
           <span>Run this once on the machine where your agents live:</span>
         </div>
@@ -75,11 +89,11 @@ export function ShareModal() {
         )}
 
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <button className="btn" onClick={copy} disabled={!command}>
+          <button type="button" className="btn" onClick={copy} disabled={!command}>
             {copied ? 'Copied' : 'Copy command'}
           </button>
           {code && remaining === 0 ? (
-            <button className="btn btn-quiet" onClick={() => void mint()}>
+            <button type="button" className="btn btn-quiet" onClick={() => void mint()}>
               New code
             </button>
           ) : null}
@@ -92,8 +106,8 @@ export function ShareModal() {
 
         <p className="share-privacy">
           The collector reads your local Claude Code and Codex session files and sends only derived
-          status — project, model, state, token counts. Never prompts, code, or file contents.
-          Tune it anytime: <code>sloppers hide tokens</code> · <code>sloppers pause</code>.
+          status — project, model, state, token counts. Never prompts, code, or file contents. Tune
+          it anytime: <code>sloppers hide tokens</code> · <code>sloppers pause</code>.
         </p>
       </div>
     </div>

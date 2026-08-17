@@ -225,10 +225,31 @@ for (const id of Object.keys(CAST)) {
   const sheet = new Sheet(CHAR_W * 4, CHAR_H * 4);
   const legend = legendFor(id);
   const rows = [
-    { row: 0, head: HEAD_DOWN, body: BODY_FRONT, legs: [LEGS_STAND, LEGS_STEP_A, LEGS_STAND, LEGS_STEP_B] },
-    { row: 1, head: HEAD_SIDE, body: BODY_SIDE, legs: [LEGS_SIDE_STAND, LEGS_SIDE_A, LEGS_SIDE_STAND, LEGS_SIDE_B], mirror: true },
-    { row: 2, head: HEAD_SIDE, body: BODY_SIDE, legs: [LEGS_SIDE_STAND, LEGS_SIDE_A, LEGS_SIDE_STAND, LEGS_SIDE_B] },
-    { row: 3, head: HEAD_UP, body: BODY_FRONT, legs: [LEGS_STAND, LEGS_STEP_A, LEGS_STAND, LEGS_STEP_B] },
+    {
+      row: 0,
+      head: HEAD_DOWN,
+      body: BODY_FRONT,
+      legs: [LEGS_STAND, LEGS_STEP_A, LEGS_STAND, LEGS_STEP_B],
+    },
+    {
+      row: 1,
+      head: HEAD_SIDE,
+      body: BODY_SIDE,
+      legs: [LEGS_SIDE_STAND, LEGS_SIDE_A, LEGS_SIDE_STAND, LEGS_SIDE_B],
+      mirror: true,
+    },
+    {
+      row: 2,
+      head: HEAD_SIDE,
+      body: BODY_SIDE,
+      legs: [LEGS_SIDE_STAND, LEGS_SIDE_A, LEGS_SIDE_STAND, LEGS_SIDE_B],
+    },
+    {
+      row: 3,
+      head: HEAD_UP,
+      body: BODY_FRONT,
+      legs: [LEGS_STAND, LEGS_STEP_A, LEGS_STAND, LEGS_STEP_B],
+    },
   ];
   for (const spec of rows) {
     spec.legs.forEach((legGrid, frame) => {
@@ -423,7 +444,9 @@ const tileDrawers = {
   },
 };
 
-TILE_NAMES.forEach((name, i) => tileDrawers[name](tiles, i * T));
+TILE_NAMES.forEach((name, i) => {
+  tileDrawers[name](tiles, i * T);
+});
 tiles.write('tiles.png');
 
 const tileIndex = Object.fromEntries(TILE_NAMES.map((name, i) => [name, i]));
@@ -445,4 +468,6 @@ icon.rect(6, 12, 4, 1, hex('#8a80a5'));
 icon.rect(5, 13, 6, 1, hex('#8a80a5'));
 icon.write('favicon.png');
 
-console.log(`assets: ${Object.keys(CAST).length} characters, ${TILE_NAMES.length} tiles → public/assets/`);
+console.log(
+  `assets: ${Object.keys(CAST).length} characters, ${TILE_NAMES.length} tiles → public/assets/`,
+);

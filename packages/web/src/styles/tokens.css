@@ -27,8 +27,8 @@
   --p-afk: #8a80a5;
   --p-offline: #4a4458;
 
-  --font-display: 'Silkscreen', monospace;
-  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --font-display: "Silkscreen", monospace;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 
   --shadow-hard: 4px 4px 0 rgba(10, 6, 18, 0.55);
   --shadow-soft: 2px 2px 0 rgba(10, 6, 18, 0.45);

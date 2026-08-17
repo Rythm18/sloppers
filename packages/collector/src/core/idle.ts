@@ -10,16 +10,11 @@ import { execFile } from 'node:child_process';
 export function machineIdleSeconds(): Promise<number | undefined> {
   if (process.platform !== 'darwin') return Promise.resolve(undefined);
   return new Promise((resolve) => {
-    execFile(
-      'ioreg',
-      ['-c', 'IOHIDSystem', '-d', '4'],
-      { timeout: 5000 },
-      (error, stdout) => {
-        if (error) return resolve(undefined);
-        const match = /"HIDIdleTime"\s*=\s*(\d+)/.exec(stdout);
-        if (!match?.[1]) return resolve(undefined);
-        resolve(Number(match[1]) / 1e9);
-      },
-    );
+    execFile('ioreg', ['-c', 'IOHIDSystem', '-d', '4'], { timeout: 5000 }, (error, stdout) => {
+      if (error) return resolve(undefined);
+      const match = /"HIDIdleTime"\s*=\s*(\d+)/.exec(stdout);
+      if (!match?.[1]) return resolve(undefined);
+      resolve(Number(match[1]) / 1e9);
+    });
   });
 }

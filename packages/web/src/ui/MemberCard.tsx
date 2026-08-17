@@ -33,7 +33,7 @@ export function MemberCard() {
           <i className="presence-dot" />
           {PRESENCE_LABEL[member.presence]}
         </span>
-        <button className="close" onClick={() => setFocused(null)} aria-label="close">
+        <button type="button" className="close" onClick={() => setFocused(null)} aria-label="close">
           ×
         </button>
       </header>

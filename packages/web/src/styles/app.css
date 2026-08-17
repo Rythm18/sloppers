@@ -159,6 +159,10 @@ button {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
   gap: 8px;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
 }
 
 .avatar-choice {
@@ -290,7 +294,7 @@ button {
 }
 
 .bubble::after {
-  content: '';
+  content: "";
   position: absolute;
   left: 50%;
   bottom: -8px;
@@ -454,10 +458,6 @@ button {
   text-transform: uppercase;
 }
 
-.member-card-head .presence-chip {
-  white-space: nowrap;
-}
-
 .member-card-head .close {
   background: none;
   border: none;
@@ -472,6 +472,10 @@ button {
   gap: 6px;
   font-size: 11px;
   color: var(--presence, var(--wire));
+}
+
+.member-card-head .presence-chip {
+  white-space: nowrap;
 }
 
 .presence-dot {
@@ -594,6 +598,20 @@ button {
   padding: 22px;
   display: grid;
   gap: 14px;
+}
+
+.share-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.share-modal-head .close {
+  background: none;
+  border: none;
+  color: var(--wire);
+  font-size: 16px;
+  padding: 2px 6px;
 }
 
 .share-steps {
