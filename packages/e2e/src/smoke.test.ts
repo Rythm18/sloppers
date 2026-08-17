@@ -91,11 +91,20 @@ class WebProbe {
   private ws: WebSocket;
   private queue: ServerToWeb[] = [];
   private waiters: ((msg: ServerToWeb) => void)[] = [];
+  /** Everything seen, for timeout diagnostics on slow CI runners. */
+  private seen: string[] = [];
 
   constructor(port: number) {
     this.ws = new WebSocket(`ws://127.0.0.1:${port}/ws/web`);
     this.ws.on('message', (data) => {
       const msg = serverToWebSchema.parse(JSON.parse(String(data)));
+      this.seen.push(
+        msg.type === 'presence'
+          ? `presence(${msg.presence},${msg.sessions.length} sessions)`
+          : msg.type === 'error'
+            ? `error(${msg.code}:${msg.message})`
+            : msg.type,
+      );
       const waiter = this.waiters.shift();
       if (waiter) waiter(msg);
       else this.queue.push(msg);
@@ -119,7 +128,10 @@ class WebProbe {
         queued ??
         (await new Promise<ServerToWeb>((resolve, reject) => {
           const timer = setTimeout(
-            () => reject(new Error('timed out waiting for message')),
+            () =>
+              reject(
+                new Error(`timed out waiting for message; saw: [${this.seen.join(', ')}]`),
+              ),
             Math.max(1, deadline - Date.now()),
           );
           this.waiters.push((m) => {
