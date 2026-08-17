@@ -153,7 +153,9 @@ async function relink(): Promise<void> {
     );
   }
   const minted = relinkMintResponseSchema.parse(await res.json());
-  const url = `${config.server.httpUrl}/?room=${encodeURIComponent(minted.roomCode)}&relink=${minted.token}`;
+  // The token rides in the URL fragment: fragments never reach the server,
+  // so it stays out of access logs and Referer headers.
+  const url = `${config.server.httpUrl}/?room=${encodeURIComponent(minted.roomCode)}#relink=${minted.token}`;
   console.log(`${pc.green('✓')} open this link in the browser you want to sign in:`);
   console.log(`  ${pc.cyan(url)}`);
   console.log(pc.dim('  works once, expires in 10 minutes'));

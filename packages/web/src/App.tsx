@@ -38,7 +38,10 @@ export function App() {
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const room = params.get('room');
-    const relink = params.get('relink');
+    // Relink tokens travel in the fragment so they never hit server logs;
+    // the query param is accepted as a fallback for hand-typed links.
+    const relink =
+      new URLSearchParams(location.hash.replace(/^#/, '')).get('relink') ?? params.get('relink');
 
     if (relink) {
       setResuming(true);
