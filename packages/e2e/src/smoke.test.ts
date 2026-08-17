@@ -154,7 +154,9 @@ describe('end-to-end smoke', () => {
     await server.close();
   });
 
-  it('synthetic sessions flow from disk to a joined browser', async () => {
+  // Generous timeout: CI runners take a while through daemon debounce +
+  // watcher startup + real websocket round-trips.
+  it('synthetic sessions flow from disk to a joined browser', { timeout: 30_000 }, async () => {
     const claudeFile = writeClaudeSession(home);
     writeCodexSession(home);
 
