@@ -129,9 +129,7 @@ class WebProbe {
         (await new Promise<ServerToWeb>((resolve, reject) => {
           const timer = setTimeout(
             () =>
-              reject(
-                new Error(`timed out waiting for message; saw: [${this.seen.join(', ')}]`),
-              ),
+              reject(new Error(`timed out waiting for message; saw: [${this.seen.join(', ')}]`)),
             Math.max(1, deadline - Date.now()),
           );
           this.waiters.push((m) => {
