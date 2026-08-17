@@ -8,11 +8,11 @@
   },
   "scripts": {
     "build": "pnpm -r build",
-    "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test",
+    "typecheck": "pnpm --filter @sloppers/protocol build && pnpm -r typecheck",
+    "test": "pnpm --filter @sloppers/protocol build && pnpm -r test",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "dev": "pnpm --filter @sloppers/server dev"
+    "demo": "pnpm build && node packages/server/dist/main.js --demo"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.13",

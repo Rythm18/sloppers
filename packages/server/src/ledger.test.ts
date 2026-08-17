@@ -66,6 +66,22 @@ describe('TokenLedger', () => {
     expect(ledger.todayFor('m1', day2).tokens.input).toBe(200);
   });
 
+  it("does not dump an old session's history into today on first sight", () => {
+    const oldSession: SessionSnapshot = {
+      ...session('ancient', { input: 5_000_000, output: 900_000 }),
+      startedAt: new Date('2026-07-01T09:00:00').getTime(),
+    };
+    ledger.ingest('m1', [oldSession], T0);
+    expect(ledger.todayFor('m1', T0).tokens.input).toBe(0);
+    // ...but growth from here on counts.
+    const grown: SessionSnapshot = {
+      ...oldSession,
+      tokens: { input: 5_000_400, output: 900_000, cacheRead: 0, cacheWrite: 0 },
+    };
+    ledger.ingest('m1', [grown], T0 + 1000);
+    expect(ledger.todayFor('m1', T0).tokens.input).toBe(400);
+  });
+
   it('counts sessions once, on first sight', () => {
     ledger.ingest('m1', [session('s1', { input: 1 })], T0);
     ledger.ingest('m1', [session('s1', { input: 2 }), session('s2', { input: 1 })], T0 + 1000);

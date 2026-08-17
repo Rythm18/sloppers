@@ -1,0 +1,36 @@
+/*
+ * sloppers design tokens — "pixel office at dusk".
+ * The UI is game furniture, not a dashboard floating above one: chunky
+ * 2px borders, hard 4px shadows, stepped (not eased) motion, and a
+ * terminal voice — Silkscreen for display, IBM Plex Mono for everything.
+ */
+:root {
+  /* ground + surfaces */
+  --ink: #1a1423;
+  --dusk: #2b2438;
+  --dusk-raised: #37324a;
+  --panel-line: #4a4458;
+
+  /* text */
+  --parchment: #f3ebdd;
+  --wire: #8a80a5;
+
+  /* accents */
+  --lamp: #ffb454;
+  --crt: #7de0a6;
+  --alert: #ff6b81;
+
+  /* presence */
+  --p-active: var(--crt);
+  --p-grinding: var(--lamp);
+  --p-attention: var(--alert);
+  --p-afk: #8a80a5;
+  --p-offline: #4a4458;
+
+  --font-display: 'Silkscreen', monospace;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  --shadow-hard: 4px 4px 0 rgba(10, 6, 18, 0.55);
+  --shadow-soft: 2px 2px 0 rgba(10, 6, 18, 0.45);
+  --border-px: 2px;
+}

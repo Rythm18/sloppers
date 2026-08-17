@@ -58,6 +58,7 @@ export class TokenLedger {
         sessions_run = sessions_run + excluded.sessions_run
     `);
 
+    const startOfToday = new Date(now).setHours(0, 0, 0, 0);
     const tx = this.db.transaction(() => {
       for (const session of sessions) {
         if (!session.tokens) continue;
@@ -65,6 +66,9 @@ export class TokenLedger {
           | { input: number; output: number; cache_read: number; cache_write: number }
           | undefined;
         const isNewSession = row === undefined;
+        // A session first seen now but started on an earlier day carries
+        // history that doesn't belong to today: start its watermark at the
+        // current totals so only growth from here counts.
         const watermark: TokenTotals = row
           ? {
               input: row.input,
@@ -72,7 +76,9 @@ export class TokenLedger {
               cacheRead: row.cache_read,
               cacheWrite: row.cache_write,
             }
-          : emptyTokens();
+          : isNewSession && session.startedAt < startOfToday
+            ? { ...session.tokens }
+            : emptyTokens();
         const delta: TokenTotals = {
           input: Math.max(0, session.tokens.input - watermark.input),
           output: Math.max(0, session.tokens.output - watermark.output),

@@ -15,7 +15,8 @@ import type { TokenLedger } from './ledger.js';
 import { derivePresence } from './presence.js';
 
 const LEADERBOARD_DEBOUNCE_MS = 2000;
-const SPAWN = { x: 496, y: 528 };
+/** Open floor near the centre of the default 512×352 office map. */
+const SPAWN = { x: 256, y: 240 };
 
 export interface WebClient {
   ws: WebSocket;
@@ -81,8 +82,8 @@ export class Room {
         avatar: row.avatar,
         sharing: shared !== undefined,
         position: {
-          x: SPAWN.x + (Math.random() - 0.5) * 128,
-          y: SPAWN.y + (Math.random() - 0.5) * 64,
+          x: SPAWN.x + (Math.random() - 0.5) * 96,
+          y: SPAWN.y + (Math.random() - 0.5) * 48,
           dir: 'down',
           moving: false,
         },

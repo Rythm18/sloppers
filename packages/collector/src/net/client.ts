@@ -97,6 +97,8 @@ export class CollectorClient {
         this.opts.log('server does not recognize this device — run `sloppers share` again');
         this.stop();
         this.opts.onUnknownDevice?.();
+      } else if (msg.type === 'error') {
+        this.opts.log(`server rejected a message (${msg.code}): ${msg.message}`);
       }
     });
 

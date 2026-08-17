@@ -77,12 +77,13 @@ export class SessionTracker {
         this.entries.delete(filePath);
         continue;
       }
+      // File mtimes carry fractional milliseconds; the wire wants integers.
       const snapshot: SessionSnapshot = {
         id: acc.sessionId,
         harness: entry.adapter.id,
         state: deriveSessionState(acc.lastEventKind, quietMs),
-        startedAt: acc.startedAtMs ?? entry.lastActivityMs,
-        lastActivityAt: entry.lastActivityMs,
+        startedAt: Math.round(acc.startedAtMs ?? entry.lastActivityMs),
+        lastActivityAt: Math.round(entry.lastActivityMs),
       };
       if (acc.title) snapshot.title = acc.title;
       if (acc.cwd) snapshot.project = basename(acc.cwd);

@@ -82,6 +82,16 @@ describe('SessionTracker', () => {
     expect(tracker.snapshot(1000 + EXPIRE_MS + 1)).toHaveLength(0);
   });
 
+  it('emits integer timestamps even from fractional file mtimes', () => {
+    const { root, tracker } = setup();
+    const file = join(root, 'a.log');
+    writeFileSync(file, 's1 work\n');
+    tracker.ingestFile(file, 5000.789);
+    const [snap] = tracker.snapshot(6000);
+    expect(Number.isInteger(snap?.startedAt)).toBe(true);
+    expect(Number.isInteger(snap?.lastActivityAt)).toBe(true);
+  });
+
   it('sorts snapshots newest-activity first', () => {
     const { root, tracker } = setup();
     const a = join(root, 'a.log');

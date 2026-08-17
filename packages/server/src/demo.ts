@@ -34,7 +34,8 @@ const CAST = [
   { name: 'zoe', project: 'website', title: 'Dark mode for the docs site' },
 ] as const;
 
-const WANDER = { minX: 200, maxX: 800, minY: 200, maxY: 620 };
+/** Stay on the open floor of the default 512×352 office map. */
+const WANDER = { minX: 48, maxX: 464, minY: 80, maxY: 320 };
 
 /** Quacks enough like a ws socket for Room's collector bookkeeping. */
 function fakeSocket(): WebSocket {
