@@ -1,0 +1,11 @@
+services:
+  sloppers:
+    build: .
+    ports:
+      - '8787:8787'
+    volumes:
+      - sloppers-data:/data
+    restart: unless-stopped
+
+volumes:
+  sloppers-data:

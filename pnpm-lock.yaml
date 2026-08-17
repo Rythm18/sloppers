@@ -46,6 +46,33 @@ importers:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@24.13.3)
 
+  packages/e2e:
+    devDependencies:
+      '@sloppers/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@sloppers/server':
+        specifier: workspace:*
+        version: link:../server
+      '@types/node':
+        specifier: ^24.10.1
+        version: 24.13.3
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
+      sloppers:
+        specifier: workspace:*
+        version: link:../collector
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@24.13.3)
+      ws:
+        specifier: ^8.18.3
+        version: 8.21.3
+
   packages/protocol:
     dependencies:
       zod:

@@ -1,0 +1,23 @@
+{
+  "name": "@sloppers/e2e",
+  "version": "0.1.0",
+  "description": "End-to-end smoke: real collector daemon + real server + web protocol client",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@sloppers/protocol": "workspace:*",
+    "@sloppers/server": "workspace:*",
+    "@types/node": "^24.10.1",
+    "@types/ws": "^8.18.1",
+    "sloppers": "workspace:*",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "ws": "^8.18.3"
+  }
+}
