@@ -58,6 +58,8 @@ export const sessionSnapshotSchema = z.object({
   id: z.string().min(1).max(128),
   harness: harnessIdSchema,
   state: sessionStateSchema,
+  /** Harness-generated session title, e.g. Claude Code's ai-title. */
+  title: z.string().min(1).max(200).optional(),
   project: z.string().min(1).max(120).optional(),
   branch: z.string().min(1).max(120).optional(),
   model: z.string().min(1).max(120).optional(),
@@ -85,6 +87,7 @@ export type PresenceState = z.infer<typeof presenceStateSchema>;
  * a field turned off never leaves the machine.
  */
 export const visibilitySchema = z.object({
+  title: z.boolean(),
   project: z.boolean(),
   branch: z.boolean(),
   model: z.boolean(),
@@ -93,6 +96,7 @@ export const visibilitySchema = z.object({
 export type Visibility = z.infer<typeof visibilitySchema>;
 
 export const defaultVisibility: Visibility = {
+  title: true,
   project: true,
   branch: true,
   model: true,
