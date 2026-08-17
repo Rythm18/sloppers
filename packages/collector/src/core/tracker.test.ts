@@ -104,6 +104,18 @@ describe('SessionTracker', () => {
     expect(snaps.map((s) => s.id)).toEqual(['s-new', 's-old']);
   });
 
+  it('exposes tracked paths for the polling fallback', () => {
+    const { root, tracker } = setup();
+    const file = join(root, 'a.log');
+    writeFileSync(file, 's1 work\n');
+    tracker.ingestFile(file, 1000);
+    expect(tracker.trackedFiles()).toEqual([file]);
+    // Re-ingesting via a poll picks up appended lines just like an event.
+    appendFileSync(file, 's1 final\n');
+    expect(tracker.ingestFile(file, 2000)).toBe(true);
+    expect(tracker.snapshot(3000)[0]?.state).toBe('waiting');
+  });
+
   it('drops entries whose files disappear', () => {
     const { root, tracker } = setup();
     const file = join(root, 'a.log');

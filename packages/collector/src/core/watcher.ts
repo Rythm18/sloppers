@@ -5,6 +5,11 @@ import type { SessionTracker } from './tracker.js';
 import type { HarnessAdapter } from './types.js';
 
 const SEED_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Re-stat every tracked file this often, catching dropped change events. */
+const POLL_MS = 10_000;
+/** Walk the roots for missed new files this often. */
+const RESCAN_MS = 60_000;
+const RESCAN_WINDOW_MS = 10 * 60 * 1000;
 
 export interface WatchHandle {
   close(): Promise<void>;
@@ -76,7 +81,33 @@ export function watchSessions(opts: {
     onChange();
   });
 
-  return { close: () => watcher.close() };
+  // Filesystem events get dropped in the wild — during chokidar's initial
+  // scan, across sleep/wake, under inotify pressure. A daemon that runs for
+  // weeks needs a safety net: re-read tracked files often, rescan for files
+  // we never got an "add" for occasionally.
+  const pollTimer = setInterval(() => {
+    let changed = false;
+    for (const filePath of tracker.trackedFiles()) {
+      try {
+        if (tracker.ingestFile(filePath, statSync(filePath).mtimeMs)) changed = true;
+      } catch {
+        tracker.removeFile(filePath);
+        changed = true;
+      }
+    }
+    if (changed) onChange();
+  }, POLL_MS);
+  const rescanTimer = setInterval(() => {
+    if (seedTracker(adapters, tracker, RESCAN_WINDOW_MS)) onChange();
+  }, RESCAN_MS);
+
+  return {
+    close: () => {
+      clearInterval(pollTimer);
+      clearInterval(rescanTimer);
+      return watcher.close();
+    },
+  };
 }
 
 function walk(root: string): string[] {

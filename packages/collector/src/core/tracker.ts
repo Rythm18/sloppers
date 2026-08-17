@@ -66,6 +66,11 @@ export class SessionTracker {
     this.entries.delete(filePath);
   }
 
+  /** Paths currently tracked; the watcher's polling fallback re-stats these. */
+  trackedFiles(): string[] {
+    return [...this.entries.keys()];
+  }
+
   /** Project the live sessions into wire snapshots, newest first. */
   snapshot(now: number): SessionSnapshot[] {
     const out: SessionSnapshot[] = [];
