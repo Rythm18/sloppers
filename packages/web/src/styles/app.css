@@ -199,6 +199,39 @@ button {
   font-size: 12.5px;
 }
 
+.join-hint {
+  color: var(--wire);
+}
+
+.join-hint code {
+  color: var(--crt);
+}
+
+.join-office {
+  color: var(--lamp);
+  font-weight: 600;
+}
+
+.join-resuming {
+  min-height: 0;
+}
+
+.join-invite-paste {
+  display: grid;
+  gap: 6px;
+  border-top: 1px solid var(--panel-line);
+  padding-top: 14px;
+}
+
+.join-invite-row {
+  display: flex;
+  gap: 8px;
+}
+
+.join-invite-row .input {
+  flex: 1;
+}
+
 /* ----------------------------------------------------------------- HUD */
 
 .hud {

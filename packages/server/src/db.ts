@@ -18,6 +18,7 @@ export function openDb(path: string): Db {
   db.exec(`
     CREATE TABLE IF NOT EXISTS rooms (
       code TEXT PRIMARY KEY,
+      name TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS members (
@@ -38,6 +39,11 @@ export function openDb(path: string): Db {
     );
     CREATE TABLE IF NOT EXISTS pairings (
       code TEXT PRIMARY KEY,
+      member_id TEXT NOT NULL REFERENCES members(id),
+      expires_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS relink_tokens (
+      token TEXT PRIMARY KEY,
       member_id TEXT NOT NULL REFERENCES members(id),
       expires_at INTEGER NOT NULL
     );
@@ -65,10 +71,14 @@ export function openDb(path: string): Db {
       PRIMARY KEY (member_id, day, harness)
     );
   `);
-  // Databases created before last_seen_at existed get the column added.
+  // Databases created before these columns existed get them added.
   const memberColumns = db.prepare('PRAGMA table_info(members)').all() as { name: string }[];
   if (!memberColumns.some((c) => c.name === 'last_seen_at')) {
     db.exec('ALTER TABLE members ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0');
+  }
+  const roomColumns = db.prepare('PRAGMA table_info(rooms)').all() as { name: string }[];
+  if (!roomColumns.some((c) => c.name === 'name')) {
+    db.exec("ALTER TABLE rooms ADD COLUMN name TEXT NOT NULL DEFAULT ''");
   }
   return db;
 }

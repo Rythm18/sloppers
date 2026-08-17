@@ -44,8 +44,8 @@ function fakeSocket(): WebSocket {
 }
 
 export function startDemo(rooms: RoomManager, roomCode = 'demo'): () => void {
-  const room = rooms.getOrCreate(roomCode);
-  if (!room) throw new Error('demo room unavailable (room cap reached)');
+  // The demo floor has a knowable code on purpose — it's a public playground.
+  const room = rooms.ensureInternalRoom(roomCode, 'demo floor');
   const bots: Bot[] = [];
 
   for (const [i, cast] of CAST.entries()) {

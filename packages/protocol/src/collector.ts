@@ -71,6 +71,33 @@ export const pairMintResponseSchema = z.object({
 });
 export type PairMintResponse = z.infer<typeof pairMintResponseSchema>;
 
+/**
+ * Relink: a paired collector rescues a browser identity. The daemon's
+ * device key mints a one-shot token; opening the URL that carries it makes
+ * a fresh browser become the member again — cleared storage and second
+ * devices recover without any login system.
+ */
+export const relinkMintRequestSchema = z.object({
+  deviceKey: z.string().min(16).max(128),
+});
+export const relinkMintResponseSchema = z.object({
+  token: z.string(),
+  roomCode: z.string(),
+  expiresAt: z.number().int().positive(),
+});
+export type RelinkMintResponse = z.infer<typeof relinkMintResponseSchema>;
+
+export const relinkRedeemRequestSchema = z.object({
+  token: z.string().trim().min(8).max(128),
+});
+export const relinkRedeemResponseSchema = z.object({
+  memberId: z.string(),
+  memberSecret: z.string(),
+  roomCode: z.string(),
+  displayName: z.string(),
+});
+export type RelinkRedeemResponse = z.infer<typeof relinkRedeemResponseSchema>;
+
 export const pairRedeemRequestSchema = z.object({
   pairingCode: z.string().trim().min(4).max(32),
 });

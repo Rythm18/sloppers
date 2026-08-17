@@ -9,6 +9,8 @@ interface SloppersStore {
   phase: Phase;
   connection: Connection;
   roomCode: string;
+  /** Display name of the office, from the world message. */
+  roomName: string;
   you: string | null;
   /** Members by id — positions live in Phaser, not here. */
   members: Record<string, MemberView>;
@@ -36,6 +38,7 @@ export const useStore = create<SloppersStore>((set) => ({
   phase: 'join',
   connection: 'idle',
   roomCode: '',
+  roomName: '',
   you: null,
   members: {},
   leaderboard: [],
@@ -61,6 +64,8 @@ export const useStore = create<SloppersStore>((set) => ({
         set({
           phase: 'world',
           connection: 'open',
+          roomCode: msg.roomCode,
+          roomName: msg.roomName,
           you: msg.you.memberId,
           members: Object.fromEntries(msg.members.map((m) => [m.id, m])),
           leaderboard: msg.leaderboard,

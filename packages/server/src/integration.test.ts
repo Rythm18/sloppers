@@ -70,6 +70,7 @@ describe('server integration', () => {
   const clients: WebClientHarness[] = [];
 
   beforeEach(async () => {
+    officeCode = null;
     server = await createSloppersServer({ port: 0, hostname: '127.0.0.1', dbPath: ':memory:' });
   });
 
@@ -78,26 +79,54 @@ describe('server integration', () => {
     await server.close();
   });
 
+  /** First member creates the office; the rest follow the minted code. */
+  let officeCode: string | null = null;
+
   async function join(name: string): Promise<{ client: WebClientHarness; world: WebWorld }> {
     const client = new WebClientHarness(server.port);
     clients.push(client);
     await client.open();
-    client.send({ type: 'join', roomCode: 'lab', displayName: name });
+    client.send(
+      officeCode
+        ? { type: 'join', roomCode: officeCode, displayName: name }
+        : { type: 'join', createRoom: 'the lab', displayName: name },
+    );
     const world = (await client.next((m) => m.type === 'world')) as WebWorld;
+    officeCode = world.roomCode;
     return { client, world };
   }
 
-  it('join → world with self; second member appears to the first', async () => {
+  it('create office → capability code; second member joins by code', async () => {
     const { client: a, world } = await join('ridham');
-    expect(world.roomCode).toBe('lab');
+    expect(world.roomCode).toMatch(/^the-lab-[a-z0-9]{6}$/);
+    expect(world.roomName).toBe('the lab');
     expect(world.you.memberSecret).toBeTruthy();
     expect(world.members).toHaveLength(1);
 
     const { world: worldB } = await join('sam');
+    expect(worldB.roomCode).toBe(world.roomCode);
     expect(worldB.members).toHaveLength(2);
 
     const upsert = await a.next((m) => m.type === 'member');
     expect(upsert.type === 'member' && upsert.member.displayName).toBe('sam');
+  });
+
+  it('guessed room codes bounce; invite preview works for real ones', async () => {
+    const { world } = await join('ridham');
+
+    const stranger = new WebClientHarness(server.port);
+    clients.push(stranger);
+    await stranger.open();
+    stranger.send({ type: 'join', roomCode: 'the-lab', displayName: 'mallory' });
+    const err = await stranger.next((m) => m.type === 'error');
+    expect(err.type === 'error' && err.code).toBe('room-not-found');
+
+    const base = `http://127.0.0.1:${server.port}`;
+    const preview = await fetch(`${base}/api/rooms/${world.roomCode}`);
+    expect(preview.status).toBe(200);
+    expect(await preview.json()).toEqual({ name: 'the lab', memberCount: 1 });
+    const dead = await fetch(`${base}/api/rooms/the-lab-zzzzzz`);
+    expect(dead.status).toBe(404);
   });
 
   it('rejects duplicate names but allows resume with credentials', async () => {
@@ -105,7 +134,7 @@ describe('server integration', () => {
     const dupe = new WebClientHarness(server.port);
     clients.push(dupe);
     await dupe.open();
-    dupe.send({ type: 'join', roomCode: 'lab', displayName: 'RIDHAM' });
+    dupe.send({ type: 'join', roomCode: world.roomCode, displayName: 'RIDHAM' });
     const err = await dupe.next((m) => m.type === 'error');
     expect(err.type === 'error' && err.code).toBe('name-taken');
 
@@ -114,12 +143,80 @@ describe('server integration', () => {
     await resumed.open();
     resumed.send({
       type: 'join',
-      roomCode: 'lab',
       memberId: world.you.memberId,
       memberSecret: world.you.memberSecret,
     });
     const worldAgain = (await resumed.next((m) => m.type === 'world')) as WebWorld;
     expect(worldAgain.you.memberId).toBe(world.you.memberId);
+  });
+
+  it('relink: a paired device signs a fresh browser back in', async () => {
+    const { world } = await join('ridham');
+    const base = `http://127.0.0.1:${server.port}`;
+
+    // Pair a device the normal way.
+    const mint = await fetch(`${base}/api/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        memberId: world.you.memberId,
+        memberSecret: world.you.memberSecret,
+      }),
+    });
+    const { pairingCode } = (await mint.json()) as { pairingCode: string };
+    const redeem = await fetch(`${base}/api/pair/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pairingCode }),
+    });
+    const { deviceKey } = (await redeem.json()) as { deviceKey: string };
+
+    // The device mints a relink token; a "fresh browser" redeems it.
+    const relink = await fetch(`${base}/api/relink`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceKey }),
+    });
+    expect(relink.status).toBe(200);
+    const minted = (await relink.json()) as { token: string; roomCode: string };
+    expect(minted.roomCode).toBe(world.roomCode);
+
+    const claim = await fetch(`${base}/api/relink/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: minted.token }),
+    });
+    expect(claim.status).toBe(200);
+    const identity = (await claim.json()) as { memberId: string; memberSecret: string };
+    expect(identity.memberId).toBe(world.you.memberId);
+
+    // Tokens are one-shot.
+    const again = await fetch(`${base}/api/relink/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: minted.token }),
+    });
+    expect(again.status).toBe(404);
+
+    // The recovered identity actually resumes.
+    const fresh = new WebClientHarness(server.port);
+    clients.push(fresh);
+    await fresh.open();
+    fresh.send({
+      type: 'join',
+      memberId: identity.memberId,
+      memberSecret: identity.memberSecret,
+    });
+    const back = (await fresh.next((m) => m.type === 'world')) as WebWorld;
+    expect(back.you.memberId).toBe(world.you.memberId);
+
+    // A bogus device key cannot mint.
+    const bogus = await fetch(`${base}/api/relink`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceKey: 'f'.repeat(48) }),
+    });
+    expect(bogus.status).toBe(403);
   });
 
   it('movement relays to other members only', async () => {

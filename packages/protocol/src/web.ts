@@ -7,6 +7,7 @@ import {
   positionSchema,
   presenceStateSchema,
   roomCodeSchema,
+  roomNameSchema,
   sessionSnapshotSchema,
 } from './core.js';
 
@@ -18,13 +19,19 @@ import {
  * tick rate; everything else flows down on change.
  */
 
+/**
+ * Three ways in, checked in this order server-side:
+ * - resume:  memberId + memberSecret (the member's room is authoritative)
+ * - create:  createRoom (vanity name) + displayName — mints a new office
+ *            with a server-generated capability code
+ * - invited: roomCode (from an invite link) + displayName
+ */
 export const webJoinSchema = z.object({
   type: z.literal('join'),
-  roomCode: roomCodeSchema,
-  /** Resume an existing member... */
+  roomCode: roomCodeSchema.optional(),
+  createRoom: roomNameSchema.optional(),
   memberId: z.string().optional(),
   memberSecret: z.string().optional(),
-  /** ...or create a new one. */
   displayName: displayNameSchema.optional(),
   avatar: avatarIdSchema.optional(),
 });
@@ -66,6 +73,8 @@ export const webWorldSchema = z.object({
     memberSecret: z.string().optional(),
   }),
   roomCode: roomCodeSchema,
+  /** Display name of the office, e.g. "the lab". */
+  roomName: z.string(),
   members: z.array(memberViewSchema),
   leaderboard: z.array(leaderboardRowSchema),
 });
@@ -102,7 +111,7 @@ export const webLeaderboardSchema = z.object({
 
 export const webErrorSchema = z.object({
   type: z.literal('error'),
-  code: z.enum(['bad-join', 'name-taken', 'bad-message', 'server-error']),
+  code: z.enum(['bad-join', 'room-not-found', 'name-taken', 'bad-message', 'server-error']),
   message: z.string(),
 });
 export type WebError = z.infer<typeof webErrorSchema>;

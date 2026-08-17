@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { billedTokens, type Visibility } from '@sloppers/protocol';
+import { billedTokens, relinkMintResponseSchema, type Visibility } from '@sloppers/protocol';
 import pc from 'picocolors';
 import { builtinAdapters } from './adapters/index.js';
 import { loadConfig, newConfig, saveConfig } from './config.js';
@@ -29,6 +30,7 @@ usage:
   sloppers resume           resume sharing
   sloppers hide <field>     stop sharing a field: title | project | branch | model | tokens
   sloppers show <field>     share a field again
+  sloppers relink           sign a fresh browser back in as you (new laptop, cleared storage)
   sloppers uninstall        remove auto-start (config stays; delete ~/.sloppers to forget)
 
 Only derived status ever leaves this machine — never prompts, code, or files.
@@ -130,6 +132,40 @@ function status(): void {
   }
 }
 
+/**
+ * Identity rescue: this machine's device key proves who we are, so it can
+ * mint a link that signs any browser back in as this member — no login,
+ * no password reset, just open the URL.
+ */
+async function relink(): Promise<void> {
+  const config = loadConfig();
+  if (!config) fail('not paired yet — run `sloppers share <code>` first');
+  const res = await fetch(`${config.server.httpUrl}/api/relink`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ deviceKey: config.deviceKey }),
+  }).catch(() => null);
+  if (!res?.ok) {
+    fail(
+      res?.status === 403
+        ? 'the server no longer recognizes this device — run `sloppers share` again'
+        : `could not reach ${config.server.httpUrl}`,
+    );
+  }
+  const minted = relinkMintResponseSchema.parse(await res.json());
+  const url = `${config.server.httpUrl}/?room=${encodeURIComponent(minted.roomCode)}&relink=${minted.token}`;
+  console.log(`${pc.green('✓')} open this link in the browser you want to sign in:`);
+  console.log(`  ${pc.cyan(url)}`);
+  console.log(pc.dim('  works once, expires in 10 minutes'));
+  const opener =
+    process.platform === 'darwin' ? 'open' : process.platform === 'linux' ? 'xdg-open' : null;
+  if (opener) {
+    execFile(opener, [url], () => {
+      // Best effort — the printed link is the real interface.
+    });
+  }
+}
+
 function setPaused(paused: boolean): void {
   const config = loadConfig();
   if (!config) fail('not paired yet');
@@ -174,6 +210,9 @@ async function main(): Promise<void> {
       break;
     case 'show':
       setVisibility(args[0], true);
+      break;
+    case 'relink':
+      await relink();
       break;
     case 'uninstall':
       await uninstallService();

@@ -61,6 +61,7 @@ export class Room {
 
   constructor(
     readonly code: string,
+    readonly name: string,
     private db: Db,
     private ledger: TokenLedger,
   ) {
@@ -112,6 +113,7 @@ export class Room {
       type: 'world',
       you: { memberId: client.memberId },
       roomCode: this.code,
+      roomName: this.name,
       members: [...this.members.keys()].map((id) => this.memberView(id, now)),
       leaderboard: this.leaderboardRows(now),
     };

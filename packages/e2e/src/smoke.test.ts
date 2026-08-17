@@ -15,6 +15,13 @@ import WebSocket from 'ws';
  */
 
 const NOW = Date.now();
+/**
+ * Session start times must land on *today* or the ledger (correctly)
+ * declines to count their history into today's stats — without this clamp
+ * the suite fails when run within minutes of midnight.
+ */
+const START_OF_TODAY = new Date(NOW).setHours(0, 0, 0, 0);
+const startedAgo = (ms: number) => Math.max(NOW - ms, START_OF_TODAY + 1000);
 
 function writeClaudeSession(home: string): string {
   const dir = join(home, '.claude', 'projects', '-work-myapp');
@@ -25,7 +32,7 @@ function writeClaudeSession(home: string): string {
     cwd: '/work/myapp',
     gitBranch: 'feat/office',
     isSidechain: false,
-    timestamp: new Date(NOW - 5 * 60_000).toISOString(),
+    timestamp: new Date(startedAgo(5 * 60_000)).toISOString(),
   };
   const lines = [
     { ...base, type: 'user', message: { role: 'user', content: 'build it' } },
@@ -34,7 +41,7 @@ function writeClaudeSession(home: string): string {
       ...base,
       type: 'assistant',
       requestId: 'req-1',
-      timestamp: new Date(NOW - 4 * 60_000).toISOString(),
+      timestamp: new Date(startedAgo(4 * 60_000)).toISOString(),
       message: {
         model: 'claude-fable-5',
         content: [{ type: 'tool_use', name: 'Bash' }],
@@ -57,7 +64,7 @@ function writeCodexSession(home: string): void {
   const file = join(dir, 'rollout-2026-08-17T09-00-00-e2e-codex.jsonl');
   const lines = [
     {
-      timestamp: new Date(NOW - 10 * 60_000).toISOString(),
+      timestamp: new Date(startedAgo(10 * 60_000)).toISOString(),
       type: 'session_meta',
       payload: {
         id: 'e2e-codex-session',
@@ -68,7 +75,7 @@ function writeCodexSession(home: string): void {
     },
     { type: 'turn_context', payload: { model: 'gpt-5.6-sol', cwd: '/work/pipeline' } },
     {
-      timestamp: new Date(NOW - 60_000).toISOString(),
+      timestamp: new Date(startedAgo(60_000)).toISOString(),
       type: 'event_msg',
       payload: {
         type: 'token_count',
@@ -111,12 +118,12 @@ class WebProbe {
     });
   }
 
-  async join(roomCode: string, name: string): Promise<WebWorld> {
+  async join(officeName: string, name: string): Promise<WebWorld> {
     await new Promise<void>((resolve, reject) => {
       this.ws.on('open', resolve);
       this.ws.on('error', reject);
     });
-    this.ws.send(JSON.stringify({ type: 'join', roomCode, displayName: name }));
+    this.ws.send(JSON.stringify({ type: 'join', createRoom: officeName, displayName: name }));
     return (await this.next((m) => m.type === 'world')) as WebWorld;
   }
 

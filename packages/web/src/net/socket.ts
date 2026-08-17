@@ -40,6 +40,12 @@ export function clearIdentity(roomCode: string): void {
   localStorage.removeItem(identityKey(roomCode));
 }
 
+/** The three ways into an office, mirroring the join protocol. */
+export type JoinIntent =
+  | { kind: 'resume'; roomCode: string }
+  | { kind: 'invited'; roomCode: string; displayName: string; avatar: string }
+  | { kind: 'create'; roomName: string; displayName: string; avatar: string };
+
 export class OfficeSocket {
   private ws: WebSocket | null = null;
   private attempts = 0;
@@ -51,10 +57,7 @@ export class OfficeSocket {
   private pendingMove: Position | null = null;
   private cleanups: (() => void)[] = [];
 
-  constructor(
-    private roomCode: string,
-    private createProfile: { displayName: string; avatar: string } | null,
-  ) {}
+  constructor(private intent: JoinIntent) {}
 
   start(): void {
     useStore.getState().setConnection('connecting');
@@ -88,15 +91,29 @@ export class OfficeSocket {
 
     ws.onopen = () => {
       this.attempts = 0;
-      const identity = loadIdentity(this.roomCode);
-      if (identity) {
-        this.send({ type: 'join', roomCode: this.roomCode, ...identity });
-      } else if (this.createProfile) {
-        this.send({ type: 'join', roomCode: this.roomCode, ...this.createProfile });
+      const intent = this.intent;
+      if (intent.kind === 'resume') {
+        const identity = loadIdentity(intent.roomCode);
+        if (!identity) {
+          useStore.getState().setJoinError('No identity for this office here — pick a name.');
+          this.stop();
+          return;
+        }
+        this.send({ type: 'join', ...identity });
+      } else if (intent.kind === 'invited') {
+        this.send({
+          type: 'join',
+          roomCode: intent.roomCode,
+          displayName: intent.displayName,
+          avatar: intent.avatar,
+        });
       } else {
-        useStore.getState().setJoinError('No identity for this room yet — pick a name.');
-        this.stop();
-        return;
+        this.send({
+          type: 'join',
+          createRoom: intent.roomName,
+          displayName: intent.displayName,
+          avatar: intent.avatar,
+        });
       }
     };
 
@@ -114,7 +131,9 @@ export class OfficeSocket {
       if (msg.type === 'world') {
         this.joined = true;
         if (msg.you.memberSecret) {
-          saveIdentity(this.roomCode, {
+          // The world tells us the real room code (created offices mint it
+          // server-side); the identity is keyed by that.
+          saveIdentity(msg.roomCode, {
             memberId: msg.you.memberId,
             memberSecret: msg.you.memberSecret,
           });
@@ -122,10 +141,15 @@ export class OfficeSocket {
         this.lastPresent = null;
         this.reportPresence();
       }
-      if (msg.type === 'error' && (msg.code === 'bad-join' || msg.code === 'name-taken')) {
+      if (
+        msg.type === 'error' &&
+        (msg.code === 'bad-join' || msg.code === 'name-taken' || msg.code === 'room-not-found')
+      ) {
         // A stale identity (wiped server db) reads as bad-join; forget it so
         // the person can just pick a name again.
-        if (msg.code === 'bad-join') clearIdentity(this.roomCode);
+        if (msg.code === 'bad-join' && this.intent.kind === 'resume') {
+          clearIdentity(this.intent.roomCode);
+        }
         this.closed = true;
       }
       useStore.getState().applyServer(msg);
@@ -175,6 +199,39 @@ export class OfficeSocket {
       clearInterval(heartbeat);
     });
   }
+}
+
+/**
+ * Redeem a relink token from a `sloppers relink` URL: this browser becomes
+ * the member the collector vouched for. Returns the room to resume into,
+ * or null (used/expired token, unreachable server).
+ */
+export async function redeemRelinkToken(token: string): Promise<string | null> {
+  const res = await fetch('/api/relink/redeem', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token }),
+  }).catch(() => null);
+  if (!res?.ok) return null;
+  const redeemed = (await res.json()) as {
+    memberId: string;
+    memberSecret: string;
+    roomCode: string;
+  };
+  saveIdentity(redeemed.roomCode, {
+    memberId: redeemed.memberId,
+    memberSecret: redeemed.memberSecret,
+  });
+  return redeemed.roomCode;
+}
+
+/** Invite preview for the join screen; null when the code is dead. */
+export async function fetchRoomPreview(
+  roomCode: string,
+): Promise<{ name: string; memberCount: number } | null> {
+  const res = await fetch(`/api/rooms/${encodeURIComponent(roomCode)}`).catch(() => null);
+  if (!res?.ok) return null;
+  return (await res.json()) as { name: string; memberCount: number };
 }
 
 /** Mint a pairing code for the share modal. */

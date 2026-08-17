@@ -75,9 +75,18 @@ describe('collector messages', () => {
 });
 
 describe('web messages', () => {
-  it('parses a create-member join', () => {
-    const join = { type: 'join', roomCode: 'the-lab', displayName: 'Ridham', avatar: 'clementine' };
-    expect(webToServerSchema.parse(join)).toEqual(join);
+  it('parses invited, create-office, and resume joins', () => {
+    const invited = {
+      type: 'join',
+      roomCode: 'the-lab-k4xp2q',
+      displayName: 'Ridham',
+      avatar: 'clementine',
+    };
+    expect(webToServerSchema.parse(invited)).toEqual(invited);
+    const create = { type: 'join', createRoom: 'the lab', displayName: 'Ridham' };
+    expect(webToServerSchema.parse(create)).toEqual(create);
+    const resume = { type: 'join', memberId: 'm1', memberSecret: 's1' };
+    expect(webToServerSchema.parse(resume)).toEqual(resume);
   });
 
   it('trims display names and rejects empty ones', () => {
@@ -89,7 +98,8 @@ describe('web messages', () => {
     const world = {
       type: 'world',
       you: { memberId: 'm1', memberSecret: 's1' },
-      roomCode: 'the-lab',
+      roomCode: 'the-lab-k4xp2q',
+      roomName: 'the lab',
       members: [
         {
           id: 'm1',

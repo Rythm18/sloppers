@@ -67,18 +67,26 @@ A single server process self-hosts the whole thing: `npx` it or
 
 ## Identity and rooms
 
-There is no authentication in v1; the trust model is "people who share an
-invite code trust each other". The pieces:
+There are no accounts; capabilities do the work:
 
-- A **room** is created on first use of an invite code. World state
-  (positions, presence) is in memory; durable stats are in SQLite.
+- A **room code** is a capability: `<vanity-slug>-<random suffix>`, minted
+  server-side when someone creates an office. The invite is just the URL
+  carrying it — unguessable in practice (≈30 bits plus per-IP join rate
+  limiting), one click to accept. Rooms are never created by joining an
+  unknown code; a dead invite is a clear error, not a new empty room. World
+  state (positions, presence) is in memory; durable stats are in SQLite.
 - A **member** is `(room, displayName, avatar)` created when someone joins
-  from the browser.
+  from the browser. The browser keeps the member id + a random secret in
+  localStorage — that pair is the identity.
 - A **pairing code** is a short-lived (10 min) token minted by the web app
   for a member. `npx sloppers share <code>` redeems it once; the collector
   receives a device key and is permanently linked to that member. The device
   key — not the pairing code — authenticates subsequent collector
   connections.
+- **Relink** closes the recovery loop: a paired device key can mint a
+  one-shot, short-lived URL (`sloppers relink`) that signs any fresh browser
+  in as that member — cleared storage and second devices recover without a
+  login system.
 
 A member can be browser-only (walks, shares nothing), collector-only (their
 avatar idles at a desk while their status stays live), or both.

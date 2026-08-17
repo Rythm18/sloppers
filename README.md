@@ -18,11 +18,15 @@ or sleep. sloppers makes that visible and a little bit social — ambient
 awareness of who's deep in something, whose agent needs input, and a friendly
 daily scoreboard for the tokenmaxers.
 
-- **Join is browser-only.** A URL, an invite code, a name, a face. Nothing to
-  install to walk around.
+- **Join is browser-only.** Name an office, name yourself, pick a face —
+  you're in. The invite is just a link; rooms have unguessable capability
+  codes (like `the-lab-k4xp2q`), so only people you send the link to can
+  enter. No accounts, no passwords.
 - **Sharing is one paste, once.** The office mints you a command like
   `npx sloppers share K4X-P2Q@your-office.dev`; run it on the machine where
   your agents live and your avatar is live from then on (auto-start included).
+  New laptop or cleared browser? `sloppers relink` prints a link that signs
+  you back in as yourself.
 - **Privacy is enforced at the source.** The collector reads local session
   files and sends only derived status — project, branch, model, state, token
   counts, a session title. Never prompts, code, or file contents. Every field
@@ -82,6 +86,7 @@ Useful commands afterwards:
 sloppers status        # what's being shared right now
 sloppers pause         # stop broadcasting (stays paired)
 sloppers hide tokens   # per-field visibility: title|project|branch|model|tokens
+sloppers relink        # sign a fresh browser back in as you
 sloppers uninstall     # remove auto-start
 ```
 

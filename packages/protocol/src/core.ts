@@ -155,11 +155,19 @@ export const AVATAR_IDS = [
   'comet',
 ] as const;
 
+/**
+ * A room code is a capability: `<vanity-slug>-<random suffix>`, generated
+ * server-side. Knowing the code (via an invite link) is what grants entry,
+ * so codes are never guessable words. The demo room is the one deliberate
+ * exception.
+ */
 export const roomCodeSchema = z
   .string()
   .min(3)
-  .max(32)
+  .max(48)
   .regex(/^[a-z0-9][a-z0-9-]*$/i, 'letters, digits, dashes');
+/** The human name of an office, e.g. "the lab" — display only. */
+export const roomNameSchema = z.string().trim().min(1).max(32);
 export const displayNameSchema = z.string().trim().min(1).max(32);
 export const avatarIdSchema = z
   .string()

@@ -171,12 +171,12 @@ function handleWeb(
       const { rooms } = deps;
 
       if (msg.memberId && msg.memberSecret) {
-        // Resume an existing identity; its room wins over the URL's.
+        // Resume an existing identity; its member row knows its room.
         const member = rooms.authMember(msg.memberId, msg.memberSecret);
         if (!member) {
           return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'unknown member' });
         }
-        room = rooms.getOrCreate(member.roomCode);
+        room = rooms.getRoom(member.roomCode);
         if (!room) {
           return sendWeb(ws, { type: 'error', code: 'server-error', message: 'room unavailable' });
         }
@@ -191,15 +191,34 @@ function handleWeb(
       if (!msg.displayName) {
         return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'displayName required' });
       }
-      room = rooms.getOrCreate(msg.roomCode);
-      if (!room) {
+
+      if (msg.createRoom) {
+        room = rooms.createRoom(msg.createRoom);
+        if (!room) {
+          return sendWeb(ws, {
+            type: 'error',
+            code: 'server-error',
+            message: 'this server is not accepting new offices right now',
+          });
+        }
+      } else if (msg.roomCode) {
+        room = rooms.getRoom(msg.roomCode);
+        if (!room) {
+          return sendWeb(ws, {
+            type: 'error',
+            code: 'room-not-found',
+            message: 'that invite does not point to an office — check the link',
+          });
+        }
+      } else {
         return sendWeb(ws, {
           type: 'error',
           code: 'bad-join',
-          message: 'this server is not accepting new rooms',
+          message: 'an invite code or a new office name is required',
         });
       }
-      const created = rooms.createMember(msg.roomCode, msg.displayName, msg.avatar);
+
+      const created = rooms.createMember(room.code, msg.displayName, msg.avatar);
       if (created === 'name-taken') {
         room = null;
         return sendWeb(ws, {
@@ -210,7 +229,7 @@ function handleWeb(
       }
       if (created === 'room-full') {
         room = null;
-        return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'this room is full' });
+        return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'this office is full' });
       }
       room.memberJoined(created);
       client = { ws, memberId: created.id, present: true };
@@ -267,7 +286,7 @@ function handleCollector(ws: WebSocket, deps: { db: Db; rooms: RoomManager }): v
         });
         return ws.close();
       }
-      room = deps.rooms.getOrCreate(member.roomCode);
+      room = deps.rooms.getRoom(member.roomCode);
       if (!room) {
         sendCollector(ws, { type: 'error', code: 'server-error', message: 'room unavailable' });
         return ws.close();

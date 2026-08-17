@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { AVATAR_IDS } from '@sloppers/protocol';
 import type { Db } from './db.js';
-import { memberId, memberSecret } from './ids.js';
+import { memberId, memberSecret, roomSuffix } from './ids.js';
 import { TokenLedger } from './ledger.js';
 import { Room } from './room.js';
 
@@ -40,23 +40,64 @@ export class RoomManager {
     this.ledger = new TokenLedger(db);
   }
 
-  /** Returns null when the room doesn't exist and the room cap is reached. */
-  getOrCreate(code: string): Room | null {
-    let room = this.rooms.get(code);
-    if (room) return room;
-    const exists = this.db.prepare('SELECT 1 FROM rooms WHERE code = ?').get(code);
-    if (!exists) {
-      const count = this.db.prepare('SELECT COUNT(*) AS n FROM rooms').get() as { n: number };
-      if (count.n >= MAX_ROOMS) return null;
-      this.db.prepare('INSERT INTO rooms (code, created_at) VALUES (?, ?)').run(code, Date.now());
-    }
-    room = new Room(code, this.db, this.ledger);
+  /** An existing room by its capability code, or null. Never creates. */
+  getRoom(code: string): Room | null {
+    const cached = this.rooms.get(code);
+    if (cached) return cached;
+    const row = this.db.prepare('SELECT code, name FROM rooms WHERE code = ?').get(code) as
+      | { code: string; name: string }
+      | undefined;
+    if (!row) return null;
+    const room = new Room(row.code, row.name, this.db, this.ledger);
     this.rooms.set(code, room);
     return room;
   }
 
-  existing(code: string): Room | undefined {
-    return this.rooms.get(code);
+  /**
+   * Mint a new office: slugified vanity name plus a random suffix. The full
+   * code is the capability — invite links carry it, nothing else guards the
+   * door. Returns null at the room cap.
+   */
+  createRoom(vanityName: string): Room | null {
+    const count = this.db.prepare('SELECT COUNT(*) AS n FROM rooms').get() as { n: number };
+    if (count.n >= MAX_ROOMS) return null;
+    const slug =
+      vanityName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 24)
+        .replace(/-+$/g, '') || 'office';
+    // Suffix collisions are ~one in a billion; retry regardless.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const code = `${slug}-${roomSuffix()}`;
+      try {
+        this.db
+          .prepare('INSERT INTO rooms (code, name, created_at) VALUES (?, ?, ?)')
+          .run(code, vanityName, Date.now());
+      } catch {
+        continue;
+      }
+      const room = new Room(code, vanityName, this.db, this.ledger);
+      this.rooms.set(code, room);
+      return room;
+    }
+    return null;
+  }
+
+  /**
+   * A room with a fixed, knowable code — only for server-managed spaces
+   * like the demo floor, never reachable through the public create path.
+   */
+  ensureInternalRoom(code: string, name: string): Room {
+    const existing = this.getRoom(code);
+    if (existing) return existing;
+    this.db
+      .prepare('INSERT INTO rooms (code, name, created_at) VALUES (?, ?, ?)')
+      .run(code, name, Date.now());
+    const room = new Room(code, name, this.db, this.ledger);
+    this.rooms.set(code, room);
+    return room;
   }
 
   createMember(

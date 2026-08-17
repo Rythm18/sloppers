@@ -23,3 +23,20 @@ export function pairingCode(): string {
   const group = () => [pick(), pick(), pick()].join('');
   return `${group()}-${group()}`;
 }
+
+/**
+ * The random tail of a room code, e.g. the `k4xp2q` in `the-lab-k4xp2q`.
+ * Lowercase (it lives in URLs), no ambiguous characters, ~30 bits — with
+ * per-IP join rate limiting that makes codes unguessable in practice.
+ */
+const SUFFIX_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz';
+
+export function roomSuffix(): string {
+  return Array.from({ length: 6 }, () => SUFFIX_ALPHABET[randomInt(SUFFIX_ALPHABET.length)]).join(
+    '',
+  );
+}
+
+export function relinkToken(): string {
+  return randomBytes(24).toString('hex');
+}
