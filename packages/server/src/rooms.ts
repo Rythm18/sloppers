@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { AVATAR_IDS } from '@sloppers/protocol';
-import type { Db } from './db.js';
+import type { Db } from './db/index.js';
 import { memberId, memberSecret, roomSuffix } from './ids.js';
 import { TokenLedger } from './ledger.js';
 import { Room } from './room.js';

@@ -5,7 +5,7 @@ import {
   type SessionSnapshot,
   type TokenTotals,
 } from '@sloppers/protocol';
-import type { Db } from './db.js';
+import type { Db } from './db/index.js';
 
 /**
  * Turns cumulative per-session token totals into per-day, per-member stats

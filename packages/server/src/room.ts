@@ -10,7 +10,7 @@ import {
   type WebWorld,
 } from '@sloppers/protocol';
 import type { WebSocket } from 'ws';
-import type { Db } from './db.js';
+import type { Db } from './db/index.js';
 import type { TokenLedger } from './ledger.js';
 import { derivePresence } from './presence.js';
 

@@ -1,6 +1,6 @@
 import type { SessionSnapshot, TokenTotals } from '@sloppers/protocol';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { type Db, openDb } from './db.js';
+import { type Db, openDb } from './db/index.js';
 import { TokenLedger } from './ledger.js';
 
 const T0 = new Date('2026-08-17T10:00:00').getTime();

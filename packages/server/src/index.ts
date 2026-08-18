@@ -1,6 +1,6 @@
 import type { Server } from 'node:http';
 import { serve } from '@hono/node-server';
-import { type Db, openDb } from './db.js';
+import { type Db, openDb } from './db/index.js';
 import { startDemo } from './demo.js';
 import { createApp } from './http.js';
 import { RoomManager } from './rooms.js';
@@ -62,7 +62,7 @@ export function createSloppersServer(opts: SloppersServerOptions): Promise<Slopp
   });
 }
 
-export { openDb } from './db.js';
+export { openDb } from './db/index.js';
 export { TokenLedger } from './ledger.js';
 export { derivePresence } from './presence.js';
 export { Room } from './room.js';

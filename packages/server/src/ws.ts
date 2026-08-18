@@ -7,7 +7,7 @@ import {
   webToServerSchema,
 } from '@sloppers/protocol';
 import { type WebSocket, WebSocketServer } from 'ws';
-import type { Db } from './db.js';
+import type { Db } from './db/index.js';
 import type { Room, WebClient } from './room.js';
 import type { RoomManager } from './rooms.js';
 

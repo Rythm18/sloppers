@@ -7,7 +7,7 @@ import {
   relinkRedeemRequestSchema,
 } from '@sloppers/protocol';
 import { Hono } from 'hono';
-import type { Db } from './db.js';
+import type { Db } from './db/index.js';
 import { deviceKey, pairingCode, relinkToken } from './ids.js';
 import type { RoomManager } from './rooms.js';
 
