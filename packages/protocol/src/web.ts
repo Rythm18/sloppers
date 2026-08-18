@@ -10,6 +10,12 @@ import {
   roomNameSchema,
   sessionSnapshotSchema,
 } from './core.js';
+import {
+  adminOpSchema,
+  knockViewSchema,
+  rosterEntrySchema,
+  workspaceSettingsSchema,
+} from './workspace.js';
 
 /**
  * Messages between a browser client and the server, over `WS /ws/web`.
@@ -50,10 +56,18 @@ export const webActivitySchema = z.object({
 });
 export type WebActivity = z.infer<typeof webActivitySchema>;
 
+/** An admin action against the workspace, dispatched by role-gated UI. */
+export const webAdminSchema = z.object({
+  type: z.literal('admin'),
+  op: adminOpSchema,
+});
+export type WebAdmin = z.infer<typeof webAdminSchema>;
+
 export const webToServerSchema = z.discriminatedUnion('type', [
   webJoinSchema,
   webMoveSchema,
   webActivitySchema,
+  webAdminSchema,
 ]);
 export type WebToServer = z.infer<typeof webToServerSchema>;
 
@@ -111,10 +125,57 @@ export const webLeaderboardSchema = z.object({
 
 export const webErrorSchema = z.object({
   type: z.literal('error'),
-  code: z.enum(['bad-join', 'room-not-found', 'name-taken', 'bad-message', 'server-error']),
+  code: z.enum([
+    'bad-join',
+    'room-not-found',
+    'name-taken',
+    'bad-message',
+    'server-error',
+    'forbidden',
+    'workspace-locked',
+    'knock-pending',
+  ]),
   message: z.string(),
 });
 export type WebError = z.infer<typeof webErrorSchema>;
+
+/** Sent to a knocking browser: it's waiting on an owner/moderator decision. */
+export const webKnockingSchema = z.object({ type: z.literal('knocking') });
+export type WebKnocking = z.infer<typeof webKnockingSchema>;
+
+/** The pending-knock queue, sent to admins. */
+export const webKnocksSchema = z.object({
+  type: z.literal('knocks'),
+  knocks: z.array(knockViewSchema),
+});
+export type WebKnocks = z.infer<typeof webKnocksSchema>;
+
+export const webWorkspaceSchema = z.object({
+  type: z.literal('workspace'),
+  roomCode: roomCodeSchema, // wire name frozen; this is the invite code
+  roomName: z.string(),
+  settings: workspaceSettingsSchema,
+});
+export type WebWorkspace = z.infer<typeof webWorkspaceSchema>;
+
+export const webRosterSchema = z.object({
+  type: z.literal('roster'),
+  members: z.array(rosterEntrySchema),
+});
+export type WebRoster = z.infer<typeof webRosterSchema>;
+
+export const webRemovedSchema = z.object({
+  type: z.literal('removed'),
+  reason: z.enum(['kicked', 'banned', 'deleted']),
+});
+export type WebRemoved = z.infer<typeof webRemovedSchema>;
+
+export const webDeviceLinkSchema = z.object({
+  type: z.literal('device-link'),
+  url: z.string(),
+  expiresAt: z.number().int().positive(),
+});
+export type WebDeviceLink = z.infer<typeof webDeviceLinkSchema>;
 
 export const serverToWebSchema = z.discriminatedUnion('type', [
   webWorldSchema,
@@ -124,5 +185,11 @@ export const serverToWebSchema = z.discriminatedUnion('type', [
   webPresenceSchema,
   webLeaderboardSchema,
   webErrorSchema,
+  webKnockingSchema,
+  webKnocksSchema,
+  webWorkspaceSchema,
+  webRosterSchema,
+  webRemovedSchema,
+  webDeviceLinkSchema,
 ]);
 export type ServerToWeb = z.infer<typeof serverToWebSchema>;
