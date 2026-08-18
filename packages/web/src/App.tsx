@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { bridge } from './game/bridge.js';
 import { PhaserStage } from './game/PhaserStage.js';
+import { Landing } from './landing/Landing.js';
 import { type JoinIntent, loadIdentity, OfficeSocket, redeemRelinkToken } from './net/socket.js';
 import { useStore } from './store.js';
 import { BubbleLayer } from './ui/BubbleLayer.js';
@@ -26,6 +27,8 @@ export function App() {
     new URLSearchParams(location.search).get('room'),
   );
   const [resuming, setResuming] = useState(false);
+  /** Bare visits see the landing page until they choose to open an office. */
+  const [entry, setEntry] = useState<'landing' | 'create'>('landing');
 
   const start = useCallback((intent: JoinIntent) => {
     socketRef.current?.stop();
@@ -95,8 +98,25 @@ export function App() {
   );
 
   if (phase === 'join') {
+    if (!urlRoom && !resuming && entry === 'landing') {
+      return (
+        <div className="app">
+          <Landing onOpenOffice={() => setEntry('create')} />
+        </div>
+      );
+    }
     return (
       <div className="app">
+        {!urlRoom && entry === 'create' ? (
+          <button
+            type="button"
+            className="btn btn-quiet"
+            style={{ position: 'absolute', top: 14, left: 14, zIndex: 40 }}
+            onClick={() => setEntry('landing')}
+          >
+            ← back
+          </button>
+        ) : null}
         <JoinScreen
           invitedRoom={urlRoom}
           resuming={resuming}

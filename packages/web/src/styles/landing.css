@@ -1,0 +1,118 @@
+/*
+ * Tailwind, utilities only — no preflight, so the app's hand-written CSS
+ * keeps full authority. The theme maps sloppers' brand tokens into utility
+ * names (bg-ink, text-lamp, border-panel…) for the landing page.
+ */
+/*
+ * Imported unlayered on purpose: app.css carries an unlayered universal
+ * reset (* { margin: 0 }) which would beat any @layer-wrapped utility, so
+ * utilities must live at the same (un)layer and win by source order —
+ * landing.css loads after app.css in main.tsx.
+ */
+@import 'tailwindcss/theme.css';
+@import 'tailwindcss/utilities.css';
+
+@theme {
+  --color-ink: #1a1423;
+  --color-dusk: #2b2438;
+  --color-dusk-raised: #37324a;
+  --color-panel: #4a4458;
+  --color-parchment: #f3ebdd;
+  --color-wire: #9b92b6;
+  --color-lamp: #ffb454;
+  --color-crt: #7de0a6;
+  --color-alert: #ff6b81;
+
+  --font-display: 'Silkscreen', monospace;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  /* Heavy spring, per the motion system: mass over snappiness. */
+  --ease-slop: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* The one allowed gradient: hero heading text, light → muted. */
+.landing-heading-ink {
+  background: linear-gradient(90deg, #f3ebdd 0%, #9b92b6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Marquee for the agent ticker; duplicated content scrolls seamlessly. */
+@keyframes ticker-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.ticker-track {
+  animation: ticker-scroll 42s linear infinite;
+}
+
+.ticker-track:hover {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track {
+    animation: none;
+  }
+}
+
+/* Pixel-styled panels for landing use, matching the app's furniture. */
+.pixel-panel {
+  background: var(--color-dusk);
+  border: 2px solid var(--color-ink);
+  outline: 1px solid var(--color-panel);
+  box-shadow: 4px 4px 0 rgba(10, 6, 18, 0.55);
+}
+
+.pixel-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--color-lamp);
+  color: var(--color-ink);
+  border: 2px solid var(--color-ink);
+  box-shadow: 2px 2px 0 rgba(10, 6, 18, 0.45);
+  font-family: var(--font-display);
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 0.15s var(--ease-slop), box-shadow 0.15s var(--ease-slop);
+}
+
+.pixel-btn:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 rgba(10, 6, 18, 0.45);
+}
+
+.pixel-btn:active {
+  transform: translate(2px, 2px) scale(0.98);
+  box-shadow: none;
+}
+
+.pixel-btn:focus-visible {
+  outline: 2px solid var(--color-crt);
+  outline-offset: 2px;
+}
+
+.pixel-btn-quiet {
+  background: var(--color-dusk-raised);
+  color: var(--color-parchment);
+}
+
+/* Scanlines, the landing's ambient texture (pattern, not a gradient wash). */
+.scanlines {
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(10, 6, 18, 0.22) 0 2px,
+    transparent 2px 4px
+  );
+}

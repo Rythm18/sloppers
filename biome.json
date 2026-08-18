@@ -6,7 +6,13 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!**/dist", "!**/*.gen.ts", "!pnpm-lock.yaml"]
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/*.gen.ts",
+      "!pnpm-lock.yaml",
+      "!packages/web/src/styles/landing.css"
+    ]
   },
   "formatter": {
     "enabled": true,
