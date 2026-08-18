@@ -14,7 +14,9 @@ export function openDb(path: string): Db {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
   db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
+  // runMigrations owns the foreign_keys pragma's lifecycle end to end
+  // (OFF for the migration loop, ON once it returns) — setting it here too
+  // would just be redundant dead work.
   runMigrations(db);
   return db;
 }

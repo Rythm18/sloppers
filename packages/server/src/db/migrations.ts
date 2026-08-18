@@ -88,9 +88,15 @@ export const migrations: Migration[] = [
  * back ON afterward — both outside any transaction, since the pragma is
  * silently a no-op inside one. Migrations that reshape tables referenced by
  * foreign keys (e.g. dropping a table others reference) would otherwise
- * trigger SQLite's implicit delete-and-check on DROP TABLE and fail. After
- * each migration's transaction commits, PRAGMA foreign_key_check verifies no
- * dangling references were left behind.
+ * trigger SQLite's implicit delete-and-check on DROP TABLE and fail.
+ *
+ * PRAGMA foreign_key_check, unlike PRAGMA foreign_keys, is a query rather
+ * than a setting, so it works correctly inside a transaction. It runs as
+ * part of the same transaction as the migration's up() — if it finds a
+ * violation, throwing from inside that transaction rolls the whole
+ * migration back (its DDL and data are undone) and user_version is left
+ * unchanged, so a retry re-runs the migration against an untouched
+ * database instead of a partially applied one.
  */
 export function runMigrations(db: Database.Database): number {
   let version = db.pragma('user_version', { simple: true }) as number;
@@ -99,17 +105,17 @@ export function runMigrations(db: Database.Database): number {
     for (const migration of migrations) {
       if (migration.version <= version) continue;
       try {
-        db.transaction(() => migration.up(db))();
+        db.transaction(() => {
+          migration.up(db);
+          const violations = db.pragma('foreign_key_check') as { table: string }[];
+          if (violations.length > 0) {
+            const tables = [...new Set(violations.map((v) => v.table))].join(', ');
+            throw new Error(`left foreign key violations in: ${tables}`);
+          }
+        })();
       } catch (error) {
         throw new Error(
           `migration ${migration.version} (${migration.name}) failed: ${(error as Error).message}`,
-        );
-      }
-      const violations = db.pragma('foreign_key_check') as { table: string }[];
-      if (violations.length > 0) {
-        const tables = [...new Set(violations.map((v) => v.table))].join(', ');
-        throw new Error(
-          `migration ${migration.version} (${migration.name}) left foreign key violations in: ${tables}`,
         );
       }
       db.pragma(`user_version = ${migration.version}`);

@@ -56,7 +56,7 @@ describe('migration runner', () => {
     expect(db.pragma('foreign_keys', { simple: true }) as number).toBe(1);
   });
 
-  it('rejects a migration that leaves a dangling foreign key reference', () => {
+  it('rolls back a migration entirely when it leaves a foreign key violation', () => {
     const db = new Database(':memory:');
     runMigrations(db);
     const versionBefore = migrations.length;
@@ -64,23 +64,35 @@ describe('migration runner', () => {
       version: versionBefore + 1,
       name: 'dangling-reference',
       up(db) {
-        // Foreign keys are off during the migration loop, so this insert of a
-        // device pointing at a nonexistent member succeeds at insert time —
-        // the post-migration foreign_key_check must still catch it.
+        // Foreign keys are off during the migration loop, so creating this
+        // table and inserting a dangling reference both succeed at the
+        // time — foreign_key_check, run inside the same transaction, must
+        // still catch it and roll everything in this migration back.
+        db.exec(`
+          CREATE TABLE orphaned_by_bad_migration (
+            id TEXT PRIMARY KEY,
+            member_id TEXT NOT NULL REFERENCES members(id)
+          );
+        `);
         db.exec(
-          "INSERT INTO devices (key, member_id, created_at) VALUES ('dangling-device', 'no-such-member', 0)",
+          "INSERT INTO orphaned_by_bad_migration (id, member_id) VALUES ('x', 'no-such-member')",
         );
       },
     };
     migrations.push(bad);
     try {
       expect(() => runMigrations(db)).toThrow(
-        /migration \d+ \(dangling-reference\) left foreign key violations in: devices/,
+        /migration \d+ \(dangling-reference\) failed: left foreign key violations in: orphaned_by_bad_migration/,
       );
     } finally {
       migrations.pop();
     }
-    // The failed migration's version must not have been recorded.
+    // The whole migration — including the table it created — must be
+    // rolled back, not just left un-recorded.
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as {
+      name: string;
+    }[];
+    expect(tables.map((t) => t.name)).not.toContain('orphaned_by_bad_migration');
     expect(db.pragma('user_version', { simple: true }) as number).toBe(versionBefore);
     expect(db.pragma('foreign_keys', { simple: true }) as number).toBe(1);
   });
