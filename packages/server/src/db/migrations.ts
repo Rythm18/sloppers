@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type Database from 'better-sqlite3';
 
 export interface Migration {
@@ -145,6 +146,14 @@ export const migrations: Migration[] = [
         );
       `);
 
+      // Random, not derived from the invite code: the id is meant to
+      // outlive code rotation, so it must not let a holder (e.g. a banned
+      // member who captured it before rotation) reconstruct a pre-rotation
+      // code. Same construction as the rest of the codebase's identifiers
+      // (see ids.ts's memberId) but inlined — migrations are frozen once
+      // shipped, so they don't reach into code that might later change.
+      const randomWorkspaceId = () => `w_${randomBytes(8).toString('hex')}`;
+
       const defaults = JSON.stringify({ joinMode: 'link', publicLeaderboard: false });
       const rooms = db.prepare('SELECT code, name, created_at FROM rooms').all() as {
         code: string;
@@ -155,9 +164,8 @@ export const migrations: Migration[] = [
         'INSERT INTO workspaces (id, name, invite_code, settings, created_at) VALUES (?, ?, ?, ?, ?)',
       );
       const idFor = new Map<string, string>();
-      for (const [i, room] of rooms.entries()) {
-        // Deterministic ids keep the migration reproducible and testable.
-        const id = `w_${room.code.replace(/[^a-z0-9]/gi, '').slice(0, 12)}${i}`;
+      for (const room of rooms) {
+        const id = randomWorkspaceId();
         idFor.set(room.code, id);
         insertWorkspace.run(id, room.name || room.code, room.code, defaults, room.created_at);
       }
@@ -178,8 +186,21 @@ export const migrations: Migration[] = [
       );
       const ownerSeen = new Set<string>();
       for (const m of members) {
-        const workspaceId = idFor.get(m.room_code);
-        if (!workspaceId) continue; // orphan row; the FK would have rejected it anyway
+        let workspaceId = idFor.get(m.room_code);
+        if (!workspaceId) {
+          // Unreachable on a healthy database — the version-1 schema has
+          // members.room_code REFERENCES rooms(code) — but foreign keys are
+          // OFF for the whole migration loop, so don't bet data loss on
+          // that holding. Salvage the member (and anything referencing
+          // them, e.g. devices) into a workspace synthesized from their
+          // orphaned room code instead of silently dropping the row.
+          workspaceId = randomWorkspaceId();
+          idFor.set(m.room_code, workspaceId);
+          insertWorkspace.run(workspaceId, m.room_code, m.room_code, defaults, m.created_at);
+          console.error(
+            `migration 002: synthesized workspace ${workspaceId} for orphaned room code ${JSON.stringify(m.room_code)} (member ${m.id})`,
+          );
+        }
         const role = ownerSeen.has(m.room_code) ? 'member' : 'owner';
         ownerSeen.add(m.room_code);
         insertMember.run(
@@ -233,6 +254,13 @@ export const migrations: Migration[] = [
  * migration back (its DDL and data are undone) and user_version is left
  * unchanged, so a retry re-runs the migration against an untouched
  * database instead of a partially applied one.
+ *
+ * PRAGMA user_version is, unlike PRAGMA foreign_keys, an ordinary
+ * transactional write — so the version bump lives inside the same
+ * transaction as up() and the foreign_key_check, and commits or rolls back
+ * atomically with them. A crash between "migration committed" and "version
+ * bumped" could otherwise re-run a migration that isn't safe to re-run;
+ * inside one transaction that window doesn't exist.
  */
 export function runMigrations(db: Database.Database): number {
   let version = db.pragma('user_version', { simple: true }) as number;
@@ -248,13 +276,13 @@ export function runMigrations(db: Database.Database): number {
             const tables = [...new Set(violations.map((v) => v.table))].join(', ');
             throw new Error(`left foreign key violations in: ${tables}`);
           }
+          db.pragma(`user_version = ${migration.version}`);
         })();
       } catch (error) {
         throw new Error(
           `migration ${migration.version} (${migration.name}) failed: ${(error as Error).message}`,
         );
       }
-      db.pragma(`user_version = ${migration.version}`);
       version = migration.version;
     }
   } finally {

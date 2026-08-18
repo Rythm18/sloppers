@@ -1,14 +1,20 @@
 import Database from 'better-sqlite3';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { migrations, runMigrations } from './migrations.js';
 
-/** Build a database in the version-1 shape with two rooms of members. */
-function legacyDb(): Database.Database {
+/** Build an empty database in the version-1 shape, with no fixtures. */
+function emptyLegacyDb(): Database.Database {
   const db = new Database(':memory:');
   const first = migrations[0];
   if (!first) throw new Error('no migrations');
   db.transaction(() => first.up(db))();
   db.pragma('user_version = 1');
+  return db;
+}
+
+/** Build a database in the version-1 shape with two rooms of members. */
+function legacyDb(): Database.Database {
+  const db = emptyLegacyDb();
   db.prepare('INSERT INTO rooms (code, name, created_at) VALUES (?, ?, ?)').run(
     'the-lab-k4xp2q',
     'the lab',
@@ -94,5 +100,101 @@ describe('migration 002', () => {
         )
         .run('m_new', ws?.id, 's4', 'sam', 'pixel', 'member', 'active', 1400, 1400),
     ).not.toThrow();
+  });
+
+  it('does not embed the invite code in the workspace id', () => {
+    const db = legacyDb();
+    runMigrations(db);
+    const workspaces = db.prepare('SELECT id, invite_code FROM workspaces').all() as {
+      id: string;
+      invite_code: string;
+    }[];
+    expect(workspaces.length).toBeGreaterThan(0);
+    for (const w of workspaces) {
+      // Every char left after stripping punctuation from a code (t, h, l, g,
+      // k, x, p, q, ...) includes at least one letter outside a-f, so it can
+      // never appear as a substring of a lowercase hex id — a cheap but
+      // solid way to assert the code was not folded into the id.
+      const strippedCode = w.invite_code.replace(/[^a-z0-9]/gi, '').toLowerCase();
+      expect(w.id.toLowerCase()).not.toContain(strippedCode);
+      expect(w.id).toMatch(/^w_[0-9a-f]{16}$/);
+    }
+  });
+
+  it('mints distinct workspace ids even where the old index-suffixed scheme would collide', () => {
+    // The old scheme was `w_${alnum(code).slice(0,12)}${i}`. A room coded
+    // "demo1" at index 0 and one coded "demo" at index 10 both minted
+    // "w_demo10" under that scheme, aborting the migration with a UNIQUE
+    // constraint failure. Reproduce that exact shape and confirm it no
+    // longer collides.
+    const db = emptyLegacyDb();
+    const insertRoom = db.prepare('INSERT INTO rooms (code, name, created_at) VALUES (?, ?, ?)');
+    insertRoom.run('demo1', 'demo one', 100);
+    for (let i = 0; i < 9; i++) {
+      insertRoom.run(`filler-room-${i}`, `filler ${i}`, 200 + i);
+    }
+    insertRoom.run('demo', 'demo floor', 900);
+
+    expect(() => runMigrations(db)).not.toThrow();
+
+    const workspaces = db.prepare('SELECT id, invite_code FROM workspaces').all() as {
+      id: string;
+      invite_code: string;
+    }[];
+    expect(workspaces).toHaveLength(11);
+    expect(new Set(workspaces.map((w) => w.id)).size).toBe(11);
+    const demo1 = workspaces.find((w) => w.invite_code === 'demo1');
+    const demo = workspaces.find((w) => w.invite_code === 'demo');
+    expect(demo1?.id).toBeDefined();
+    expect(demo?.id).toBeDefined();
+    expect(demo1?.id).not.toBe(demo?.id);
+  });
+
+  it('salvages an orphaned member and their device into a synthesized workspace', () => {
+    const db = emptyLegacyDb();
+    // No corresponding row in `rooms` — simulates a legacy database where
+    // that referential integrity was already broken before this migration
+    // ever ran. Foreign keys are OFF for the whole migration loop, so
+    // nothing there would catch it either; drop enforcement here too, just
+    // to construct the otherwise-unreachable fixture.
+    db.pragma('foreign_keys = OFF');
+    db.prepare(
+      'INSERT INTO members (id, room_code, secret, display_name, avatar, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run('m_ghost', 'ghost-room', 'secret', 'ghost', 'pixel', 500, 500);
+    db.prepare('INSERT INTO devices (key, member_id, created_at) VALUES (?, ?, ?)').run(
+      'device-ghost',
+      'm_ghost',
+      600,
+    );
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() => runMigrations(db)).not.toThrow();
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy.mock.calls[0]?.[0]).toContain('ghost-room');
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    const member = db
+      .prepare('SELECT id, workspace_id, role, status FROM members WHERE id = ?')
+      .get('m_ghost') as
+      | { id: string; workspace_id: string; role: string; status: string }
+      | undefined;
+    expect(member?.status).toBe('active');
+    expect(member?.role).toBe('owner');
+
+    const workspace = db
+      .prepare('SELECT id FROM workspaces WHERE invite_code = ?')
+      .get('ghost-room') as { id: string } | undefined;
+    expect(workspace?.id).toBeDefined();
+    expect(member?.workspace_id).toBe(workspace?.id);
+
+    const device = db.prepare('SELECT member_id FROM devices WHERE key = ?').get('device-ghost') as
+      | { member_id: string }
+      | undefined;
+    expect(device?.member_id).toBe('m_ghost');
+
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
   });
 });

@@ -37,11 +37,12 @@ describe('migration runner', () => {
     expect(db.pragma('foreign_keys', { simple: true }) as number).toBe(1);
   });
 
-  it('leaves foreign key enforcement ON even when a migration throws', () => {
+  it('leaves foreign key enforcement ON and user_version unchanged when a migration throws', () => {
     const db = new Database(':memory:');
     db.pragma('foreign_keys = ON');
+    const versionBefore = migrations.length;
     const broken: Migration = {
-      version: migrations.length + 1,
+      version: versionBefore + 1,
       name: 'broken',
       up() {
         throw new Error('boom');
@@ -54,6 +55,11 @@ describe('migration runner', () => {
       migrations.pop();
     }
     expect(db.pragma('foreign_keys', { simple: true }) as number).toBe(1);
+    // The version bump lives inside the same transaction as up() and the
+    // foreign_key_check, so a migration that throws before either of those
+    // succeed must leave user_version exactly where the last successful
+    // migration left it — never advanced for the one that failed.
+    expect(db.pragma('user_version', { simple: true }) as number).toBe(versionBefore);
   });
 
   it('rolls back a migration entirely when it leaves a foreign key violation', () => {
