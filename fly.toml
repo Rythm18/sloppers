@@ -1,0 +1,30 @@
+# Fly.io deployment: one machine, scale-to-zero when the office is empty.
+#   fly launch --copy-config --no-deploy   (first time: creates app + volume)
+#   fly deploy
+app = "sloppers"
+primary_region = "bom"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DATA_DIR = "/data"
+  # Fly's proxy terminates TLS and sets X-Forwarded-* honestly.
+  TRUST_PROXY = "1"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  # WebSocket connections keep the machine awake; an empty office stops it
+  # and costs nothing until the next visitor wakes it.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[mounts]]
+  source = "sloppers_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
