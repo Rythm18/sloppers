@@ -79,6 +79,142 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 2,
+    name: 'workspaces-roles-and-bucketed-usage',
+    up(db) {
+      db.exec(`
+        CREATE TABLE workspaces (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          invite_code TEXT NOT NULL UNIQUE,
+          settings TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE TABLE members_new (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+          secret TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          avatar TEXT NOT NULL,
+          role TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          last_seen_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE workspace_events (
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+          at INTEGER NOT NULL,
+          actor_id TEXT,
+          action TEXT NOT NULL,
+          target_id TEXT,
+          detail TEXT
+        );
+        CREATE TABLE usage_watermarks (
+          session_id TEXT NOT NULL,
+          member_id TEXT NOT NULL,
+          day TEXT NOT NULL,
+          model TEXT NOT NULL,
+          harness TEXT NOT NULL,
+          input INTEGER NOT NULL, output INTEGER NOT NULL,
+          cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (session_id, member_id, day, model)
+        );
+        CREATE TABLE daily_usage (
+          member_id TEXT NOT NULL,
+          day TEXT NOT NULL,
+          harness TEXT NOT NULL,
+          model TEXT NOT NULL,
+          input INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0,
+          cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (member_id, day, harness, model)
+        );
+        CREATE TABLE daily_activity (
+          member_id TEXT NOT NULL,
+          day TEXT NOT NULL,
+          minutes BLOB NOT NULL,
+          PRIMARY KEY (member_id, day)
+        );
+        -- Sessions already counted under the old session-keyed watermarks.
+        -- Their first bucketed report seeds instead of counting.
+        CREATE TABLE legacy_sessions (
+          session_id TEXT NOT NULL,
+          member_id TEXT NOT NULL,
+          PRIMARY KEY (session_id, member_id)
+        );
+      `);
+
+      const defaults = JSON.stringify({ joinMode: 'link', publicLeaderboard: false });
+      const rooms = db.prepare('SELECT code, name, created_at FROM rooms').all() as {
+        code: string;
+        name: string;
+        created_at: number;
+      }[];
+      const insertWorkspace = db.prepare(
+        'INSERT INTO workspaces (id, name, invite_code, settings, created_at) VALUES (?, ?, ?, ?, ?)',
+      );
+      const idFor = new Map<string, string>();
+      for (const [i, room] of rooms.entries()) {
+        // Deterministic ids keep the migration reproducible and testable.
+        const id = `w_${room.code.replace(/[^a-z0-9]/gi, '').slice(0, 12)}${i}`;
+        idFor.set(room.code, id);
+        insertWorkspace.run(id, room.name || room.code, room.code, defaults, room.created_at);
+      }
+
+      const members = db
+        .prepare('SELECT * FROM members ORDER BY room_code, created_at, id')
+        .all() as {
+        id: string;
+        room_code: string;
+        secret: string;
+        display_name: string;
+        avatar: string;
+        created_at: number;
+        last_seen_at: number;
+      }[];
+      const insertMember = db.prepare(
+        'INSERT INTO members_new (id, workspace_id, secret, display_name, avatar, role, status, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      );
+      const ownerSeen = new Set<string>();
+      for (const m of members) {
+        const workspaceId = idFor.get(m.room_code);
+        if (!workspaceId) continue; // orphan row; the FK would have rejected it anyway
+        const role = ownerSeen.has(m.room_code) ? 'member' : 'owner';
+        ownerSeen.add(m.room_code);
+        insertMember.run(
+          m.id,
+          workspaceId,
+          m.secret,
+          m.display_name,
+          m.avatar,
+          role,
+          'active',
+          m.created_at,
+          m.last_seen_at,
+        );
+      }
+
+      db.exec(`
+        INSERT INTO daily_usage (member_id, day, harness, model, input, output, cache_read, cache_write)
+        SELECT member_id, day, harness, 'unknown', input, output, cache_read, cache_write
+        FROM daily_stats;
+        INSERT INTO legacy_sessions (session_id, member_id)
+        SELECT session_id, member_id FROM session_watermarks;
+        DROP TABLE daily_stats;
+        DROP TABLE session_watermarks;
+        DROP TABLE members;
+        DROP TABLE rooms;
+      `);
+      db.exec('ALTER TABLE members_new RENAME TO members');
+      db.exec(`
+        CREATE UNIQUE INDEX members_workspace_name
+          ON members(workspace_id, lower(display_name)) WHERE status = 'active';
+        CREATE INDEX members_workspace ON members(workspace_id);
+        CREATE INDEX workspace_events_ws ON workspace_events(workspace_id, at);
+      `);
+    },
+  },
 ];
 
 /**
