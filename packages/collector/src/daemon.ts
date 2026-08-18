@@ -51,13 +51,14 @@ export function startDaemon(opts: {
   let idleSeconds: number | undefined;
 
   const buildSnapshot = (current: CollectorConfig): CollectorSnapshot => {
+    // Paused means paused: no sessions AND no machine telemetry — idle
+    // seconds are at-the-keyboard presence data.
+    if (current.paused) return { type: 'snapshot', sessions: [], machine: {} };
     const machine: CollectorSnapshot['machine'] = {};
     if (idleSeconds !== undefined) machine.idleSeconds = idleSeconds;
     return {
       type: 'snapshot',
-      sessions: current.paused
-        ? []
-        : tracker.snapshot(Date.now()).map((s) => applyVisibility(s, current.visibility)),
+      sessions: tracker.snapshot(Date.now()).map((s) => applyVisibility(s, current.visibility)),
       machine,
     };
   };

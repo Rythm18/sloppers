@@ -53,7 +53,12 @@ export function ShareModal() {
 
   if (!open) return null;
 
-  const command = code ? `npx sloppers@latest share ${code}@${location.host}` : null;
+  // Plain-HTTP deployments (LAN, tunnels) need the scheme spelled out —
+  // the collector assumes https for any non-localhost bare host.
+  const bareHost = ['localhost', '127.0.0.1'].includes(location.hostname);
+  const shareTarget =
+    location.protocol === 'http:' && !bareHost ? `http://${location.host}` : location.host;
+  const command = code ? `npx sloppers@latest share ${code}@${shareTarget}` : null;
 
   const copy = async () => {
     if (!command) return;
@@ -80,7 +85,12 @@ export function ShareModal() {
         </div>
 
         {failed ? (
-          <p className="join-error">Could not mint a code — rejoin the room and try again.</p>
+          <div className="share-steps">
+            <p className="join-error">Could not mint a code — the server may be unreachable.</p>
+            <button type="button" className="btn btn-quiet" onClick={() => void mint()}>
+              Try again
+            </button>
+          </div>
         ) : (
           <div className="share-cmd">
             <span className="prompt">$</span>
@@ -106,8 +116,18 @@ export function ShareModal() {
 
         <p className="share-privacy">
           The collector reads your local Claude Code and Codex session files and sends only derived
-          status — project, model, state, token counts. Never prompts, code, or file contents. Tune
-          it anytime: <code>sloppers hide tokens</code> · <code>sloppers pause</code>.
+          status: session titles (short summaries generated from your prompts), project and branch
+          names, model, working/waiting state, and token counts. Never prompts, code, or file
+          contents. Every field can be hidden — <code>sloppers hide title</code>,{' '}
+          <code>sloppers hide tokens</code> — and <code>sloppers pause</code> stops sharing
+          entirely.
+        </p>
+        <p className="share-privacy">
+          Running from a checkout instead of npm? Use{' '}
+          <code>
+            node packages/collector/dist/cli.js share {code ?? '<code>'}@{shareTarget}
+          </code>
+          .
         </p>
       </div>
     </div>

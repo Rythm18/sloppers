@@ -71,7 +71,16 @@ node packages/server/dist/main.js --demo
 ```
 
 Environment: `PORT` (default 8787), `DATA_DIR` (default `./data`), `WEB_DIST`
-(defaults to the sibling web build).
+(defaults to the sibling web build), `TRUST_PROXY=1` when behind a reverse
+proxy (enables client IPs from `X-Forwarded-For` for rate limiting).
+
+**Behind a reverse proxy** (nginx/Caddy/Traefik): terminate TLS there, and
+make sure it forwards the `Host` header and WebSocket upgrades
+(`Upgrade`/`Connection`) plus `X-Forwarded-Proto` — pairing commands and
+invite links derive their host and scheme from those. Set `TRUST_PROXY=1`.
+
+**Operations**: all durable state is one file, `$DATA_DIR/sloppers.db` —
+back that up and you've backed up everything. Logs go to stdout.
 
 ## Share your agents
 

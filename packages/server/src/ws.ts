@@ -73,12 +73,46 @@ class JoinLimiter {
   }
 }
 
+/**
+ * X-Forwarded-For is client-controlled unless a trusted proxy sets it —
+ * honoring it on a direct deployment lets one machine mint unlimited
+ * "IPs" past the rate limiter. Opt in with TRUST_PROXY=1 when running
+ * behind a reverse proxy that overwrites the header.
+ */
+const TRUST_PROXY = process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true';
+
 function clientIp(req: IncomingMessage): string {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.length > 0) {
-    return forwarded.split(',')[0]?.trim() ?? 'unknown';
+  if (TRUST_PROXY) {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.length > 0) {
+      return forwarded.split(',')[0]?.trim() ?? 'unknown';
+    }
   }
   return req.socket.remoteAddress ?? 'unknown';
+}
+
+/** Concurrent-socket budget: per-IP and global, across both endpoints. */
+const MAX_SOCKETS_PER_IP = 32;
+const MAX_SOCKETS_TOTAL = 2000;
+
+class ConnectionBudget {
+  private perIp = new Map<string, number>();
+  private total = 0;
+
+  tryAcquire(ip: string): boolean {
+    const mine = this.perIp.get(ip) ?? 0;
+    if (this.total >= MAX_SOCKETS_TOTAL || mine >= MAX_SOCKETS_PER_IP) return false;
+    this.perIp.set(ip, mine + 1);
+    this.total += 1;
+    return true;
+  }
+
+  release(ip: string): void {
+    const mine = this.perIp.get(ip) ?? 0;
+    if (mine <= 1) this.perIp.delete(ip);
+    else this.perIp.set(ip, mine - 1);
+    this.total = Math.max(0, this.total - 1);
+  }
 }
 
 /** Browsers send Origin; when present it must match the host we serve. */
@@ -99,23 +133,31 @@ export function attachWebSockets(
   const webWss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD });
   const collectorWss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD });
   const limiter = new JoinLimiter();
+  const budget = new ConnectionBudget();
   const heartbeats = [startHeartbeat(webWss), startHeartbeat(collectorWss)];
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const path = new URL(req.url ?? '/', 'http://internal').pathname;
+    if (path !== '/ws/web' && path !== '/ws/collector') return socket.destroy();
+    const ip = clientIp(req);
+    if (!budget.tryAcquire(ip)) return socket.destroy();
+
     if (path === '/ws/web') {
-      if (!originAllowed(req)) return socket.destroy();
+      if (!originAllowed(req)) {
+        budget.release(ip);
+        return socket.destroy();
+      }
       webWss.handleUpgrade(req, socket, head, (ws) => {
         webWss.emit('connection', ws, req);
-        handleWeb(ws, clientIp(req), { rooms: deps.rooms, limiter });
-      });
-    } else if (path === '/ws/collector') {
-      collectorWss.handleUpgrade(req, socket, head, (ws) => {
-        collectorWss.emit('connection', ws, req);
-        handleCollector(ws, deps);
+        ws.on('close', () => budget.release(ip));
+        handleWeb(ws, ip, { rooms: deps.rooms, limiter });
       });
     } else {
-      socket.destroy();
+      collectorWss.handleUpgrade(req, socket, head, (ws) => {
+        collectorWss.emit('connection', ws, req);
+        ws.on('close', () => budget.release(ip));
+        handleCollector(ws, deps);
+      });
     }
   });
 

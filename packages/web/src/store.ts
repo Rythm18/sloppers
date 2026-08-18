@@ -104,12 +104,22 @@ export const useStore = create<SloppersStore>((set) => ({
         break;
       case 'error':
         set((s) => {
-          if (msg.code === 'name-taken' || msg.code === 'bad-join') {
-            return { joinError: msg.message, phase: 'join' as Phase };
+          // Fatal join errors land back on the form, re-enabled — leaving
+          // connection at 'connecting' would brick the submit button.
+          if (
+            msg.code === 'name-taken' ||
+            msg.code === 'bad-join' ||
+            msg.code === 'room-not-found'
+          ) {
+            return {
+              joinError: msg.message,
+              phase: 'join' as Phase,
+              connection: 'idle' as Connection,
+            };
           }
           // A server-side failure before we're in only matters on the door.
           if (msg.code === 'server-error' && s.phase === 'join') {
-            return { joinError: msg.message };
+            return { joinError: msg.message, connection: 'idle' as Connection };
           }
           return s;
         });

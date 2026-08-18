@@ -170,6 +170,22 @@ export class RoomManager {
     });
     remove(stale.map((s) => s.id));
     for (const s of stale) this.rooms.get(s.room_code)?.forgetMember(s.id);
+
+    // Rooms whose last member aged out go too — otherwise abandoned rooms
+    // accumulate until the room cap permanently locks out creation.
+    const emptyRooms = this.db
+      .prepare(`
+        SELECT code FROM rooms
+        WHERE created_at < ?
+          AND NOT EXISTS (SELECT 1 FROM members WHERE members.room_code = rooms.code)
+      `)
+      .all(cutoff) as { code: string }[];
+    const dropRoom = this.db.prepare('DELETE FROM rooms WHERE code = ?');
+    for (const { code } of emptyRooms) {
+      dropRoom.run(code);
+      this.rooms.get(code)?.close();
+      this.rooms.delete(code);
+    }
     return stale.length;
   }
 
