@@ -8,6 +8,12 @@ COPY . .
 RUN pnpm install --frozen-lockfile
 RUN pnpm build
 RUN pnpm --filter @sloppers/server --prod deploy --legacy /srv/server
+# Legacy deploy leaves workspace deps as symlinks into /repo, which the
+# runtime stage doesn't have — materialize them as real directories.
+RUN rm -rf /srv/server/node_modules/@sloppers/protocol && \
+    mkdir -p /srv/server/node_modules/@sloppers/protocol && \
+    cp -r /repo/packages/protocol/dist /repo/packages/protocol/package.json \
+      /srv/server/node_modules/@sloppers/protocol/
 
 FROM node:22-alpine
 ENV NODE_ENV=production \
