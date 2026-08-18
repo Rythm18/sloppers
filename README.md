@@ -99,8 +99,6 @@ sloppers relink        # sign a fresh browser back in as you
 sloppers uninstall     # remove auto-start
 ```
 
-> Until the `sloppers` package is published to npm, run the collector from a
-> checkout instead: `node packages/collector/dist/cli.js share <code>`.
 
 ## How it works
 

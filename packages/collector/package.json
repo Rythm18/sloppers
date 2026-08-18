@@ -1,6 +1,6 @@
 {
   "name": "sloppers",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Share what your coding agents are doing with your sloppers office",
   "license": "MIT",
   "repository": {
@@ -14,17 +14,15 @@
     "sloppers": "./dist/cli.js"
   },
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "@sloppers/protocol": "workspace:*",
     "chokidar": "^4.0.3",
     "picocolors": "^1.1.1",
     "ws": "^8.18.3",
@@ -34,6 +32,8 @@
     "@types/node": "^24.10.1",
     "@types/ws": "^8.18.1",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "@sloppers/protocol": "workspace:*",
+    "esbuild": "^0.28.2"
   }
 }
