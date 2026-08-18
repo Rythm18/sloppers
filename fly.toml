@@ -2,7 +2,7 @@
 #   fly launch --copy-config --no-deploy   (first time: creates app + volume)
 #   fly deploy
 app = "sloppers"
-primary_region = "bom"
+primary_region = "sin"
 
 [build]
   dockerfile = "Dockerfile"
