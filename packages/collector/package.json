@@ -18,7 +18,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "node scripts/build.mjs && tsc -p tsconfig.json --emitDeclarationOnly",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
@@ -35,5 +35,6 @@
     "vitest": "^3.2.4",
     "@sloppers/protocol": "workspace:*",
     "esbuild": "^0.28.2"
-  }
+  },
+  "types": "./dist/index.d.ts"
 }
