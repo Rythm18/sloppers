@@ -1090,6 +1090,13 @@ button {
   color: var(--parchment);
 }
 
+/*
+ * Less motion, for anyone who asked their system for it. This covers the
+ * office; the landing page's own moving parts are answered by the matching
+ * block at the end of landing.css, which has to be there rather than here —
+ * it loads after this file, and `.pixel-btn:hover` written here would lose to
+ * `.pixel-btn:hover` written there on source order alone.
+ */
 @media (prefers-reduced-motion: reduce) {
   .bubble,
   .knock-dot,

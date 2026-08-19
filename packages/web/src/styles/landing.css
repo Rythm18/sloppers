@@ -9,8 +9,8 @@
  * utilities must live at the same (un)layer and win by source order —
  * landing.css loads after app.css in main.tsx.
  */
-@import 'tailwindcss/theme.css';
-@import 'tailwindcss/utilities.css';
+@import "tailwindcss/theme.css";
+@import "tailwindcss/utilities.css";
 
 @theme {
   --color-ink: #1a1423;
@@ -23,8 +23,8 @@
   --color-crt: #7de0a6;
   --color-alert: #ff6b81;
 
-  --font-display: 'Silkscreen', monospace;
-  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --font-display: "Silkscreen", monospace;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 
   /* Heavy spring, per the motion system: mass over snappiness. */
   --ease-slop: cubic-bezier(0.32, 0.72, 0, 1);
@@ -56,12 +56,6 @@
   animation-play-state: paused;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .ticker-track {
-    animation: none;
-  }
-}
-
 /* Pixel-styled panels for landing use, matching the app's furniture. */
 .pixel-panel {
   background: var(--color-dusk);
@@ -85,7 +79,9 @@
   text-transform: uppercase;
   text-decoration: none;
   cursor: pointer;
-  transition: transform 0.15s var(--ease-slop), box-shadow 0.15s var(--ease-slop);
+  transition:
+    transform 0.15s var(--ease-slop),
+    box-shadow 0.15s var(--ease-slop);
 }
 
 .pixel-btn:hover {
@@ -115,4 +111,36 @@
     rgba(10, 6, 18, 0.22) 0 2px,
     transparent 2px 4px
   );
+}
+
+/*
+ * The landing page's half of the reduced-motion block app.css ends with. It
+ * belongs here, and last: every rule it turns off is written above it in this
+ * file, this file loads after app.css, and equal-specificity rules are settled
+ * by source order — the same block written over there, or written any higher
+ * up than this, would simply lose to the rule it means to override.
+ *
+ * The `motion.*` entrances are beyond either file's reach, being inline styles
+ * the animation library writes. `<MotionConfig reducedMotion="user">` in
+ * landing/Landing.tsx is this same setting, said where they can hear it.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track {
+    animation: none;
+  }
+
+  /* The blinking cursor in the terminal demo. */
+  .animate-pulse {
+    animation: none;
+  }
+
+  /* The buttons keep their shadow and their focus ring; they stop moving. */
+  .pixel-btn {
+    transition: none;
+  }
+
+  .pixel-btn:hover,
+  .pixel-btn:active {
+    transform: none;
+  }
 }

@@ -6,13 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": [
-      "**",
-      "!**/dist",
-      "!**/*.gen.ts",
-      "!pnpm-lock.yaml",
-      "!packages/web/src/styles/landing.css"
-    ]
+    "includes": ["**", "!**/dist", "!**/*.gen.ts", "!pnpm-lock.yaml"]
   },
   "formatter": {
     "enabled": true,
@@ -37,6 +31,11 @@
       "quoteStyle": "single",
       "semicolons": "always",
       "trailingCommas": "all"
+    }
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
     }
   }
 }
