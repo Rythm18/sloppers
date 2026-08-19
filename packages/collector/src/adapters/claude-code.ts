@@ -137,13 +137,14 @@ export function createClaudeCodeAdapter(
    *
    * `--resume` replays the original's entries verbatim under a NEW sessionId,
    * so the server sees an unfamiliar session and has exactly one guard: a
-   * session with no watermark row whose `startedAt` predates today is seeded
-   * at its current totals and so contributes nothing. The copy inherits the
-   * original's first timestamp — verified against the one resume pair in the
-   * local corpus: 12 shared requestIds, distinct sessionIds, byte-identical
-   * first timestamp, same local day — so that guard fires for a *cross-day*
-   * resume and cannot fire for a *same-day* one, where `startedAt` is today
-   * and `daily_usage` just adds the replayed totals again.
+   * session with no watermark row at all is seeded — rather than banked — for
+   * every bucket whose day predates today, provided its `startedAt` predates
+   * today too. The copy inherits the original's first timestamp — verified
+   * against the one resume pair in the local corpus: 12 shared requestIds,
+   * distinct sessionIds, byte-identical first timestamp, same local day — so
+   * that guard fires for a *cross-day* resume and cannot fire for a *same-day*
+   * one, where `startedAt` is today and `daily_usage` just adds the replayed
+   * totals again.
    *
    * Hence the lifetime. Retiring sooner — when the tracker drops the file, say
    * — reopens the same-day resume, because file liveness (30 minutes of quiet)
