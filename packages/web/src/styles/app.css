@@ -480,7 +480,9 @@ button {
   position: absolute;
   right: 14px;
   top: 72px;
-  width: 246px;
+  /* Wide enough for name + tokens + an "est. $1,234" without the name
+     ellipsing away to nothing. */
+  width: 278px;
   display: grid;
   gap: 0;
   z-index: 8;
@@ -501,11 +503,41 @@ button {
   overflow-y: auto;
 }
 
+.lb-sort {
+  display: inline-flex;
+  border: 1px solid var(--panel-line);
+}
+
+.lb-sort-btn {
+  padding: 3px 6px;
+  background: none;
+  border: none;
+  color: var(--wire);
+  font-family: var(--font-display);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.lb-sort-btn + .lb-sort-btn {
+  border-left: 1px solid var(--panel-line);
+}
+
+.lb-sort-btn[aria-pressed="true"] {
+  background: var(--lamp);
+  color: var(--ink);
+}
+
+.lb-sort-btn:focus-visible {
+  outline: 2px solid var(--crt);
+  outline-offset: 1px;
+}
+
 .lb-row {
   display: grid;
-  grid-template-columns: 18px 1fr auto;
+  grid-template-columns: 18px 1fr auto auto;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 5px 12px;
   font-size: 12px;
 }
@@ -530,8 +562,35 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+/* Tokens read in CRT green, money in lamp gold — two quantities, two inks, so
+   a glance never mistakes one column for the other. */
+.cost {
+  color: var(--lamp);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.cost-est {
+  margin-right: 3px;
+  color: var(--wire);
+  font-family: var(--font-display);
+  font-size: 8px;
+  font-style: normal;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* An unknown cost is never gold and never a numeral: it must not be skimmed
+   as a small amount. The dotted rule marks it as having an explanation. */
+.cost-unknown {
+  color: var(--wire);
+  font-size: 11px;
+  border-bottom: 1px dotted var(--wire);
+}
+
 .lb-meter {
-  grid-column: 2 / 4;
+  grid-column: 2 / 5;
   height: 3px;
   background: var(--ink);
 }
@@ -683,6 +742,46 @@ button {
   color: var(--wire);
 }
 
+.member-models {
+  display: grid;
+  padding: 6px 0;
+  border-top: 1px solid var(--panel-line);
+  max-height: 22vh;
+  overflow-y: auto;
+}
+
+.member-models-title {
+  padding: 2px 12px 4px;
+  color: var(--wire);
+  font-family: var(--font-display);
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.model-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: baseline;
+  gap: 10px;
+  padding: 3px 12px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--parchment);
+}
+
+.model-tok {
+  color: var(--crt);
+}
+
 .member-today {
   display: flex;
   gap: 14px;
@@ -690,6 +789,11 @@ button {
   font-size: 11px;
   color: var(--wire);
   font-variant-numeric: tabular-nums;
+}
+
+/* The day's money sits opposite the day's counts, not lost among them. */
+.member-today .cost {
+  margin-left: auto;
 }
 
 .member-today b {

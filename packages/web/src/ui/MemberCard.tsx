@@ -1,13 +1,43 @@
+import type { TokenTotals } from '@sloppers/protocol';
+import { billedTokens, estimateCostUsd } from '@sloppers/protocol';
 import { useStore } from '../store.js';
 import { AvatarThumb } from './AvatarThumb.js';
 import {
   burned,
+  COST_UNKNOWN,
+  COST_UNKNOWN_TITLE,
+  costTitle,
+  formatCostUsd,
   harnessLabel,
   PRESENCE_LABEL,
   PRESENCE_VAR,
   sessionAge,
   sessionLine,
 } from './format.js';
+
+/** Heaviest model first — the one worth explaining leads the list. */
+function byModelRows(byModel: Record<string, TokenTotals> | undefined): [string, TokenTotals][] {
+  return Object.entries(byModel ?? {})
+    .filter(([, t]) => billedTokens(t) > 0)
+    .sort((a, b) => billedTokens(b[1]) - billedTokens(a[1]));
+}
+
+/** One number, rendered as a dollar estimate or as a named absence. */
+function Cost({ usd }: { usd: number | null }) {
+  if (usd === null) {
+    return (
+      <span className="cost cost-unknown" title={COST_UNKNOWN_TITLE}>
+        {COST_UNKNOWN}
+      </span>
+    );
+  }
+  return (
+    <span className="cost" title={costTitle()}>
+      <i className="cost-est">est.</i>
+      {formatCostUsd(usd)}
+    </span>
+  );
+}
 
 /** Full detail for a clicked teammate: every visible session, today's totals. */
 export function MemberCard() {
@@ -17,6 +47,7 @@ export function MemberCard() {
   if (!member) return null;
 
   const presenceVar = PRESENCE_VAR[member.presence];
+  const models = byModelRows(member.today.byModel);
 
   return (
     <section
@@ -63,6 +94,21 @@ export function MemberCard() {
         </div>
       )}
 
+      {models.length > 0 ? (
+        <div className="member-models">
+          <h3 className="member-models-title">Today by model</h3>
+          {models.map(([model, tokens]) => (
+            <div className="model-row" key={model}>
+              <span className="model-name" title={model}>
+                {model}
+              </span>
+              <span className="model-tok">{burned(tokens)}</span>
+              <Cost usd={estimateCostUsd(model, tokens)} />
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       <div className="member-today">
         <span>
           today <b>{burned(member.today.tokens)}</b> tok
@@ -73,6 +119,7 @@ export function MemberCard() {
         <span>
           <b>{member.today.activeMinutes}</b> active min
         </span>
+        <Cost usd={member.today.estimatedCostUsd ?? null} />
       </div>
     </section>
   );

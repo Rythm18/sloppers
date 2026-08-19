@@ -156,9 +156,12 @@ describe('cost', () => {
     ).toBeNull();
   });
 
-  it('the pricing table is the deliberately-empty stub for this task', () => {
-    expect(PRICING.asOf).toBe('');
-    expect(Object.keys(PRICING.models)).toHaveLength(0);
+  it('the pricing table is filled and dated', () => {
+    // Was asserted empty while the table was a stub. Now that it carries real
+    // published prices, the guard flips: an empty or undated table would mean
+    // every cost in the office silently renders as "unknown".
+    expect(PRICING.asOf).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(Object.keys(PRICING.models).length).toBeGreaterThan(0);
   });
 
   it('a model priced at zero is never confused with a model that has no price', () => {
