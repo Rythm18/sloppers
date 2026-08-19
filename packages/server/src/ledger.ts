@@ -232,6 +232,8 @@ function prepare(db: Db) {
     /** Live buckets this session holds, so a vanished one can be spotted. */
     liveBuckets: db.prepare(`
       SELECT day, model, harness,
+             input AS held_input, output AS held_output,
+             cache_read AS held_cache_read, cache_write AS held_cache_write,
              banked_input AS input, banked_output AS output,
              banked_cache_read AS cache_read, banked_cache_write AS cache_write
       FROM usage_watermarks
@@ -550,6 +552,10 @@ export class TokenLedger {
     // derived from the data rather than by comparing a bucket count against a
     // copy of the schema's cap, which would silently mean the wrong thing if
     // the cap ever moved.
+    // Set when a migrating bucket carried watermark it had never banked; see
+    // the reconciliation loop. Only ever suppresses banking, so it can
+    // understate and never inflate.
+    let migratedUnbanked = false;
     if (bucketed && session.tokens && !rebasing) {
       const reportedSum = buckets.reduce(
         (sum, b) => addTokens(sum, bucketTotals(b)),
@@ -566,10 +572,28 @@ export class TokenLedger {
           day: string;
           model: string;
           harness: string;
+          held_input: number;
+          held_output: number;
+          held_cache_read: number;
+          held_cache_write: number;
         } & UsageRow)[];
         for (const held of live) {
           if (present.has(`${held.day}|${held.model}`)) continue;
           const banked = totalsOf(held);
+          // A bucket can hold watermark it never banked — that is exactly what
+          // seeding does. Migrating such a bucket must not let its history in
+          // through the destination, which has no watermark of its own and
+          // would bank the lot: the seed guard would be defeated by a rename.
+          // Carrying the fact forward re-seeds the new keys, so the migration
+          // stays as invisible as the seeding was.
+          if (
+            held.held_input > banked.input ||
+            held.held_output > banked.output ||
+            held.held_cache_read > banked.cacheRead ||
+            held.held_cache_write > banked.cacheWrite
+          ) {
+            migratedUnbanked = true;
+          }
           this.q.unbankDay.run(
             banked.input,
             banked.output,
@@ -604,7 +628,7 @@ export class TokenLedger {
       // being absent: a session we already bank against is a session we are
       // tracking, and a day it opens later is genuine backfill, not a replay.
       // `rebasing` is the one case a *known* session seeds — see above.
-      const seed = rebasing || (!seen && (alreadyBanked || startedEarlier));
+      const seed = rebasing || migratedUnbanked || (!seen && (alreadyBanked || startedEarlier));
       const watermark: TokenTotals = row ? totalsOf(row) : seed ? bucketTotals(b) : emptyTokens();
       const delta: TokenTotals = {
         input: Math.max(0, b.input - watermark.input),

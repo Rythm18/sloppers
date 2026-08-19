@@ -670,6 +670,31 @@ describe('TokenLedger', () => {
     expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(600);
   });
 
+  it('takes back only what a seeded bucket actually banked', () => {
+    // A seeded bucket carries a watermark it never contributed — that is what
+    // seeding means. Un-banking against the watermark rather than the recorded
+    // contribution would take back 1000 that was never added, and since the
+    // row is shared it would come out of another session's spend.
+    ledger.ingest('m1', [realistic('s2', [bucket(D19, 'unknown', 300)])], TODAY_19);
+    // Started before today and first seen now, so this one seeds: watermark
+    // 1000, banked nothing.
+    ledger.ingest(
+      'm1',
+      [realistic('old', [bucket(D19, 'unknown', 1000)], { startedAt: STARTED_18 })],
+      TODAY_19 + 1000,
+    );
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(300);
+
+    ledger.ingest(
+      'm1',
+      [realistic('old', [bucket(D19, 'gpt-5', 1000)], { startedAt: STARTED_18 })],
+      TODAY_19 + 2000,
+    );
+    const today = ledger.todayFor('m1', TODAY_19);
+    expect(today.byModel?.unknown?.input).toBe(300);
+    expect(today.tokens.input).toBe(300);
+  });
+
   it('does not let a migrated-away model keep the day’s cost unknown', () => {
     // Un-banking leaves the old model's row at zero. If a zeroed row still
     // counted as a model in the day, an unpriced one would null the cost for
