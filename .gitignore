@@ -15,5 +15,6 @@ coverage/
 playwright-report/
 test-results/
 
-# Design specs and plans stay local
+# Design specs, plans, and the working notes behind them stay local
 docs/superpowers/
+.superpowers/
