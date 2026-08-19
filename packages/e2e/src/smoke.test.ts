@@ -1,7 +1,15 @@
 import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { dayOf, type ServerToWeb, serverToWebSchema, type WebWorld } from '@sloppers/protocol';
+import {
+  addTokens,
+  dayOf,
+  type ServerToWeb,
+  type SessionSnapshot,
+  serverToWebSchema,
+  type TokenTotals,
+  type WebWorld,
+} from '@sloppers/protocol';
 import { createSloppersServer, type SloppersServer } from '@sloppers/server';
 import { newConfig, redeemPairingCode, saveConfig, startDaemon } from 'sloppers';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -23,12 +31,45 @@ const NOW = Date.now();
 const START_OF_TODAY = new Date(NOW).setHours(0, 0, 0, 0);
 const startedAgo = (ms: number) => Math.max(NOW - ms, START_OF_TODAY + 1000);
 
+/** One minute before midnight: always yesterday, whatever hour the suite runs. */
+const LAST_NIGHT = START_OF_TODAY - 60_000;
+const TODAY = dayOf(NOW);
+const YESTERDAY = dayOf(LAST_NIGHT);
+
+const CLAUDE_SESSION_ID = 'e2e-claude-session';
+const CLAUDE_MODEL = 'claude-fable-5';
+/** Subagents routinely run a cheaper model than the session that spawned them. */
+const SUBAGENT_MODEL = 'claude-haiku-4-5';
+
+/** The parent transcript's one assistant turn, today. */
+const CLAUDE_TURN: TokenTotals = { input: 1200, output: 300, cacheRead: 40_000, cacheWrite: 500 };
+/** The subagent's turn from last night, and the one from this morning. */
+const SUBAGENT_LAST_NIGHT: TokenTotals = {
+  input: 2_000,
+  output: 250,
+  cacheRead: 5_000,
+  cacheWrite: 100,
+};
+const SUBAGENT_TODAY: TokenTotals = { input: 800, output: 90, cacheRead: 3_000, cacheWrite: 50 };
+/** What the Codex fixture's cumulative `token_count` works out to. */
+const CODEX_TURN: TokenTotals = { input: 30_000, output: 4_000, cacheRead: 60_000, cacheWrite: 0 };
+
+/** Claude Code's on-disk spelling of a token count. */
+function claudeUsage(t: TokenTotals) {
+  return {
+    input_tokens: t.input,
+    output_tokens: t.output,
+    cache_read_input_tokens: t.cacheRead,
+    cache_creation_input_tokens: t.cacheWrite,
+  };
+}
+
 function writeClaudeSession(home: string): string {
   const dir = join(home, '.claude', 'projects', '-work-myapp');
   mkdirSync(dir, { recursive: true });
   const file = join(dir, 'e2e-claude-session.jsonl');
   const base = {
-    sessionId: 'e2e-claude-session',
+    sessionId: CLAUDE_SESSION_ID,
     cwd: '/work/myapp',
     gitBranch: 'feat/office',
     isSidechain: false,
@@ -43,19 +84,68 @@ function writeClaudeSession(home: string): string {
       requestId: 'req-1',
       timestamp: new Date(startedAgo(4 * 60_000)).toISOString(),
       message: {
-        model: 'claude-fable-5',
+        model: CLAUDE_MODEL,
         content: [{ type: 'tool_use', name: 'Bash' }],
-        usage: {
-          input_tokens: 1200,
-          output_tokens: 300,
-          cache_read_input_tokens: 40_000,
-          cache_creation_input_tokens: 500,
-        },
+        usage: claudeUsage(CLAUDE_TURN),
       },
     },
   ];
   writeFileSync(file, `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`);
   return file;
+}
+
+/**
+ * The subagent transcript belonging to the session above: its own file, its
+ * own model, `isSidechain: true`, and the *parent's* sessionId — which is why
+ * it must never surface as a session of its own.
+ *
+ * Both of the things the stats rebuild exists for are in this one file. Its
+ * spend used to be thrown away with the file (locally, sidechains carry about
+ * half of all billed tokens), and its two turns straddle midnight, which the
+ * old flat-total model filed under a single day.
+ *
+ * The turns are stamped across midnight while the parent stays stamped today
+ * on purpose. A session the ledger meets for the first time *after* it started
+ * is seeded rather than backfilled — deliberately, see `foldUsage` — so a
+ * parent stamped last night would make every assertion below read zero and
+ * prove nothing about which day the tokens landed on.
+ */
+function writeClaudeSidechain(home: string): void {
+  const dir = join(home, '.claude', 'projects', '-work-myapp');
+  mkdirSync(dir, { recursive: true });
+  const base = {
+    sessionId: CLAUDE_SESSION_ID,
+    cwd: '/work/myapp',
+    gitBranch: 'feat/office',
+    isSidechain: true,
+    type: 'assistant',
+  };
+  const lines = [
+    {
+      ...base,
+      requestId: 'req-sub-night',
+      timestamp: new Date(LAST_NIGHT).toISOString(),
+      message: {
+        model: SUBAGENT_MODEL,
+        content: [{ type: 'text', text: 'searching' }],
+        usage: claudeUsage(SUBAGENT_LAST_NIGHT),
+      },
+    },
+    {
+      ...base,
+      requestId: 'req-sub-morning',
+      timestamp: new Date(startedAgo(3 * 60_000)).toISOString(),
+      message: {
+        model: SUBAGENT_MODEL,
+        content: [{ type: 'text', text: 'found it' }],
+        usage: claudeUsage(SUBAGENT_TODAY),
+      },
+    },
+  ];
+  writeFileSync(
+    join(dir, 'e2e-claude-sidechain.jsonl'),
+    `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`,
+  );
 }
 
 function writeCodexSession(home: string): void {
@@ -230,6 +320,11 @@ async function pairCollector(port: number, world: WebWorld, home: string): Promi
   );
 }
 
+/** Every bucket a session reported for one day, whatever order they arrived in. */
+function bucketsOn(session: SessionSnapshot | undefined, day: string) {
+  return session?.usage?.filter((b) => b.day === day);
+}
+
 describe('end-to-end smoke', () => {
   let server: SloppersServer;
   let home: string;
@@ -252,6 +347,7 @@ describe('end-to-end smoke', () => {
   // watcher startup + real websocket round-trips.
   it('synthetic sessions flow from disk to a joined browser', { timeout: 30_000 }, async () => {
     const claudeFile = writeClaudeSession(home);
+    writeClaudeSidechain(home);
     writeCodexSession(home);
 
     probe = new WebProbe(server.port);
@@ -262,8 +358,26 @@ describe('end-to-end smoke', () => {
 
     daemon = startDaemon({ collectorVersion: 'e2e', home, log: () => {} });
 
-    const presence = await probe.next((m) => m.type === 'presence' && m.sessions.length === 2);
+    // Waited on by the parent's *merged* total rather than by a session count:
+    // the count is already right as soon as the parent and the Codex rollout
+    // have been read, so a snapshot from before the sidechain was folded in
+    // would satisfy it, and everything below would fail on timing rather than
+    // on behaviour.
+    const claudeTotal = addTokens(addTokens(CLAUDE_TURN, SUBAGENT_LAST_NIGHT), SUBAGENT_TODAY);
+    const presence = await probe.next(
+      (m) =>
+        m.type === 'presence' &&
+        m.sessions.some((s) => s.harness === 'codex') &&
+        m.sessions.some(
+          (s) => s.harness === 'claude-code' && s.tokens?.input === claudeTotal.input,
+        ),
+    );
     if (presence.type !== 'presence') throw new Error('unreachable');
+
+    // Two files, one session. The sidechain carries the parent's sessionId, so
+    // showing it would put the same session in the room twice.
+    expect(presence.sessions).toHaveLength(2);
+    expect(presence.sessions.filter((s) => s.harness === 'claude-code')).toHaveLength(1);
 
     const claude = presence.sessions.find((s) => s.harness === 'claude-code');
     const codex = presence.sessions.find((s) => s.harness === 'codex');
@@ -271,25 +385,57 @@ describe('end-to-end smoke', () => {
       title: 'Building the pixel office',
       project: 'myapp',
       branch: 'feat/office',
-      model: 'claude-fable-5',
-      tokens: { input: 1200, output: 300, cacheRead: 40_000, cacheWrite: 500 },
+      // The parent's model, not the subagent's: the subagent's spend belongs
+      // to this session, its identity does not.
+      model: CLAUDE_MODEL,
+      tokens: claudeTotal,
     });
     expect(codex).toMatchObject({
       project: 'pipeline',
       branch: 'main',
       model: 'gpt-5.6-sol',
       state: 'waiting',
-      tokens: { input: 30_000, output: 4_000, cacheRead: 60_000, cacheWrite: 0 },
+      tokens: CODEX_TURN,
     });
-    // Both sessions started today, so the ledger counts them fully.
-    expect(presence.today.tokens).toMatchObject({ input: 31_200, output: 4_300 });
+
+    // Bucketed by the day and the model the work actually happened on. Last
+    // night's subagent turn is a day of its own, not part of today.
+    expect(bucketsOn(claude, YESTERDAY)).toEqual([
+      { day: YESTERDAY, model: SUBAGENT_MODEL, ...SUBAGENT_LAST_NIGHT },
+    ]);
+    expect(bucketsOn(claude, TODAY)).toHaveLength(2);
+    expect(bucketsOn(claude, TODAY)).toEqual(
+      expect.arrayContaining([
+        { day: TODAY, model: CLAUDE_MODEL, ...CLAUDE_TURN },
+        { day: TODAY, model: SUBAGENT_MODEL, ...SUBAGENT_TODAY },
+      ]),
+    );
+
+    // ...and the ledger banks each bucket under its own day. Today gets the
+    // parent's turn, the subagent's morning turn, and Codex — and none of last
+    // night's, which the old flat total would have swept in.
+    const todayTotal = addTokens(addTokens(CLAUDE_TURN, SUBAGENT_TODAY), CODEX_TURN);
+    expect(presence.today.tokens).toEqual(todayTotal);
     expect(presence.today.sessionsRun).toBe(2);
+    // Split per model, the subagent's share is its own line — which exists at
+    // all only because a sidechain's spend is counted.
+    expect(presence.today.byModel?.[SUBAGENT_MODEL]).toEqual(SUBAGENT_TODAY);
+    expect(presence.today.byModel?.[CLAUDE_MODEL]).toEqual(CLAUDE_TURN);
+
+    // Yesterday is where last night's tokens went, and nowhere else. Its one
+    // active minute is measured off the transcript's own timestamp, not
+    // guessed from when the collector happened to look.
+    const lastNight = server.rooms.ledger.todayFor(world.you.memberId, LAST_NIGHT);
+    expect(lastNight.tokens).toEqual(SUBAGENT_LAST_NIGHT);
+    expect(lastNight.byModel).toEqual({ [SUBAGENT_MODEL]: SUBAGENT_LAST_NIGHT });
+    expect(lastNight.activeMinutes).toBe(1);
 
     // A live append flows through within the debounce window.
+    const APPEND: TokenTotals = { input: 500, output: 100, cacheRead: 0, cacheWrite: 0 };
     appendFileSync(
       claudeFile,
       `${JSON.stringify({
-        sessionId: 'e2e-claude-session',
+        sessionId: CLAUDE_SESSION_ID,
         cwd: '/work/myapp',
         gitBranch: 'feat/office',
         isSidechain: false,
@@ -297,19 +443,24 @@ describe('end-to-end smoke', () => {
         type: 'assistant',
         requestId: 'req-2',
         message: {
-          model: 'claude-fable-5',
+          model: CLAUDE_MODEL,
           content: [{ type: 'text', text: 'done' }],
-          usage: { input_tokens: 500, output_tokens: 100 },
+          usage: { input_tokens: APPEND.input, output_tokens: APPEND.output },
         },
       })}\n`,
     );
+    const grownInput = (claude?.tokens?.input ?? 0) + APPEND.input;
     const updated = await probe.next(
       (m) =>
         m.type === 'presence' &&
-        m.sessions.some((s) => s.harness === 'claude-code' && s.tokens?.input === 1700),
+        m.sessions.some((s) => s.harness === 'claude-code' && s.tokens?.input === grownInput),
     );
     if (updated.type !== 'presence') throw new Error('unreachable');
-    expect(updated.today.tokens.input).toBe(31_700);
+    expect(updated.today.tokens.input).toBe(todayTotal.input + APPEND.input);
+    // Growth lands on today; last night's total is settled and stays put.
+    expect(server.rooms.ledger.todayFor(world.you.memberId, LAST_NIGHT).tokens).toEqual(
+      SUBAGENT_LAST_NIGHT,
+    );
 
     // The leaderboard follows.
     const leaderboard = await probe.next((m) => m.type === 'leaderboard');
