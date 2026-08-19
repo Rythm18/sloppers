@@ -275,8 +275,13 @@ function prepare(db: Db) {
      * Filtering by scheme let a transition launder the history away (the rows
      * being retired are exactly the ones carrying the flag); filtering by day
      * let a midnight boundary write a clean row beside a dirty one. Together
-     * with the `MAX` above and the fact that nothing anywhere deletes from
-     * this table, the answer can only ever go false → true.
+     * with the `MAX` above, and with rows only ever being retired rather than
+     * removed *by the ledger*, the answer can only ever go false → true.
+     *
+     * One thing outside this file does delete them: `MEMBER_OWNED_TABLES` in
+     * `workspace/manager.ts`, when a member is erased. That is safe only
+     * because it erases `daily_usage` in the same transaction and member ids
+     * are never reused — see the note there, which this depends on.
      */
     sessionEverShrank: db.prepare(`
       SELECT 1 AS yes FROM usage_watermarks

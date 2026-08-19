@@ -21,7 +21,23 @@ const MAX_MEMBERS_PER_WORKSPACE = 64;
 /** Members that never paired a device and haven't been seen this long go. */
 const STALE_MEMBER_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Everything a member row scoped to one workspace is deleted from. */
+/**
+ * Everything a member row scoped to one workspace is deleted from.
+ *
+ * `daily_usage` and `usage_watermarks` must stay here **together**, and the
+ * ledger quietly depends on it. Watermarks carry two facts the ledger treats
+ * as one-way — `shrunk`, which makes a session permanently ineligible for
+ * downtime recovery, and `banked_*`, which says how much a bucket contributed
+ * to `daily_usage` — and it reasons about both on the basis that nothing
+ * removes a watermark row while its banked spend survives. Deleting only
+ * `usage_watermarks` would strand `daily_usage` totals no watermark admits to,
+ * and re-open the double-counting the ledger's re-basing and reconciliation
+ * exist to prevent.
+ *
+ * Safe as written because the two are erased in one transaction and member ids
+ * are random 16-hex that are never reused, so nothing can bank against a
+ * half-erased member. Keep it that way.
+ */
 const MEMBER_OWNED_TABLES = [
   'daily_usage',
   'daily_activity',
