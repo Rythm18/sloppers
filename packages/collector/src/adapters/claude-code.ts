@@ -28,9 +28,10 @@ import { addUsage, markMinute, newAccumulator, removeUsage } from '../core/types
  *
  * `--resume` copies a transcript into a NEW file with a new sessionId but
  * the ORIGINAL usage entries and requestIds. Usage is therefore attributed
- * across files: the first file to report a requestId owns it, and copies in
- * other files don't count, so a resumed session reports only post-resume
- * usage and the server's ledger never double-counts the copied history.
+ * across files: the first file to report a requestId owns it for a rolling
+ * day (see `claim`), and copies in other files don't count, so a resumed
+ * session reports only post-resume usage and the server's ledger never
+ * double-counts the copied history.
  */
 
 interface ClaudeUsage {
@@ -83,23 +84,39 @@ function entryMs(entry: Record<string, unknown>, acc: SessionAccumulator): numbe
 }
 
 /**
- * Backstop on the resume-dedup index, which is otherwise bounded by tracker
- * liveness: `forgetFile` releases a transcript's claims when the tracker drops
- * it, 30 minutes (`EXPIRE_MS`) after it goes quiet. Steady-state size is
- * therefore the requestIds of *currently tracked* files — a median local
- * transcript holds 22 and the largest 3399, so realistically low thousands,
- * two orders of magnitude below this cap. At ~150 bytes an entry (a
- * 28-character id plus a Map slot; the file path is a shared reference, not a
- * copy) the cap bounds the index at ~15MB even if liveness release somehow
- * never fired.
+ * How long a resume claim is worth keeping. See `claim` below for why this is
+ * exactly the window in which the server cannot deduplicate a resume.
  *
- * The cap is a second line of defence, not the primary bound, and that
- * distinction matters: count-based eviction is decoupled from tracker
- * liveness, so if it ever *did* fire it could drop a claim belonging to a
- * still-live file. A resume copy reporting that id would then find no owner
- * and count it a second time on top of the original's still-held total. That
- * is the known limitation of the cap alone; reaching it now requires ~100k
- * distinct requestIds among files active within the same 30-minute window.
+ * A rolling window rather than "the current local day", despite the day being
+ * what the server's guard keys on, because the two are equivalent for safety
+ * and the rolling one has no cliff. A day rule has to retire claims wholesale
+ * the moment a newer day is seen, and lines do not reach the adapter in global
+ * date order: `seedTracker` folds every recently-touched transcript in
+ * directory order at startup, so a file carrying tomorrow's entries can land
+ * between the two halves of a same-day resume pair and retire the claim that
+ * pair depends on. A window anchored to the newest timestamp seen has no such
+ * moment. It is also never *less* retentive than the day rule — a session
+ * starting at time T is protected by the server from the next midnight, which
+ * is at most 24h after T, and claims are made at or after T — so it covers the
+ * day rule's window and then some.
+ */
+const CLAIM_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Backstop on the resume-dedup index, which is primarily bounded by
+ * `CLAIM_RETENTION_MS`. The working size is one rolling day's requestIds: the
+ * busiest single local day in 49 active days of local transcripts produced
+ * 2939, so this cap sits a good 30x above it. At ~150 bytes an entry (a
+ * 28-character id plus a Map slot; the file path is a shared reference, not a
+ * copy) it bounds the index at ~15MB even if time-based retirement never
+ * fired.
+ *
+ * It is a second line of defence, and the distinction matters: count-based
+ * eviction is decoupled from the retention window, so if it ever *did* fire it
+ * could drop a claim that is still inside it — after which a resume copy of
+ * that request would find no owner and count it a second time, the one case
+ * the server cannot catch. Reaching it needs ~100k distinct requestIds inside
+ * a single rolling day.
  */
 const MAX_TRACKED_REQUESTS = 100_000;
 
@@ -108,18 +125,53 @@ export function createClaudeCodeAdapter(
   maxTrackedRequests: number = MAX_TRACKED_REQUESTS,
 ): HarnessAdapter {
   const root = join(home, '.claude', 'projects');
-  /** requestId → transcript file that first reported it (resume dedup). */
-  const requestOwner = new Map<string, string>();
-  /** Claim `requestId` for `owner`, evicting the oldest claim past the cap. */
-  const remember = (requestId: string, owner: string) => {
-    requestOwner.set(requestId, owner);
-    // Map iterates in insertion order, and re-setting an existing key does
-    // not reorder it, so the first key is always the oldest claim.
+  /** requestId → the transcript that owns it, and when it was claimed. */
+  const requestOwner = new Map<string, { owner: string; ms: number }>();
+  /** Newest entry timestamp seen; the retention window hangs off this. */
+  let latestMs = 0;
+
+  /**
+   * Record that `filePath` owns `requestId` unless a live claim already says
+   * otherwise, and return the owner. Claims live `CLAIM_RETENTION_MS`, which
+   * is how long the server is blind to a resume.
+   *
+   * `--resume` replays the original's entries verbatim under a NEW sessionId,
+   * so the server sees an unfamiliar session and has exactly one guard: a
+   * session with no watermark row whose `startedAt` predates today is seeded
+   * at its current totals and so contributes nothing. The copy inherits the
+   * original's first timestamp — verified against the one resume pair in the
+   * local corpus: 12 shared requestIds, distinct sessionIds, byte-identical
+   * first timestamp, same local day — so that guard fires for a *cross-day*
+   * resume and cannot fire for a *same-day* one, where `startedAt` is today
+   * and `daily_usage` just adds the replayed totals again.
+   *
+   * Hence the lifetime. Retiring sooner — when the tracker drops the file, say
+   * — reopens the same-day resume, because file liveness (30 minutes of quiet)
+   * is far shorter than the server's blind spot. Retiring later only costs
+   * memory. Time is read off the transcript rather than the wall clock, which
+   * keeps the fold pure and deterministic.
+   */
+  const claim = (requestId: string, ms: number, filePath: string): string => {
+    if (ms > latestMs) latestMs = ms;
+    const cutoff = latestMs - CLAIM_RETENTION_MS;
+    const held = requestOwner.get(requestId);
+    const owner = held && held.ms >= cutoff ? held.owner : filePath;
+    requestOwner.set(requestId, { owner, ms });
+    // Insertion order tracks arrival, which is chronological within a file, so
+    // the head is the oldest claim; stop at the first one still inside the
+    // window rather than scanning the whole index.
+    for (const [id, entry] of requestOwner) {
+      if (entry.ms >= cutoff) break;
+      requestOwner.delete(id);
+    }
+    // Re-setting an existing key does not reorder it, so the head is still the
+    // oldest claim when the count backstop has to bite.
     while (requestOwner.size > maxTrackedRequests) {
       const oldest = requestOwner.keys().next().value;
       if (oldest === undefined) break;
       requestOwner.delete(oldest);
     }
+    return owner;
   };
   return {
     id: 'claude-code',
@@ -129,18 +181,6 @@ export function createClaudeCodeAdapter(
       filePath.endsWith('.jsonl') &&
       !filePath.includes(`${sep}memory${sep}`),
     newAccumulator,
-    /**
-     * The tracker has dropped this transcript, so nothing can report its
-     * requests any more and its claims are dead weight. Releasing them here is
-     * what keeps the index sized by live files rather than by uptime. Linear
-     * in the index, which is precisely why that stays small — a few thousand
-     * entries, scanned only when a file expires.
-     */
-    forgetFile(filePath) {
-      for (const [requestId, owner] of requestOwner) {
-        if (owner === filePath) requestOwner.delete(requestId);
-      }
-    },
     ingestLine(line, acc) {
       let entry: Record<string, unknown>;
       try {
@@ -197,8 +237,7 @@ export function createClaudeCodeAdapter(
               // The machine was busy at this moment whoever owns the tokens,
               // so the minute is recorded even for a resume copy.
               markMinute(acc, ms);
-              const owner = requestOwner.get(requestId) ?? acc.filePath;
-              remember(requestId, owner);
+              const owner = claim(requestId, ms, acc.filePath);
               if (owner === acc.filePath) {
                 const s = scratchOf(acc);
                 const next = toTotals(usage);

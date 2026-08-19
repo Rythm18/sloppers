@@ -10,15 +10,12 @@ import { addUsage, newAccumulator } from './types.js';
 const AT = Date.parse('2026-08-19T05:30:00.000Z');
 
 /** A minimal line format: `<sessionId> <kind> [tokens]` */
-function fakeAdapter(root: string, forgotten: string[] = []): HarnessAdapter {
+function fakeAdapter(root: string): HarnessAdapter {
   return {
     id: 'fake-harness',
     roots: () => [root],
     matches: (p) => p.startsWith(root) && p.endsWith('.log'),
     newAccumulator,
-    forgetFile(filePath) {
-      forgotten.push(filePath);
-    },
     ingestLine(line, acc) {
       const [id, kind, tokens] = line.split(' ');
       if (id) acc.sessionId = id;
@@ -41,9 +38,8 @@ function fakeAdapter(root: string, forgotten: string[] = []): HarnessAdapter {
 
 function setup() {
   const root = mkdtempSync(join(tmpdir(), 'sloppers-tracker-'));
-  const forgotten: string[] = [];
-  const tracker = new SessionTracker([fakeAdapter(root, forgotten)]);
-  return { root, tracker, forgotten };
+  const tracker = new SessionTracker([fakeAdapter(root)]);
+  return { root, tracker };
 }
 
 describe('SessionTracker', () => {
@@ -89,31 +85,6 @@ describe('SessionTracker', () => {
     // Sidechains outnumber displayable sessions better than ten to one.
     tracker.snapshot(1000 + EXPIRE_MS);
     expect(tracker.trackedFiles()).toEqual([]);
-  });
-
-  it('tells the adapter to release a file however that file is dropped', () => {
-    // Cross-file state keyed by path outlives the file unless every removal
-    // path reports it, so all three are covered: expiry, explicit removal,
-    // and the file vanishing mid-read.
-    const { root, tracker, forgotten } = setup();
-    const expired = join(root, 'expired.log');
-    const removed = join(root, 'removed.log');
-    const vanished = join(root, 'vanished.log');
-    for (const file of [expired, removed, vanished]) writeFileSync(file, 's1 work\n');
-    tracker.ingestFile(expired, 1000);
-    // Kept fresh so the expiry sweep below claims only the first file.
-    tracker.ingestFile(removed, 1000 + EXPIRE_MS);
-    tracker.ingestFile(vanished, 1000 + EXPIRE_MS);
-
-    tracker.snapshot(1000 + EXPIRE_MS);
-    expect(forgotten).toEqual([expired]);
-
-    tracker.removeFile(removed);
-    expect(forgotten).toContain(removed);
-
-    rmSync(vanished);
-    tracker.ingestFile(vanished, 2000);
-    expect(forgotten).toContain(vanished);
   });
 
   it('ignores files no adapter claims', () => {

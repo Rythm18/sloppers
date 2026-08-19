@@ -1,5 +1,10 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { dayOf } from '@sloppers/protocol';
 import { describe, expect, it } from 'vitest';
+import { EXPIRE_MS } from '../core/state.js';
+import { SessionTracker } from '../core/tracker.js';
 import type { SessionAccumulator } from '../core/types.js';
 import { totalUsage } from '../core/types.js';
 import { createClaudeCodeAdapter } from './claude-code.js';
@@ -292,24 +297,121 @@ describe('claude-code adapter', () => {
     expect(totalUsage(accA)).toMatchObject({ input: 100, output: 50 });
   });
 
-  it('releases a file’s request claims once the tracker forgets it', () => {
+  it('a same-day resume is not re-counted after the original transcript expires', () => {
+    // The server cannot catch this one. Its only resume guard seeds a new
+    // session's watermark at current totals when `startedAt < startOfToday`,
+    // and a same-day resume inherits a `startedAt` of *today*; the copy also
+    // carries a distinct sessionId, so no watermark row matches and
+    // `daily_usage` just adds the replayed totals a second time. The claim has
+    // to outlive the file for the rest of the day, which is exactly as long as
+    // the server stays blind.
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-claude-'));
+    try {
+      const dir = join(home, '.claude', 'projects', '-home-dev-myapp');
+      mkdirSync(dir, { recursive: true });
+      const tracker = new SessionTracker([createClaudeCodeAdapter(home)]);
+      const at = localIso(2026, 8, 19, 9, 0);
+      const transcript = (sessionId: string) =>
+        `${JSON.stringify({
+          ...base,
+          sessionId,
+          timestamp: at,
+          type: 'assistant',
+          requestId: 'req-1',
+          message: {
+            model: 'claude-opus-5',
+            content: [],
+            usage: { input_tokens: 100, output_tokens: 50 },
+          },
+        })}\n`;
+
+      const original = join(dir, 'original.jsonl');
+      writeFileSync(original, transcript('sess-a'));
+      tracker.ingestFile(original, 1000);
+      expect(tracker.snapshot(2000)[0]?.tokens).toMatchObject({ input: 100, output: 50 });
+
+      // The original goes quiet and the tracker drops it entirely.
+      expect(tracker.snapshot(1000 + EXPIRE_MS)).toEqual([]);
+
+      // Same day, the user resumes it: a new file, a new sessionId, the same
+      // requestId replayed verbatim. Those tokens were already reported.
+      const resumed = join(dir, 'resumed.jsonl');
+      writeFileSync(resumed, transcript('sess-b'));
+      tracker.ingestFile(resumed, 1000 + EXPIRE_MS);
+      expect(tracker.snapshot(2000 + EXPIRE_MS)[0]?.tokens).toBeUndefined();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('retires claims older than the retention window, keeping recent ones', () => {
+    // Safe precisely because the server takes over at the day boundary: a
+    // resume replaying yesterday's requests inherits yesterday's `startedAt`,
+    // so `startedAt < startOfToday` seeds its watermark at current totals and
+    // the replay adds nothing. Holding the claim past that point would only
+    // cost memory. 25h apart, so the older claim is unambiguously outside the
+    // 24h window rather than sitting exactly on its edge.
     const fresh = createClaudeCodeAdapter(HOME);
-    const original = `${HOME}/.claude/projects/-home-dev-myapp/original.jsonl`;
-    const resumed = `${HOME}/.claude/projects/-home-dev-myapp/resumed.jsonl`;
-    const usage = { input_tokens: 100, output_tokens: 50 };
+    const yesterday = localIso(2026, 8, 18, 9, 0);
+    const today = localIso(2026, 8, 19, 10, 0);
+    const entry = (requestId: string, timestamp: string) =>
+      JSON.stringify({
+        ...base,
+        timestamp,
+        type: 'assistant',
+        requestId,
+        message: {
+          model: 'claude-opus-5',
+          content: [],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        },
+      });
 
-    const accA = fresh.newAccumulator(original);
-    fresh.ingestLine(JSON.stringify(assistant({ requestId: 'shared-1', usage })), accA);
+    const accA = fresh.newAccumulator(`${HOME}/.claude/projects/-p/a.jsonl`);
+    fresh.ingestLine(entry('old-1', yesterday), accA);
+    // Any work today retires yesterday's claims.
+    fresh.ingestLine(entry('new-1', today), accA);
 
-    // The original goes quiet and the tracker drops it. Nothing reports its
-    // requests any more, so a resume picked up later legitimately owns them —
-    // and, more to the point, the claim is no longer held for the life of the
-    // process just because the id was seen once.
-    fresh.forgetFile?.(original);
-
-    const accB = fresh.newAccumulator(resumed);
-    fresh.ingestLine(JSON.stringify(assistant({ requestId: 'shared-1', usage })), accB);
+    const accB = fresh.newAccumulator(`${HOME}/.claude/projects/-p/b.jsonl`);
+    fresh.ingestLine(entry('old-1', yesterday), accB);
     expect(totalUsage(accB)).toMatchObject({ input: 100, output: 50 });
+    // Today's claim is still held, so a copy of it is still deduplicated.
+    fresh.ingestLine(entry('new-1', today), accB);
+    expect(totalUsage(accB)).toMatchObject({ input: 100, output: 50 });
+  });
+
+  it('a newer transcript landing between resume halves does not retire the claim', () => {
+    // `seedTracker` folds every recently-touched transcript in directory
+    // order, so lines do not reach the adapter in global date order and a file
+    // carrying a later day can land between the two halves of a same-day
+    // resume pair. Retiring claims wholesale on day rollover would drop the
+    // claim exactly here; a window anchored to the newest timestamp does not.
+    const fresh = createClaudeCodeAdapter(HOME);
+    const at = localIso(2026, 8, 19, 9, 0);
+    const nextDay = localIso(2026, 8, 20, 8, 0);
+    const entry = (requestId: string, timestamp: string) =>
+      JSON.stringify({
+        ...base,
+        timestamp,
+        type: 'assistant',
+        requestId,
+        message: {
+          model: 'claude-opus-5',
+          content: [],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        },
+      });
+
+    const accA = fresh.newAccumulator(`${HOME}/.claude/projects/-p/a.jsonl`);
+    fresh.ingestLine(entry('req-1', at), accA);
+
+    // An unrelated transcript, walked next, whose entries are on the next day.
+    const accC = fresh.newAccumulator(`${HOME}/.claude/projects/-p/c.jsonl`);
+    fresh.ingestLine(entry('req-9', nextDay), accC);
+
+    const accB = fresh.newAccumulator(`${HOME}/.claude/projects/-p/b.jsonl`);
+    fresh.ingestLine(entry('req-1', at), accB);
+    expect(totalUsage(accB)).toBeUndefined();
   });
 
   it('bounds the resume-dedup index, evicting the oldest claim first', () => {
