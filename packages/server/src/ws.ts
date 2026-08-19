@@ -8,8 +8,8 @@ import {
 } from '@sloppers/protocol';
 import { type WebSocket, WebSocketServer } from 'ws';
 import type { Db } from './db/index.js';
-import type { Room, WebClient } from './room.js';
-import type { RoomManager } from './rooms.js';
+import type { Room, WebClient } from './workspace/live.js';
+import type { RoomManager } from './workspace/manager.js';
 
 const MAX_PAYLOAD = 256 * 1024;
 const HEARTBEAT_MS = 30_000;

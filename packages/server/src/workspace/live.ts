@@ -10,9 +10,9 @@ import {
   type WebWorld,
 } from '@sloppers/protocol';
 import type { WebSocket } from 'ws';
-import type { Db } from './db/index.js';
-import type { TokenLedger } from './ledger.js';
-import { derivePresence } from './presence.js';
+import type { Db } from '../db/index.js';
+import type { TokenLedger } from '../ledger.js';
+import { derivePresence } from '../presence.js';
 
 const LEADERBOARD_DEBOUNCE_MS = 2000;
 /** Open floor near the centre of the default 512×352 office map. */

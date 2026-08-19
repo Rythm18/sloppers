@@ -9,7 +9,7 @@ import {
 import { Hono } from 'hono';
 import type { Db } from './db/index.js';
 import { deviceKey, pairingCode, relinkToken } from './ids.js';
-import type { RoomManager } from './rooms.js';
+import type { RoomManager } from './workspace/manager.js';
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;
 const RELINK_TTL_MS = 10 * 60 * 1000;

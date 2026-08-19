@@ -3,7 +3,7 @@ import { serve } from '@hono/node-server';
 import { type Db, openDb } from './db/index.js';
 import { startDemo } from './demo.js';
 import { createApp } from './http.js';
-import { RoomManager } from './rooms.js';
+import { RoomManager } from './workspace/manager.js';
 import { attachWebSockets } from './ws.js';
 
 const SWEEP_MS = 15_000;
@@ -65,5 +65,5 @@ export function createSloppersServer(opts: SloppersServerOptions): Promise<Slopp
 export { openDb } from './db/index.js';
 export { TokenLedger } from './ledger.js';
 export { derivePresence } from './presence.js';
-export { Room } from './room.js';
-export { RoomManager } from './rooms.js';
+export { Room } from './workspace/live.js';
+export { RoomManager } from './workspace/manager.js';

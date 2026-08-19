@@ -1,6 +1,6 @@
 import type { CollectorSnapshot, SessionSnapshot } from '@sloppers/protocol';
 import type { WebSocket } from 'ws';
-import type { RoomManager } from './rooms.js';
+import type { RoomManager } from './workspace/manager.js';
 
 /**
  * `--demo` populates a room with simulated teammates whose agents work,
