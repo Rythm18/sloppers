@@ -1,4 +1,9 @@
-import { type Position, serverToWebSchema, type WebToServer } from '@sloppers/protocol';
+import {
+  type AdminOp,
+  type Position,
+  serverToWebSchema,
+  type WebToServer,
+} from '@sloppers/protocol';
 import { bridge } from '../game/bridge.js';
 import { useStore } from '../store.js';
 
@@ -46,6 +51,14 @@ export type JoinIntent =
   | { kind: 'invited'; roomCode: string; displayName: string; avatar: string }
   | { kind: 'create'; roomName: string; displayName: string; avatar: string };
 
+/**
+ * The currently live connection, if any — set for the lifetime of one
+ * `start()`..`stop()` span. UI components never hold a socket reference;
+ * they reach the network layer through module-level functions like this one
+ * and `mintPairingCode` below.
+ */
+let activeSocket: OfficeSocket | null = null;
+
 export class OfficeSocket {
   private ws: WebSocket | null = null;
   private attempts = 0;
@@ -60,6 +73,7 @@ export class OfficeSocket {
   constructor(private intent: JoinIntent) {}
 
   start(): void {
+    activeSocket = this;
     useStore.getState().setConnection('connecting');
     this.trackActivity();
     this.cleanups.push(
@@ -78,9 +92,15 @@ export class OfficeSocket {
 
   stop(): void {
     this.closed = true;
+    if (activeSocket === this) activeSocket = null;
     if (this.moveTimer) clearInterval(this.moveTimer);
     for (const cleanup of this.cleanups.splice(0)) cleanup();
     this.ws?.close();
+  }
+
+  /** Dispatch an admin op, role-gated UI's only way to reach the wire. */
+  sendAdmin(op: AdminOp): void {
+    this.send({ type: 'admin', op });
   }
 
   private connect(): void {
@@ -150,6 +170,15 @@ export class OfficeSocket {
         if (msg.code === 'bad-join' && this.intent.kind === 'resume') {
           clearIdentity(this.intent.roomCode);
         }
+        this.closed = true;
+      }
+      if (msg.type === 'removed') {
+        // Terminal: the server is about to close this socket because the
+        // member is gone (kicked, banned, deleted). Mark closed *before*
+        // that close arrives, so `onclose`'s reconnect loop doesn't retry
+        // with credentials that were just revoked — that would flash the
+        // connection through 'reconnecting' and fail again with bad-join
+        // instead of leaving the store's 'removed' state alone.
         this.closed = true;
       }
       useStore.getState().applyServer(msg);
@@ -247,4 +276,14 @@ export async function mintPairingCode(
   }).catch(() => null);
   if (!res?.ok) return null;
   return (await res.json()) as { pairingCode: string; expiresAt: number };
+}
+
+/**
+ * Dispatch an admin op on the live office connection, if there is one — the
+ * same module-level pattern as `mintPairingCode`, so role-gated UI never
+ * needs to hold a socket reference. A no-op with nothing connected (e.g. a
+ * stray click after disconnect); the op just goes nowhere.
+ */
+export function sendAdmin(op: AdminOp): void {
+  activeSocket?.sendAdmin(op);
 }

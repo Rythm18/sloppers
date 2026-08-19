@@ -1,28 +1,50 @@
-import type { LeaderboardRow, MemberView, ServerToWeb } from '@sloppers/protocol';
+import type {
+  KnockView,
+  LeaderboardRow,
+  MemberRole,
+  MemberView,
+  RosterEntry,
+  ServerToWeb,
+  WebDeviceLink,
+  WebRemoved,
+  WorkspaceSettings,
+} from '@sloppers/protocol';
 import { create } from 'zustand';
 import { routeServerMessage } from './game/bridge.js';
 
 export type Phase = 'join' | 'world';
 export type Connection = 'idle' | 'connecting' | 'open' | 'reconnecting';
+/** Why this browser's member was removed — mirrors the wire message's `reason`. */
+export type RemovalReason = WebRemoved['reason'];
+type DeviceLink = Pick<WebDeviceLink, 'url' | 'expiresAt'>;
 
-interface SloppersStore {
-  phase: Phase;
-  connection: Connection;
-  roomCode: string;
-  /** Display name of the office, from the world message. */
-  roomName: string;
-  you: string | null;
-  /** Members by id — positions live in Phaser, not here. */
-  members: Record<string, MemberView>;
-  leaderboard: LeaderboardRow[];
-  /** Member ids close enough for an ambient bubble (ordered by distance). */
-  nearby: string[];
-  /** Member the user clicked; shows the detail card. */
-  focusedId: string | null;
-  shareOpen: boolean;
-  leaderboardOpen: boolean;
-  joinError: string | null;
+/** Fields reset to these values by both the initial state and `reset()`. */
+const initialState = {
+  phase: 'join' as Phase,
+  connection: 'idle' as Connection,
+  roomCode: '',
+  roomName: '',
+  you: null as string | null,
+  members: {} as Record<string, MemberView>,
+  leaderboard: [] as LeaderboardRow[],
+  nearby: [] as string[],
+  focusedId: null as string | null,
+  shareOpen: false,
+  leaderboardOpen: true,
+  joinError: null as string | null,
+  settings: null as WorkspaceSettings | null,
+  myRole: null as MemberRole | null,
+  knocks: [] as KnockView[],
+  roster: [] as RosterEntry[],
+  deviceLink: null as DeviceLink | null,
+  removed: null as RemovalReason | null,
+  knocking: false,
+  settingsOpen: false,
+};
 
+type State = typeof initialState;
+
+interface SloppersStore extends State {
   setRoomCode(code: string): void;
   setConnection(connection: Connection): void;
   setNearby(ids: string[]): void;
@@ -30,23 +52,19 @@ interface SloppersStore {
   setShareOpen(open: boolean): void;
   setLeaderboardOpen(open: boolean): void;
   setJoinError(error: string | null): void;
+  setSettingsOpen(open: boolean): void;
+  setDeviceLink(link: DeviceLink | null): void;
   applyServer(msg: ServerToWeb): void;
   reset(): void;
 }
 
+/** `myRole` isn't its own message — it's read off the member view matching `you`. */
+function deriveMyRole(you: string | null, members: Record<string, MemberView>): MemberRole | null {
+  return you ? (members[you]?.role ?? null) : null;
+}
+
 export const useStore = create<SloppersStore>((set) => ({
-  phase: 'join',
-  connection: 'idle',
-  roomCode: '',
-  roomName: '',
-  you: null,
-  members: {},
-  leaderboard: [],
-  nearby: [],
-  focusedId: null,
-  shareOpen: false,
-  leaderboardOpen: true,
-  joinError: null,
+  ...initialState,
 
   setRoomCode: (roomCode) => set({ roomCode }),
   setConnection: (connection) => set({ connection }),
@@ -55,25 +73,40 @@ export const useStore = create<SloppersStore>((set) => ({
   setShareOpen: (shareOpen) => set({ shareOpen }),
   setLeaderboardOpen: (leaderboardOpen) => set({ leaderboardOpen }),
   setJoinError: (joinError) => set({ joinError }),
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setDeviceLink: (deviceLink) => set({ deviceLink }),
 
   applyServer: (msg) => {
     // Phaser hears about world/membership/position through the bridge.
     routeServerMessage(msg);
     switch (msg.type) {
-      case 'world':
+      case 'world': {
+        const members = Object.fromEntries(msg.members.map((m) => [m.id, m]));
         set({
           phase: 'world',
           connection: 'open',
           roomCode: msg.roomCode,
           roomName: msg.roomName,
           you: msg.you.memberId,
-          members: Object.fromEntries(msg.members.map((m) => [m.id, m])),
+          members,
           leaderboard: msg.leaderboard,
           joinError: null,
+          myRole: deriveMyRole(msg.you.memberId, members),
+          // A successful join means any door-waiting is over, and any prior
+          // removal no longer describes the current session.
+          knocking: false,
+          removed: null,
         });
         break;
+      }
       case 'member':
-        set((s) => ({ members: { ...s.members, [msg.member.id]: msg.member } }));
+        set((s) => {
+          const members = { ...s.members, [msg.member.id]: msg.member };
+          return {
+            members,
+            myRole: msg.member.id === s.you ? msg.member.role : s.myRole,
+          };
+        });
         break;
       case 'member-left':
         set((s) => {
@@ -102,6 +135,30 @@ export const useStore = create<SloppersStore>((set) => ({
       case 'leaderboard':
         set({ leaderboard: msg.rows });
         break;
+      case 'knocking':
+        // Waiting on an owner/moderator decision at a locked or knock-mode door.
+        set({ knocking: true });
+        break;
+      case 'knocks':
+        set({ knocks: msg.knocks });
+        break;
+      case 'workspace':
+        // roomCode/roomName are frozen wire names; the office's invite code
+        // or display name may have just changed (rename, rotate-invite).
+        set({ roomCode: msg.roomCode, roomName: msg.roomName, settings: msg.settings });
+        break;
+      case 'roster':
+        set({ roster: msg.members });
+        break;
+      case 'removed':
+        // Terminal for this session: the member is gone (kicked, banned, or
+        // deleted). Land on the join screen, actionable — not stuck on
+        // 'connecting'/'reconnecting' with no way out.
+        set({ removed: msg.reason, phase: 'join', connection: 'idle' });
+        break;
+      case 'device-link':
+        set({ deviceLink: { url: msg.url, expiresAt: msg.expiresAt } });
+        break;
       case 'error':
         set((s) => {
           // Fatal join errors land back on the form, re-enabled — leaving
@@ -129,15 +186,5 @@ export const useStore = create<SloppersStore>((set) => ({
     }
   },
 
-  reset: () =>
-    set({
-      phase: 'join',
-      connection: 'idle',
-      you: null,
-      members: {},
-      leaderboard: [],
-      nearby: [],
-      focusedId: null,
-      shareOpen: false,
-    }),
+  reset: () => set({ ...initialState }),
 }));
