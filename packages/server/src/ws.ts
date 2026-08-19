@@ -300,7 +300,22 @@ function handleWeb(
     } else if (msg.type === 'activity') {
       room.setWebPresent(client, msg.present);
     } else if (msg.type === 'admin' && actor) {
-      const result = handleAdminOp({ manager: deps.rooms, room, actor }, msg.op);
+      // Admin ops are the only web message that writes to the database, so
+      // they are the only one that can throw in here — a locked table, a
+      // failed migration, an invite code that would not mint. An escaping
+      // throw is an uncaught exception, and this process is every office on
+      // the server. One bad op costs one socket its answer instead.
+      let result: AdminResult;
+      try {
+        result = handleAdminOp({ manager: deps.rooms, room, actor }, msg.op);
+      } catch (error) {
+        console.error(`admin op ${msg.op.kind} failed in workspace ${room.id}:`, error);
+        return sendWeb(ws, {
+          type: 'error',
+          code: 'server-error',
+          message: 'something went wrong handling that',
+        });
+      }
       if (!result.ok) {
         sendWeb(ws, { type: 'error', code: refusalCode(result), message: result.message });
       }

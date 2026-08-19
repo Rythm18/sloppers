@@ -307,6 +307,20 @@ describe('WorkspaceManager', () => {
     expect(reloaded?.memberView(regular.id, now).role).toBe('member');
   });
 
+  it('will not admit a knock whose socket has already gone', () => {
+    // The handler checks this too, but `admitKnock` is what actually mints a
+    // member: on its own it must never do so for a socket nobody is holding,
+    // because the close handler that would clean up has already fired.
+    const room = office();
+    const closed = { readyState: 3, OPEN: 1, send: () => {}, close: () => {}, once: () => {} };
+    const view = room.knocks.add(closed as never, 'theo', 'pixel');
+    const pending = room.knocks.get(view.id);
+    if (!pending) throw new Error('knock not registered');
+
+    expect(room.admitKnock(pending)).toBeNull();
+    expect(manager.memberByName(room.id, 'theo')).toBeNull();
+  });
+
   it('rename and settings write through to the live room', () => {
     const room = manager.createRoom('the lab');
     if (!room) throw new Error('room not created');

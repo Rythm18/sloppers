@@ -1,5 +1,6 @@
 import type { AdminOp, MemberRole } from '@sloppers/protocol';
 import { can, canActOn } from '../domain/permissions.js';
+import { knockIsLive } from './knocks.js';
 import type { Room } from './live.js';
 import type { MemberRecord, WorkspaceManager } from './manager.js';
 
@@ -69,8 +70,10 @@ export function handleAdminOp(ctx: AdminContext, op: AdminOp): AdminResult {
 
     case 'unban': {
       if (!can(actor.role, 'member.unban')) return forbidden('only moderators can unban');
-      const found = manager.memberById(op.memberId, { includeRemoved: true });
-      if (!found || found.workspaceId !== room.id) return notFound('no such member here');
+      // Through `target`, so undoing a ban obeys the same rank rule as
+      // placing one: a moderator does not overrule the owner or a peer.
+      const found = target(op.memberId);
+      if ('ok' in found) return found;
       // Without this, "unban" on someone who is not banned is a kick that
       // skips the rank check entirely.
       if (found.status !== 'banned') return invalid('they are not banned');
@@ -176,6 +179,13 @@ export function handleAdminOp(ctx: AdminContext, op: AdminOp): AdminResult {
         room.broadcastKnocks();
         return { ok: true };
       }
+      // They left while the queue sat there. Minting a member for a socket
+      // nobody is holding would put a phantom on the floor forever.
+      if (!knockIsLive(knock)) {
+        room.knocks.remove(knock.id);
+        room.broadcastKnocks();
+        return invalid(`${knock.displayName} gave up waiting`);
+      }
       // Their name is checked now, not when they knocked, because it may
       // have been taken while they waited. A refusal keeps them in the queue
       // so the decision can be made again once they pick another one.
@@ -194,7 +204,11 @@ export function handleAdminOp(ctx: AdminContext, op: AdminOp): AdminResult {
     }
 
     case 'link-device': {
-      room.sendDeviceLink(actor.id); // any member may link their own devices
+      // Any member may link their own devices — but the link is a credential
+      // that signs a browser in as them, so the office keeps a record of it.
+      if (room.sendDeviceLink(actor.id)) {
+        manager.logEvent(room.id, actor.id, 'member.link-device', actor.id);
+      }
       return { ok: true };
     }
   }

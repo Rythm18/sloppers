@@ -18,7 +18,7 @@ import { can } from '../domain/permissions.js';
 import { relinkToken } from '../ids.js';
 import type { TokenLedger } from '../ledger.js';
 import { derivePresence } from '../presence.js';
-import { type Knock, KnockRegistry } from './knocks.js';
+import { type Knock, KnockRegistry, knockIsLive } from './knocks.js';
 import type { MemberRecord, WorkspaceManager } from './manager.js';
 
 const LEADERBOARD_DEBOUNCE_MS = 2000;
@@ -269,6 +269,9 @@ export class Room {
    * returns null so the caller can keep them in the queue.
    */
   admitKnock(knock: Knock): MemberRecord | null {
+    // A socket that has already gone would never fire the close handler
+    // below, so its member would sit in the office forever.
+    if (!knockIsLive(knock)) return null;
     const created = this.manager.createMember(this.id, knock.displayName, knock.avatar);
     if (created === 'name-taken') {
       send(knock.ws, {
@@ -338,9 +341,12 @@ export class Room {
    * phone, a second laptop, a cleared localStorage. Relative on purpose —
    * the server has no dependable notion of its own public URL, and the page
    * asking already knows the origin it is talking to.
+   *
+   * Reports whether a link was actually minted, so the caller only writes an
+   * audit row for a credential that exists.
    */
-  sendDeviceLink(memberId: string): void {
-    if (!this.members.has(memberId)) return;
+  sendDeviceLink(memberId: string): boolean {
+    if (!this.members.has(memberId)) return false;
     const now = Date.now();
     this.db.prepare('DELETE FROM relink_tokens WHERE expires_at < ?').run(now);
     const token = relinkToken();
@@ -353,6 +359,7 @@ export class Room {
       url: `/?room=${encodeURIComponent(this.code)}#relink=${token}`,
       expiresAt,
     });
+    return true;
   }
 
   /** Recompute time-driven presence (timeouts, idle drift) for everyone. */

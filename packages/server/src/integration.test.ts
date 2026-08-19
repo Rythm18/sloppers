@@ -249,6 +249,25 @@ describe('server integration', () => {
     expect(removed.type === 'removed' && removed.reason).toBe('kicked');
   });
 
+  it('answers a failing admin op instead of taking the whole server down', async () => {
+    const { client: owner } = await join('ridham');
+    const { client: sam } = await join('sam');
+
+    // Pull the audit trail out from under the handler: the rename lands and
+    // the logEvent behind it throws. An escaping throw here is an uncaught
+    // exception, which would be every office on this process, not one socket.
+    server.db.exec('DROP TABLE workspace_events');
+    owner.send({ type: 'admin', op: { kind: 'rename', name: 'the annex' } });
+    const err = await owner.next((m) => m.type === 'error');
+    expect(err.type === 'error' && err.code).toBe('server-error');
+
+    // That socket still works, and so does everyone else's.
+    owner.send({ type: 'admin', op: { kind: 'roster' } });
+    expect((await owner.next((m) => m.type === 'roster')).type).toBe('roster');
+    sam.send({ type: 'move', position: { x: 100, y: 100, dir: 'up', moving: false } });
+    expect((await owner.next((m) => m.type === 'pos')).type).toBe('pos');
+  });
+
   it('pair → redeem → collector snapshot → browser sees sessions and leaderboard', async () => {
     const { client, world } = await join('ridham');
     const base = `http://127.0.0.1:${server.port}`;

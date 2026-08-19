@@ -7,6 +7,15 @@ export interface Knock extends KnockView {
 }
 
 /**
+ * Whether anyone is still behind this knock. A closed tab stays in the
+ * registry until its socket's close handler runs, so admitting one without
+ * asking would mint a member nobody is holding.
+ */
+export function knockIsLive(knock: Knock): boolean {
+  return knock.ws.readyState === knock.ws.OPEN;
+}
+
+/**
  * People waiting at the door of a knock-mode workspace. Deliberately
  * in-memory and tied to the waiting socket: close the tab and the knock is
  * gone, which needs no table, no expiry sweep, and no cleanup path. The
