@@ -262,6 +262,13 @@ export class WorkspaceManager {
   /**
    * Forget members that never paired a device and haven't been seen in a
    * week — stray joins, not teammates. Runs at startup and daily.
+   *
+   * Banned rows are exempt: the row *is* the ban. It is what the roster
+   * reports, what an unban flips back, and what moderation addresses through
+   * `memberById(id, { includeRemoved: true })` — erase it and the ban has
+   * quietly expired on a timer nobody chose. A ban ends with an unban.
+   * Kicked rows carry no such record (a kicked member may rejoin freely), so
+   * they age out like anyone else.
    */
   cleanupStaleMembers(now: number = Date.now()): number {
     const cutoff = now - STALE_MEMBER_MS;
@@ -269,6 +276,7 @@ export class WorkspaceManager {
       .prepare(`
         SELECT id, workspace_id FROM members
         WHERE last_seen_at < ? AND created_at < ?
+          AND status != 'banned'
           AND NOT EXISTS (SELECT 1 FROM devices WHERE devices.member_id = members.id)
       `)
       .all(cutoff, cutoff) as { id: string; workspace_id: string }[];
@@ -279,7 +287,9 @@ export class WorkspaceManager {
     for (const s of stale) this.rooms.get(s.workspace_id)?.forgetMember(s.id);
 
     // Workspaces whose last member aged out go too — otherwise abandoned
-    // offices accumulate until the cap permanently locks out creation.
+    // offices accumulate until the cap permanently locks out creation. A
+    // surviving banned row counts as a member here, and deliberately so: the
+    // ban has nothing to attach to once its workspace is gone.
     const empty = this.db
       .prepare(`
         SELECT id, invite_code FROM workspaces
@@ -363,6 +373,10 @@ export class WorkspaceManager {
     const update = this.db.prepare('UPDATE workspaces SET invite_code = ? WHERE id = ?');
     for (let attempt = 0; attempt < 3; attempt++) {
       const code = `${slugify(row.name)}-${roomSuffix()}`;
+      // Re-minting the code we already have would UPDATE cleanly and revoke
+      // nothing, while reporting a rotation to the caller. Vanishingly rare,
+      // silently wrong; mint again instead.
+      if (code === row.invite_code) continue;
       try {
         update.run(code, workspace);
       } catch {
