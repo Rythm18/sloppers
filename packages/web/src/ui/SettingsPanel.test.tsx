@@ -212,6 +212,7 @@ describe('SettingsPanel', () => {
       fireEvent.change(screen.getByLabelText('office name'), { target: { value: ' the annex ' } });
       fireEvent.click(button('Rename'));
       fireEvent.click(button('Rotate invite link'));
+      fireEvent.click(button('Yes, rotate'));
 
       expect(opsAfterOpening()).toEqual([
         { kind: 'rename', name: 'the annex' },
@@ -297,6 +298,140 @@ describe('SettingsPanel', () => {
       fireEvent.click(button('Sign in on another device'));
 
       expect(opsAfterOpening()).toEqual([{ kind: 'link-device' }]);
+    });
+  });
+
+  describe('rotating the invite link', () => {
+    it('fires nothing on the first click, and nothing at all if the answer is no', () => {
+      seed({ role: 'owner' });
+      render(<SettingsPanel />);
+
+      fireEvent.click(button('Rotate invite link'));
+      expect(opsAfterOpening()).toEqual([]);
+
+      fireEvent.click(button('Never mind'));
+      expect(opsAfterOpening()).toEqual([]);
+      // Back to a button, and armed again from scratch.
+      expect(button('Rotate invite link')).toBeTruthy();
+    });
+
+    it('names what rotating costs, including the tab asking', () => {
+      seed({ role: 'owner' });
+      render(<SettingsPanel />);
+
+      fireEvent.click(button('Rotate invite link'));
+
+      const question = screen.getByText(/Rotate the invite link\?/);
+      expect(question.textContent).toContain('already shared stops working');
+      expect(question.textContent).toContain("this tab's address bar");
+      // Keyboard answers land on the confirmation rather than nowhere.
+      expect(document.activeElement).toBe(button('Yes, rotate'));
+    });
+
+    it('puts the question away when the keys change hands mid-question', () => {
+      seed({ role: 'owner' });
+      render(<SettingsPanel />);
+      fireEvent.click(button('Rotate invite link'));
+      expect(button('Yes, rotate')).toBeTruthy();
+
+      // Handed the office over from another tab. Rotating is the owner's, and
+      // answering now would fire an op the office refuses.
+      apply({ type: 'member', member: memberView('me', 'ridham', 'member') });
+
+      expect(screen.queryByRole('button', { name: 'Yes, rotate' })).toBeNull();
+      expect(opsAfterOpening()).toEqual([]);
+    });
+
+    it('asks one question at a time, alongside the removals', () => {
+      seed({
+        role: 'owner',
+        roster: [person('me', 'ridham', 'owner'), person('sam', 'sam', 'member')],
+      });
+      render(<SettingsPanel />);
+
+      fireEvent.click(button('Ban: sam'));
+      fireEvent.click(button('Rotate invite link'));
+      expect(screen.queryByRole('button', { name: 'Yes, ban: sam' })).toBeNull();
+
+      fireEvent.click(button('Ban: sam'));
+      expect(screen.queryByRole('button', { name: 'Yes, rotate' })).toBeNull();
+    });
+  });
+
+  describe('when the office says no', () => {
+    const roster = [person('me', 'ridham', 'owner'), person('sam', 'sam', 'member')];
+    /** A refusal on the wire, which carries no clue what it refused. */
+    const refuse = (message: string) =>
+      apply({ type: 'error', code: 'forbidden', message } as ServerToWeb);
+
+    it('shows a refusal beside the person it was about', () => {
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+
+      fireEvent.click(button('Make moderator: sam'));
+      refuse('they outrank you');
+
+      const alert = screen.getByRole('alert');
+      expect(alert.textContent).toBe('they outrank you');
+      // Beside sam's own row, not floating at the top of a long panel.
+      expect(alert.previousElementSibling?.textContent).toContain('sam');
+      expect(alert.previousElementSibling?.textContent).not.toContain('ridham');
+    });
+
+    it('keeps a refusal in the section that asked, and out of the others', () => {
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+
+      fireEvent.click(button('Rotate invite link'));
+      fireEvent.click(button('Yes, rotate'));
+      refuse('only the owner rotates the invite');
+
+      const alert = screen.getByRole('alert');
+      expect(alert.textContent).toBe('only the owner rotates the invite');
+      // The office section owns the rename input; the answer sits with it.
+      expect(screen.getAllByRole('alert')).toHaveLength(1);
+      expect(alert.closest('section')?.textContent).toContain('Invite link:');
+    });
+
+    it('surfaces a refused ban where the ban was confirmed', () => {
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+
+      fireEvent.click(button('Ban: sam'));
+      fireEvent.click(button('Yes, ban: sam'));
+      refuse('they outrank you');
+
+      expect(screen.getByRole('alert').textContent).toBe('they outrank you');
+    });
+
+    it('clears the last answer before asking again, so it cannot be misread', () => {
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+
+      fireEvent.click(button('Make moderator: sam'));
+      refuse('they outrank you');
+      expect(screen.getByRole('alert')).toBeTruthy();
+
+      // A different control, which the office has not answered yet. Leaving
+      // the old refusal up would read as the answer to this click.
+      fireEvent.click(button('Sign in on another device'));
+
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it('does not carry a refusal from one visit into the next', () => {
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+
+      fireEvent.click(button('Make moderator: sam'));
+      refuse('they outrank you');
+      expect(screen.getByRole('alert')).toBeTruthy();
+
+      setOpen(false);
+      setOpen(true);
+
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(useStore.getState().adminError).toBeNull();
     });
   });
 

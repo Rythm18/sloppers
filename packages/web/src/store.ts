@@ -46,6 +46,17 @@ const initialState = {
    */
   doorAnswerable: null as boolean | null,
   settingsOpen: false,
+  /**
+   * The office's answer to something somebody just did in here — "they
+   * outrank you", "that knock is gone", "only the owner renames the office".
+   *
+   * Every admin op can be refused, and the refusal arrives as an ordinary
+   * error message carrying no clue which op it is about. Left unread, a
+   * moderator clicks Ban, is told no, and watches nothing happen; the panel
+   * pairs this with the control it last used to put the answer back where
+   * the click was.
+   */
+  adminError: null as string | null,
 };
 
 type State = typeof initialState;
@@ -59,6 +70,7 @@ interface SloppersStore extends State {
   setLeaderboardOpen(open: boolean): void;
   setJoinError(error: string | null): void;
   setSettingsOpen(open: boolean): void;
+  setAdminError(message: string | null): void;
   setDeviceLink(link: DeviceLink | null): void;
   applyServer(msg: ServerToWeb): void;
   reset(): void;
@@ -80,6 +92,7 @@ export const useStore = create<SloppersStore>((set) => ({
   setLeaderboardOpen: (leaderboardOpen) => set({ leaderboardOpen }),
   setJoinError: (joinError) => set({ joinError }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setAdminError: (adminError) => set({ adminError }),
   setDeviceLink: (deviceLink) => set({ deviceLink }),
 
   applyServer: (msg) => {
@@ -97,6 +110,9 @@ export const useStore = create<SloppersStore>((set) => ({
           members,
           leaderboard: msg.leaderboard,
           joinError: null,
+          // A refusal describes a session that has just ended; carrying it
+          // into the next one would explain a click nobody made.
+          adminError: null,
           myRole: deriveMyRole(msg.you.memberId, members),
           // A successful join means any door-waiting is over, and any prior
           // removal no longer describes the current session.
@@ -170,6 +186,13 @@ export const useStore = create<SloppersStore>((set) => ({
         break;
       case 'error':
         set((s) => {
+          // Inside the office, the only things this browser sends are moves,
+          // presence, and admin ops — and the first two are never answered.
+          // So an error arriving here is the office refusing something
+          // somebody just clicked, and it belongs on that screen rather than
+          // nowhere. Held as the message alone: the wire says why, not what
+          // it is about, and the panel is what knows which control asked.
+          if (s.phase === 'world') return { adminError: msg.message };
           // Fatal join errors land back on the form, re-enabled — leaving
           // connection at 'connecting' would brick the submit button.
           if (

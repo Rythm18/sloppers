@@ -149,6 +149,36 @@ describe('store', () => {
     expect(useStore.getState().doorAnswerable).toBeNull();
   });
 
+  describe('refusals from inside the office', () => {
+    it('keeps a refusal so the screen that asked can show it', () => {
+      useStore.getState().applyServer(world as never);
+      useStore
+        .getState()
+        .applyServer({ type: 'error', code: 'forbidden', message: 'they outrank you' } as never);
+      expect(useStore.getState().adminError).toBe('they outrank you');
+      // The refusal is about one op, not about being in the office — nothing
+      // else moves, or a refused ban would throw everybody back to the form.
+      expect(useStore.getState().phase).toBe('world');
+      expect(useStore.getState().connection).toBe('open');
+    });
+
+    it('leaves join-time errors on the join screen where they belong', () => {
+      useStore
+        .getState()
+        .applyServer({ type: 'error', code: 'name-taken', message: 'already called sam' } as never);
+      const state = useStore.getState();
+      expect(state.joinError).toBe('already called sam');
+      expect(state.adminError).toBeNull();
+    });
+
+    it('drops a refusal when a fresh join lands', () => {
+      useStore.getState().applyServer(world as never);
+      useStore.getState().setAdminError('they outrank you');
+      useStore.getState().applyServer(world as never);
+      expect(useStore.getState().adminError).toBeNull();
+    });
+  });
+
   it('toggles the settings panel', () => {
     expect(useStore.getState().settingsOpen).toBe(false);
     useStore.getState().setSettingsOpen(true);
@@ -183,6 +213,7 @@ describe('store', () => {
       .applyServer({ type: 'device-link', url: '/?relink=abc', expiresAt: 1 } as never);
     useStore.getState().applyServer({ type: 'removed', reason: 'deleted' } as never);
     useStore.getState().setSettingsOpen(true);
+    useStore.getState().setAdminError('they outrank you');
 
     useStore.getState().reset();
 
@@ -202,5 +233,6 @@ describe('store', () => {
     expect(state.knocking).toBe(false);
     expect(state.doorAnswerable).toBeNull();
     expect(state.settingsOpen).toBe(false);
+    expect(state.adminError).toBeNull();
   });
 });
