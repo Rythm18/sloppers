@@ -82,6 +82,12 @@ export class Room {
   private leaderboardTimer: NodeJS.Timeout | null = null;
   /** Everyone waiting at the door right now. Empty unless joinMode is knock. */
   readonly knocks = new KnockRegistry();
+  /**
+   * What the people at the door were last told about their chances. A fresh
+   * room has nobody connected yet, so it starts false and every change from
+   * there is announced.
+   */
+  private doorAnswerable = false;
 
   constructor(
     readonly id: string,
@@ -150,6 +156,7 @@ export class Room {
     if (!runtime) return null;
     runtime.webClients.add(client);
     this.refreshPresence(client.memberId);
+    this.tellKnockersWhoIsHome();
     const now = Date.now();
     return {
       type: 'world',
@@ -166,6 +173,7 @@ export class Room {
     if (!runtime) return;
     runtime.webClients.delete(client);
     this.refreshPresence(client.memberId);
+    this.tellKnockersWhoIsHome();
   }
 
   setWebPresent(client: WebClient, present: boolean): void {
@@ -241,6 +249,9 @@ export class Room {
     runtime.collector?.ws.close();
     this.members.delete(memberId);
     this.broadcast({ type: 'member-left', memberId });
+    // The last moderator can be shown the door too, and then there is nobody
+    // left to answer it.
+    this.tellKnockersWhoIsHome();
   }
 
   /**
@@ -262,6 +273,9 @@ export class Room {
     runtime.avatar = row.avatar;
     runtime.role = row.role;
     this.broadcastMember(memberId);
+    // A promotion can put somebody at the door who was not there a moment
+    // ago, and a demotion can take the last one away.
+    this.tellKnockersWhoIsHome();
   }
 
   /**
@@ -339,6 +353,37 @@ export class Room {
     const knocks = this.knocks.list();
     for (const runtime of this.members.values()) {
       if (can(runtime.role, 'knock.decide')) this.sendTo(runtime.id, { type: 'knocks', knocks });
+    }
+  }
+
+  /**
+   * Whether anybody who could open the door has a browser on the other end of
+   * it right now. The same audience `broadcastKnocks` fans out to — a knock
+   * nobody can hear is the case this exists to name.
+   */
+  doorIsAnswerable(): boolean {
+    for (const runtime of this.members.values()) {
+      if (!can(runtime.role, 'knock.decide')) continue;
+      for (const client of runtime.webClients) {
+        if (client.ws.readyState === client.ws.OPEN) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Tell the people at the door whether it can be answered — but only when
+   * that changed. Someone who knocked at an empty office is told so, and
+   * would otherwise sit reading "nobody's around" long after a moderator
+   * walked in; someone who knocked at a busy one deserves to hear the last
+   * of them leave.
+   */
+  private tellKnockersWhoIsHome(): void {
+    const answerable = this.doorIsAnswerable();
+    if (answerable === this.doorAnswerable) return;
+    this.doorAnswerable = answerable;
+    for (const knock of this.knocks.waiting()) {
+      send(knock.ws, { type: 'knocking', answerable });
     }
   }
 

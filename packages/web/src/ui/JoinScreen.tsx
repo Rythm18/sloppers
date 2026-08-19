@@ -3,14 +3,16 @@ import { type FormEvent, useEffect, useState } from 'react';
 import { fetchRoomPreview } from '../net/socket.js';
 import { useStore } from '../store.js';
 import { AvatarThumb } from './AvatarThumb.js';
+import { KnockingScreen } from './KnockingScreen.js';
 
 /**
- * The front door, in three shapes:
+ * The front door, in four shapes:
  * - bare visit: name an office, name yourself, create — the invite link is
  *   minted server-side and shown once you're in
  * - invite link: greeted with the office name and who's inside; just pick
  *   a name and step in
  * - returning: a brief "stepping back in…" beat, no form at all
+ * - knocking: the form is answered, and now it is a person we're waiting on
  *
  * Joining is browser-only by design. Sharing agents comes later, from
  * inside, and is optional.
@@ -51,6 +53,7 @@ export function JoinScreen({
   onFollowInvite: (roomCode: string) => void;
 }) {
   const joinError = useStore((s) => s.joinError);
+  const knocking = useStore((s) => s.knocking);
   const [roomName, setRoomName] = useState('');
   const [name, setName] = useState('');
   const [avatar, setAvatar] = useState<string>(
@@ -86,6 +89,13 @@ export function JoinScreen({
     setPasteError(false);
     onFollowInvite(code);
   };
+
+  // The name was offered and the office took it as far as the door. The
+  // preview is where the office's name comes from — it is the only thing
+  // this browser has been told about a place it is not in yet.
+  if (knocking) {
+    return <KnockingScreen officeName={preview.state === 'found' ? preview.name : null} />;
+  }
 
   if (resuming) {
     return (

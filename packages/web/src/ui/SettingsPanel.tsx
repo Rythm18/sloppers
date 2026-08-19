@@ -5,9 +5,10 @@ import {
   roomNameSchema,
   type WorkspaceSettings,
 } from '@sloppers/protocol';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { sendAdmin } from '../net/socket.js';
 import { useStore } from '../store.js';
+import { useModalManners } from './modal.js';
 
 const JOIN_MODES: { value: WorkspaceSettings['joinMode']; label: string; consequence: string }[] = [
   {
@@ -47,8 +48,6 @@ function removable(viewer: MemberRole | null, target: RosterEntry | undefined): 
   return target !== undefined && target.status === 'active' && outranks(viewer, target.role);
 }
 
-const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), a[href]';
-
 /**
  * The door, the people, and the way out. Everything here is one `AdminOp` on
  * the wire; the server decides all of it again, so the role gating below is
@@ -79,6 +78,7 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
   const [pending, setPending] = useState<Removal | null>(null);
   const scrimRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
+  const closePanel = useCallback(() => setSettingsOpen(false), [setSettingsOpen]);
 
   const isOwner = role === 'owner';
   const canModerate = role === 'owner' || role === 'moderator';
@@ -114,59 +114,7 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
     if (canModerate) sendAdmin({ kind: 'roster' });
   }, [canModerate]);
 
-  // Modal manners: focus starts inside, Tab cannot leave — from within or
-  // from without — Escape leaves, and whatever had focus before gets it back.
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    const restoreTo = document.activeElement;
-    dialog?.focus();
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setSettingsOpen(false);
-        return;
-      }
-      if (event.key !== 'Tab' || !dialog) return;
-      const stops = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)];
-      const first = stops[0];
-      const last = stops.at(-1);
-      if (!first || !last) return;
-      const active = document.activeElement;
-      // Anywhere but here — the address bar, a stray click that landed
-      // outside, whatever the page did behind our back — is pulled in. A trap
-      // that only wraps its own ends leaves every other way out open.
-      if (!(active instanceof Node) || !dialog.contains(active)) {
-        event.preventDefault();
-        (event.shiftKey ? last : first).focus();
-      } else if (event.shiftKey && (active === first || active === dialog)) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      if (restoreTo instanceof HTMLElement) restoreTo.focus();
-    };
-  }, [setSettingsOpen]);
-
-  // `aria-modal` is a promise that the rest of the page is unavailable, and a
-  // promise is all it is — the office behind this panel stays clickable and
-  // readable to a screen reader unless something says otherwise. `inert` is
-  // the something: the panel's siblings are the whole world behind it.
-  useEffect(() => {
-    const scrim = scrimRef.current;
-    const behind: HTMLElement[] = [];
-    for (const sibling of scrim?.parentElement?.children ?? []) {
-      if (sibling !== scrim && sibling instanceof HTMLElement) behind.push(sibling);
-    }
-    for (const element of behind) element.setAttribute('inert', '');
-    return () => {
-      for (const element of behind) element.removeAttribute('inert');
-    };
-  }, []);
+  useModalManners(scrimRef, dialogRef, closePanel);
 
   const inviteUrl = `${location.origin}/?room=${encodeURIComponent(roomCode)}`;
   const update = (patch: Partial<WorkspaceSettings>) =>

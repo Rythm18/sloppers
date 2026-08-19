@@ -68,6 +68,15 @@ export class KnockRegistry {
     }
   }
 
+  /**
+   * Everyone still actually standing there. A closed tab lingers in the map
+   * until its socket's close handler runs, so anything that talks to knockers
+   * rather than merely listing them goes through here.
+   */
+  waiting(): Knock[] {
+    return [...this.knocks.values()].filter(knockIsLive);
+  }
+
   list(): KnockView[] {
     return [...this.knocks.values()]
       .map(({ id, displayName, avatar, requestedAt }) => ({ id, displayName, avatar, requestedAt }))

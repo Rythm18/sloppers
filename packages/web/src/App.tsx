@@ -2,13 +2,21 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { bridge } from './game/bridge.js';
 import { PhaserStage } from './game/PhaserStage.js';
 import { Landing } from './landing/Landing.js';
-import { type JoinIntent, loadIdentity, OfficeSocket, redeemRelinkToken } from './net/socket.js';
+import {
+  clearIdentity,
+  type JoinIntent,
+  loadIdentity,
+  OfficeSocket,
+  redeemRelinkToken,
+} from './net/socket.js';
 import { useStore } from './store.js';
 import { BubbleLayer } from './ui/BubbleLayer.js';
+import { DeviceLinkModal } from './ui/DeviceLinkModal.js';
 import { HUD } from './ui/HUD.js';
 import { JoinScreen } from './ui/JoinScreen.js';
 import { Leaderboard } from './ui/Leaderboard.js';
 import { MemberCard } from './ui/MemberCard.js';
+import { RemovedScreen } from './ui/RemovedScreen.js';
 import { SettingsPanel } from './ui/SettingsPanel.js';
 import { ShareModal } from './ui/ShareModal.js';
 
@@ -18,11 +26,16 @@ import { ShareModal } from './ui/ShareModal.js';
  * - invite link (?room=)  → greeted by the office, pick a name, step in
  * - return visit          → identity in localStorage, straight back in
  * - relink link (?relink=)→ a collector vouched for them; become that member
+ *
+ * And one way back out: removed, which lands here rather than in the world.
  */
 export function App() {
   const phase = useStore((s) => s.phase);
   const connection = useStore((s) => s.connection);
   const roomCode = useStore((s) => s.roomCode);
+  const roomName = useStore((s) => s.roomName);
+  const removed = useStore((s) => s.removed);
+  const deviceLink = useStore((s) => s.deviceLink);
   const socketRef = useRef<OfficeSocket | null>(null);
   const [urlRoom, setUrlRoom] = useState<string | null>(() =>
     new URLSearchParams(location.search).get('room'),
@@ -98,6 +111,37 @@ export function App() {
     [],
   );
 
+  // Losing a seat lands here rather than in the world. The credentials died
+  // with it, so both ways off this card forget them first — otherwise the
+  // next visit tries to resume with a member the office no longer has and
+  // stalls on "stepping back in…" before failing.
+  if (removed) {
+    const office = roomCode;
+    const forget = () => {
+      if (office) clearIdentity(office);
+      useStore.getState().reset();
+    };
+    return (
+      <div className="app">
+        <RemovedScreen
+          reason={removed}
+          officeName={roomName}
+          onJoinAgain={() => {
+            forget();
+            history.replaceState(null, '', office ? `?room=${encodeURIComponent(office)}` : '/');
+            setUrlRoom(office || null);
+          }}
+          onLeave={() => {
+            forget();
+            history.replaceState(null, '', '/');
+            setUrlRoom(null);
+            setEntry('landing');
+          }}
+        />
+      </div>
+    );
+  }
+
   if (phase === 'join') {
     if (!urlRoom && !resuming && entry === 'landing') {
       return (
@@ -149,7 +193,11 @@ export function App() {
       <Leaderboard />
       <MemberCard />
       <ShareModal />
-      <SettingsPanel />
+      {/* One at a time. Both are modal and both trap Tab, and two traps on
+          one page fight over it — so the link, which is the answer to the
+          thing the panel was asked for, takes the panel's place and hands it
+          back when it closes. */}
+      {deviceLink ? <DeviceLinkModal /> : <SettingsPanel />}
     </div>
   );
 }

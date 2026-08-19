@@ -132,6 +132,23 @@ describe('store', () => {
     expect(useStore.getState().knocking).toBe(false);
   });
 
+  it('keeps the door answer the office gave, and admits to not knowing', () => {
+    // Optional on the wire. An office that never says leaves this null, and
+    // the waiting screen has to claim neither thing.
+    useStore.getState().applyServer({ type: 'knocking' } as never);
+    expect(useStore.getState().doorAnswerable).toBeNull();
+
+    useStore.getState().applyServer({ type: 'knocking', answerable: false } as never);
+    expect(useStore.getState().doorAnswerable).toBe(false);
+
+    // Re-sent unprompted when somebody who can answer turns up.
+    useStore.getState().applyServer({ type: 'knocking', answerable: true } as never);
+    expect(useStore.getState().doorAnswerable).toBe(true);
+
+    useStore.getState().applyServer(world as never);
+    expect(useStore.getState().doorAnswerable).toBeNull();
+  });
+
   it('toggles the settings panel', () => {
     expect(useStore.getState().settingsOpen).toBe(false);
     useStore.getState().setSettingsOpen(true);
@@ -140,7 +157,7 @@ describe('store', () => {
 
   it('resets every field the store tracks, including the new workspace fields', () => {
     useStore.getState().applyServer(world as never);
-    useStore.getState().applyServer({ type: 'knocking' } as never);
+    useStore.getState().applyServer({ type: 'knocking', answerable: true } as never);
     useStore.getState().applyServer({
       type: 'workspace',
       roomCode: 'x-1',
@@ -183,6 +200,7 @@ describe('store', () => {
     expect(state.deviceLink).toBeNull();
     expect(state.removed).toBeNull();
     expect(state.knocking).toBe(false);
+    expect(state.doorAnswerable).toBeNull();
     expect(state.settingsOpen).toBe(false);
   });
 });

@@ -621,6 +621,44 @@ describe('server integration', () => {
     expect(standing.type === 'knocks' && standing.knocks).toEqual([]);
   });
 
+  it('tells the people at the door whether anyone is there to answer it', async () => {
+    const { client: owner, world } = await join('ridham');
+    const { client: nina } = await join('nina');
+    await setJoinMode(owner, 'knock');
+    await nina.next((m) => m.type === 'workspace');
+
+    const sam = await arrive(world.roomCode, 'sam');
+    const greeted = await sam.next((m) => m.type === 'knocking');
+    expect(greeted.type === 'knocking' && greeted.answerable).toBe(true);
+
+    // Nina never leaves — and an ordinary member cannot open the door, so
+    // with the owner gone there is nobody who can hear sam at all.
+    owner.close();
+    const alone = await sam.next((m) => m.type === 'knocking');
+    expect(alone.type === 'knocking' && alone.answerable).toBe(false);
+
+    // Somebody arriving now is told in the first word, rather than waiting
+    // for an answer that changes under them.
+    const theo = await arrive(world.roomCode, 'theo');
+    const greetedAlone = await theo.next((m) => m.type === 'knocking');
+    expect(greetedAlone.type === 'knocking' && greetedAlone.answerable).toBe(false);
+
+    // The owner comes back on a fresh tab. Both of them learn it where they
+    // stand, without reloading anything.
+    const ownerAgain = new WebClientHarness(server.port);
+    clients.push(ownerAgain);
+    await ownerAgain.open();
+    ownerAgain.send({
+      type: 'join',
+      memberId: world.you.memberId,
+      memberSecret: world.you.memberSecret,
+    });
+    for (const waiting of [sam, theo]) {
+      const answered = await waiting.next((m) => m.type === 'knocking');
+      expect(answered.type === 'knocking' && answered.answerable).toBe(true);
+    }
+  });
+
   it('lets a knocker refused at the door try again under a free name', async () => {
     const { client: owner, world } = await join('ridham');
     await setJoinMode(owner, 'knock');

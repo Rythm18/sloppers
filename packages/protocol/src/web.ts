@@ -139,8 +139,21 @@ export const webErrorSchema = z.object({
 });
 export type WebError = z.infer<typeof webErrorSchema>;
 
-/** Sent to a knocking browser: it's waiting on an owner/moderator decision. */
-export const webKnockingSchema = z.object({ type: z.literal('knocking') });
+/**
+ * Sent to a knocking browser: it's waiting on an owner/moderator decision.
+ *
+ * `answerable` is whether anybody who could open the door has a browser
+ * connected right now — the difference between waiting and waiting for
+ * nobody, which the page at the door has no other way to learn. Optional
+ * because it was added after this message shipped: a client that never sees
+ * it genuinely cannot tell an empty office from a busy one, and should say
+ * neither. Re-sent whenever the answer changes while somebody is still
+ * standing there.
+ */
+export const webKnockingSchema = z.object({
+  type: z.literal('knocking'),
+  answerable: z.boolean().optional(),
+});
 export type WebKnocking = z.infer<typeof webKnockingSchema>;
 
 /** The pending-knock queue, sent to admins. */

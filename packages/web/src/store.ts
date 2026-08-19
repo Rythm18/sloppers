@@ -39,6 +39,12 @@ const initialState = {
   deviceLink: null as DeviceLink | null,
   removed: null as RemovalReason | null,
   knocking: false,
+  /**
+   * Whether anybody who could let us in is connected, while `knocking`.
+   * `null` is "the office did not say" — an older server, and a thing the
+   * waiting screen must not pretend to know either way.
+   */
+  doorAnswerable: null as boolean | null,
   settingsOpen: false,
 };
 
@@ -95,6 +101,7 @@ export const useStore = create<SloppersStore>((set) => ({
           // A successful join means any door-waiting is over, and any prior
           // removal no longer describes the current session.
           knocking: false,
+          doorAnswerable: null,
           removed: null,
         });
         break;
@@ -136,8 +143,10 @@ export const useStore = create<SloppersStore>((set) => ({
         set({ leaderboard: msg.rows });
         break;
       case 'knocking':
-        // Waiting on an owner/moderator decision at a locked or knock-mode door.
-        set({ knocking: true });
+        // Waiting on an owner/moderator decision at a knock-mode door. Sent
+        // again, unprompted, whenever the office gains or loses everyone who
+        // could answer — so this is a refresh as often as it is an arrival.
+        set({ knocking: true, doorAnswerable: msg.answerable ?? null });
         break;
       case 'knocks':
         set({ knocks: msg.knocks });

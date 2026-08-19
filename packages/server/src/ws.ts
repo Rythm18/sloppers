@@ -345,7 +345,10 @@ function handleWeb(
           if (member) enterAs(door, member, member.secret);
         });
         knockingAt = door;
-        sendWeb(ws, { type: 'knocking' });
+        // Whether the knock can be heard at all, so the waiting page says
+        // what is true rather than a hopeful guess. It is re-sent from the
+        // room if that changes while they stand there.
+        sendWeb(ws, { type: 'knocking', answerable: door.doorIsAnswerable() });
         door.broadcastKnocks();
         return;
       }
