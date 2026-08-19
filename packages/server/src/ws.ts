@@ -234,6 +234,10 @@ function handleWeb(
     const world = entered.addWebClient(joined);
     if (!world) return;
     sendWeb(ws, secret ? { ...world, you: { ...world.you, memberSecret: secret } } : world);
+    // Settings ride their own message, and it is only sent when they change —
+    // so an office that has been left alone would never tell anyone how its
+    // door is set.
+    entered.sendWorkspace(member.id);
     // Whoever can answer the door has to be told who is already behind it —
     // the queue is only pushed when it changes, and it may not change again.
     entered.sendStandingKnocks(member.id);

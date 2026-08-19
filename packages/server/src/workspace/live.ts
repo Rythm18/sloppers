@@ -350,14 +350,31 @@ export class Room {
     for (const admin of admins) this.sendTo(admin.id, message);
   }
 
-  /** Name, invite code, or settings changed — everyone inside should know. */
-  broadcastWorkspace(): void {
-    this.broadcast({
+  private workspaceState(): ServerToWeb {
+    return {
       type: 'workspace',
       roomCode: this.code,
       roomName: this.name,
       settings: this.settings,
-    });
+    };
+  }
+
+  /**
+   * How the office is set up, to one person who has just entered.
+   *
+   * `world` carries the room's name and code but not its settings, and
+   * `broadcastWorkspace` fires only when something changes — which in a
+   * settled office may be never. Without this a browser has no idea how the
+   * door is set, and the settings panel has nothing to show but defaults it
+   * would then write back over the truth.
+   */
+  sendWorkspace(memberId: string): void {
+    this.sendTo(memberId, this.workspaceState());
+  }
+
+  /** Name, invite code, or settings changed — everyone inside should know. */
+  broadcastWorkspace(): void {
+    this.broadcast(this.workspaceState());
   }
 
   /**

@@ -93,6 +93,22 @@ button {
   color: var(--parchment);
 }
 
+/* Destructive and armed: the same pixel button, wearing the alert colour. */
+.btn-danger {
+  background: var(--alert);
+  color: var(--ink);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn:disabled:hover {
+  transform: none;
+  box-shadow: var(--shadow-soft);
+}
+
 .input {
   width: 100%;
   padding: 9px 12px;
@@ -272,6 +288,19 @@ button {
   right: 14px;
   display: flex;
   gap: 10px;
+}
+
+/* Somebody is waiting at the door — visible without opening anything. */
+.knock-alert {
+  background: var(--alert);
+  color: var(--ink);
+}
+
+.knock-dot {
+  width: 7px;
+  height: 7px;
+  background: var(--ink);
+  animation: blink 0.9s steps(2, jump-none) infinite;
 }
 
 .hud-hint {
@@ -686,8 +715,164 @@ button {
   padding-top: 10px;
 }
 
+/* --------------------------------------------------------- settings panel */
+
+.settings-panel {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  padding: 20px 22px 22px;
+  display: grid;
+  align-content: start;
+}
+
+/* The dialog takes focus when it opens; keep its own hairline rather than a
+   browser ring drawn around the whole box. */
+.settings-panel:focus {
+  outline: 1px solid var(--panel-line);
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 12px;
+}
+
+.settings-head .close {
+  background: none;
+  border: none;
+  color: var(--wire);
+  font-size: 16px;
+  padding: 2px 6px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 8px;
+  padding: 14px 0;
+  border-top: 1px solid var(--panel-line);
+}
+
+.settings-section:last-child {
+  padding-bottom: 0;
+}
+
+/* A button on its own line sizes to its label, not to the panel. */
+.settings-section > .btn {
+  justify-self: start;
+}
+
+.settings-title {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: normal;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--lamp);
+}
+
+.settings-note {
+  font-size: 11.5px;
+  color: var(--wire);
+}
+
+.settings-note code {
+  color: var(--crt);
+  word-break: break-all;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 7px 10px;
+  background: var(--ink);
+  border: 1px solid var(--panel-line);
+  font-size: 12.5px;
+}
+
+/* Armed: the row stops being a list item and becomes a question. */
+.settings-row-asking {
+  border-color: var(--alert);
+  border-left-width: 3px;
+}
+
+.settings-row-asking .settings-note {
+  flex: 1;
+  min-width: 190px;
+  color: var(--parchment);
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.settings-actions .btn {
+  padding: 5px 8px;
+  font-size: 10px;
+}
+
+.settings-badge {
+  margin-left: 7px;
+  padding: 1px 5px;
+  font-style: normal;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--lamp);
+  border: 1px solid var(--panel-line);
+}
+
+.settings-badge.muted {
+  color: var(--wire);
+}
+
+.settings-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+/* Squared-off boxes rather than the browser's rounded ones: everything else
+   in here is 2px ink and hard edges. */
+.settings-choice input {
+  appearance: none;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  background: var(--ink);
+  border: var(--border-px) solid var(--panel-line);
+}
+
+.settings-choice input:checked {
+  background: var(--lamp);
+  border-color: var(--lamp);
+  box-shadow: inset 0 0 0 2px var(--ink);
+}
+
+.settings-choice input:focus-visible {
+  outline: 2px solid var(--crt);
+  outline-offset: 2px;
+}
+
+.settings-choice strong {
+  font-weight: 600;
+  color: var(--parchment);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .bubble,
+  .knock-dot,
   .presence-attention .presence-dot {
     animation: none;
   }

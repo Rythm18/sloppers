@@ -9,6 +9,7 @@ import { HUD } from './ui/HUD.js';
 import { JoinScreen } from './ui/JoinScreen.js';
 import { Leaderboard } from './ui/Leaderboard.js';
 import { MemberCard } from './ui/MemberCard.js';
+import { SettingsPanel } from './ui/SettingsPanel.js';
 import { ShareModal } from './ui/ShareModal.js';
 
 /**
@@ -148,6 +149,7 @@ export function App() {
       <Leaderboard />
       <MemberCard />
       <ShareModal />
+      <SettingsPanel />
     </div>
   );
 }

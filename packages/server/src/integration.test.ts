@@ -105,6 +105,9 @@ describe('server integration', () => {
         : { type: 'join', createRoom: 'the lab', displayName: name },
     );
     const world = (await client.next((m) => m.type === 'world')) as WebWorld;
+    // Entering also carries the office's own state; swallow it here so a test
+    // waiting on a `workspace` message is waiting for the change it made.
+    await client.next((m) => m.type === 'workspace');
     officeCode = world.roomCode;
     return { client, world };
   }
@@ -242,6 +245,24 @@ describe('server integration', () => {
     });
     const pos = await b.next((m) => m.type === 'pos');
     expect(pos.type === 'pos' && pos.position.x).toBe(320);
+  });
+
+  it('tells an arriving browser how the office is set up', async () => {
+    const { client: owner, world } = await join('ridham');
+    owner.send({
+      type: 'admin',
+      op: { kind: 'settings', settings: { joinMode: 'link', publicLeaderboard: true } },
+    });
+    await owner.next((m) => m.type === 'workspace');
+
+    // `world` carries no settings, and `workspace` is only pushed when
+    // something changes — which in a settled office may be never. Without
+    // this, a browser arriving later never learns how the door is set, and
+    // its settings panel has nothing to show but defaults it would then
+    // write back over the truth.
+    const sam = await arrive(world.roomCode, 'sam');
+    const state = await sam.next((m) => m.type === 'workspace');
+    expect(state.type === 'workspace' && state.settings.publicLeaderboard).toBe(true);
   });
 
   it('carries an admin op over the socket, and refuses one from a plain member', async () => {
