@@ -212,23 +212,33 @@ function prepare(db: Db) {
         harness = excluded.harness,
         input = excluded.input, output = excluded.output,
         cache_read = excluded.cache_read, cache_write = excluded.cache_write,
-        updated_at = excluded.updated_at, retired = 0, shrunk = excluded.shrunk
+        updated_at = excluded.updated_at, retired = 0,
+        -- MAX, never assignment: that a watermark was once lowered is a
+        -- permanent fact about it, since later growth does not make
+        -- daily_usage agree with it again. Assigning excluded.shrunk here
+        -- meant a single token of growth cleared the flag -- and a shrink is a
+        -- harness reset on a live session, so growth on the very next
+        -- heartbeat is the normal case, not the exception.
+        shrunk = MAX(usage_watermarks.shrunk, excluded.shrunk)
     `),
     /**
-     * Did the scheme being retired ever have its watermark lowered? A shrink
-     * lowers the watermark without touching `daily_usage`, so from then on the
-     * watermark no longer says how much has been banked — and recovery, which
-     * measures against it, would invent the difference.
+     * Has this session's watermark *ever* been lowered, under either scheme,
+     * on any day, live or retired?
+     *
+     * A shrink lowers a watermark without lowering `daily_usage`, so from that
+     * moment the watermark no longer says how much has been banked, and the
+     * recovery below — which measures against it — would invent the gap.
+     *
+     * Unfiltered on purpose, and that is what makes ineligibility monotone.
+     * Filtering by scheme let a transition launder the history away (the rows
+     * being retired are exactly the ones carrying the flag); filtering by day
+     * let a midnight boundary write a clean row beside a dirty one. Together
+     * with the `MAX` above and the fact that nothing anywhere deletes from
+     * this table, the answer can only ever go false → true.
      */
-    flatShrank: db.prepare(`
+    sessionEverShrank: db.prepare(`
       SELECT 1 AS yes FROM usage_watermarks
-      WHERE session_id = ? AND member_id = ? AND model = ? AND retired = 0 AND shrunk = 1
-      LIMIT 1
-    `),
-    modelShrank: db.prepare(`
-      SELECT 1 AS yes FROM usage_watermarks
-      WHERE session_id = ? AND member_id = ? AND model <> ? AND retired = 0 AND shrunk = 1
-      LIMIT 1
+      WHERE session_id = ? AND member_id = ? AND shrunk = 1 LIMIT 1
     `),
     bumpDay: db.prepare(`
       INSERT INTO daily_usage
@@ -420,13 +430,9 @@ export class TokenLedger {
       ) as UsageRow | undefined;
       // A shrink lowers a watermark and leaves `daily_usage` alone, so past one
       // the watermark understates what was banked and recovery below would
-      // invent the gap. We cannot tell how much was banked — nothing records
-      // the peak — so past a shrink we recover nothing and take the
-      // understatement.
-      const drifted =
-        (bucketed
-          ? this.q.flatShrank.get(session.id, memberIdValue, FLAT_WATERMARK_MODEL)
-          : this.q.modelShrank.get(session.id, memberIdValue, FLAT_WATERMARK_MODEL)) !== undefined;
+      // invent the gap. Nothing records the peak, so a session that has *ever*
+      // shrunk forfeits recovery permanently and takes the understatement.
+      const drifted = this.q.sessionEverShrank.get(session.id, memberIdValue) !== undefined;
       if (bucketed)
         this.q.retireFlatWatermarks.run(session.id, memberIdValue, FLAT_WATERMARK_MODEL);
       else this.q.retireModelWatermarks.run(session.id, memberIdValue, FLAT_WATERMARK_MODEL);

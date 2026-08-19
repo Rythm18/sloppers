@@ -452,6 +452,121 @@ describe('TokenLedger', () => {
     expect(ledger.todayFor('m1', TODAY_19).byModel?.unknown?.input).toBe(1400);
   });
 
+  it('stays ineligible for recovery after a shrink, even once it grows again', () => {
+    // A shrink is a harness reset on a *live* session, so the next heartbeat
+    // normally shows growth. If growth clears the ineligibility, the guard
+    // only ever covers a transition landing on the single heartbeat after the
+    // shrink — which is the rare case, not the common one.
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
+    ledger.ingest('m1', [legacy('s1', tokens(300))], TODAY_19 + 1000);
+    // One token of growth.
+    ledger.ingest('m1', [legacy('s1', tokens(301))], TODAY_19 + 2000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1001);
+
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19 + 3000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1001);
+  });
+
+  it('stays ineligible after more than one shrink', () => {
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
+    ledger.ingest('m1', [legacy('s1', tokens(300))], TODAY_19 + 1000);
+    ledger.ingest('m1', [legacy('s1', tokens(200))], TODAY_19 + 2000);
+    ledger.ingest('m1', [legacy('s1', tokens(250))], TODAY_19 + 3000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1050);
+
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19 + 4000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1050);
+  });
+
+  it('remembers a shrink recorded on an earlier day', () => {
+    // Crossing midnight writes a *new* watermark row, so the shrink and the
+    // transition can sit on different rows entirely.
+    ledger.ingest('m1', [legacy('s1', tokens(1000), STARTED_18)], DAY_18);
+    ledger.ingest('m1', [legacy('s1', tokens(300), STARTED_18)], TODAY_19);
+    ledger.ingest('m1', [legacy('s1', tokens(900), STARTED_18)], TODAY_19 + 1000);
+    expect(ledger.todayFor('m1', DAY_18).tokens.input).toBe(1000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(600);
+
+    ledger.ingest(
+      'm1',
+      [realistic('s1', [bucket(D19, 'claude-opus-5', 1000)], { startedAt: STARTED_18 })],
+      TODAY_19 + 2000,
+    );
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(600);
+  });
+
+  it('does not launder a shrink through a scheme transition', () => {
+    // Retiring the flat rows must not erase the shrink history with them, or
+    // the *second* transition recovers against a watermark that was never
+    // trustworthy.
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
+    ledger.ingest('m1', [legacy('s1', tokens(300))], TODAY_19 + 1000);
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19 + 2000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+
+    // Back down to flat, reporting a much larger cumulative.
+    ledger.ingest('m1', [legacy('s1', tokens(2000))], TODAY_19 + 3000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+  });
+
+  it('remembers a shrink that happened in the bucketed era', () => {
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19);
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'claude-opus-5', 400)])], TODAY_19 + 1000);
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'claude-opus-5', 500)])], TODAY_19 + 2000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1100);
+
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19 + 3000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1100);
+  });
+
+  it('records exactly what a monotone session spent, whatever shape it speaks', () => {
+    // The hand-written cases above are sequences I thought of, and three
+    // rounds of defects came from sequences I did not. This one is generated,
+    // and its invariant is absolute rather than relative: for a session whose
+    // cumulative only ever rises, the day's total *is* the final cumulative —
+    // no seeding applies (it started today), nothing is forfeited, and no
+    // amount of switching between the flat and bucketed shapes may change it.
+    //
+    // Deliberately not "the flipped run matches the unflipped run": that
+    // baseline is itself inflated after a reset, by the pre-existing shrink
+    // convention, so it would have accepted the very defect this round fixed.
+    let seed = 0x2b7e1516;
+    const rand = (n: number) => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed % n;
+    };
+    // Includes `unknown`, which the shipped collector really emits.
+    const models = ['claude-opus-5', 'unknown', 'gpt-5'];
+
+    for (let trial = 0; trial < 200; trial++) {
+      const steps = 3 + rand(6);
+      // Strictly rising, so the truth is unambiguous.
+      const walk: number[] = [];
+      let value = 0;
+      for (let i = 0; i < steps; i++) {
+        value += 1 + rand(500);
+        walk.push(value);
+      }
+      // A fresh shape decision each heartbeat: upgrades, downgrades, flapping.
+      const shapes = walk.map(() => rand(2) === 0);
+      const model = models[rand(models.length)] ?? 'claude-opus-5';
+
+      const dbRun = openDb(':memory:');
+      const led = new TokenLedger(dbRun);
+      walk.forEach((total, i) => {
+        led.ingest(
+          'm1',
+          [shapes[i] ? realistic('s1', [bucket(D19, model, total)]) : legacy('s1', tokens(total))],
+          TODAY_19 + i * 1000,
+        );
+      });
+      const recorded = led.todayFor('m1', TODAY_19).tokens.input;
+      dbRun.close();
+
+      expect(recorded).toBe(walk.at(-1));
+    }
+  });
+
   it('recovers nothing at a transition whose flat watermark had shrunk', () => {
     ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
     // A harness reset drops the cumulative. The ledger lowers the watermark
