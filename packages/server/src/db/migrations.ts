@@ -289,6 +289,30 @@ export const migrations: Migration[] = [
       db.exec('ALTER TABLE usage_watermarks ADD COLUMN shrunk INTEGER NOT NULL DEFAULT 0');
     },
   },
+  {
+    version: 5,
+    name: 'banked-per-bucket',
+    up(db) {
+      // How much this (session, day, model) has actually contributed to
+      // `daily_usage`, which is *not* the same as its watermark: a seeded
+      // bucket carries a watermark it never banked.
+      //
+      // Needed because a bucket can disappear from a session's reported set.
+      // The collector's `removeUsage` unwinds a restated request from the
+      // bucket it first landed in and deletes that bucket once it empties, so
+      // a Codex session that files spend under `unknown` until `turn_context`
+      // names the model migrates the whole bucket to the real name — and the
+      // destination, having no watermark, banked it a second time. Un-banking
+      // needs to subtract exactly what this session put in, never a watermark
+      // that includes a seed, and never enough to eat another session's
+      // contribution to the same row.
+      for (const column of ['input', 'output', 'cache_read', 'cache_write']) {
+        db.exec(
+          `ALTER TABLE usage_watermarks ADD COLUMN banked_${column} INTEGER NOT NULL DEFAULT 0`,
+        );
+      }
+    },
+  },
 ];
 
 /**

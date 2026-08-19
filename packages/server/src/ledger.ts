@@ -204,10 +204,14 @@ function prepare(db: Db) {
     // `retired = 0` on both paths: writing a watermark under a key is what
     // makes it live again, so a scheme the session comes back to un-retires
     // the exact rows it reuses.
+    // The trailing four parameters are what this write *banks* into
+    // daily_usage, not the watermark: they accumulate, so the row always
+    // knows its own contribution to the day. A seed passes zeroes.
     upsertWatermark: db.prepare(`
       INSERT INTO usage_watermarks
-        (session_id, member_id, day, model, harness, input, output, cache_read, cache_write, updated_at, retired, shrunk)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        (session_id, member_id, day, model, harness, input, output, cache_read, cache_write, updated_at, retired, shrunk,
+         banked_input, banked_output, banked_cache_read, banked_cache_write)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
       ON CONFLICT(session_id, member_id, day, model) DO UPDATE SET
         harness = excluded.harness,
         input = excluded.input, output = excluded.output,
@@ -219,7 +223,43 @@ function prepare(db: Db) {
         -- meant a single token of growth cleared the flag -- and a shrink is a
         -- harness reset on a live session, so growth on the very next
         -- heartbeat is the normal case, not the exception.
-        shrunk = MAX(usage_watermarks.shrunk, excluded.shrunk)
+        shrunk = MAX(usage_watermarks.shrunk, excluded.shrunk),
+        banked_input = usage_watermarks.banked_input + excluded.banked_input,
+        banked_output = usage_watermarks.banked_output + excluded.banked_output,
+        banked_cache_read = usage_watermarks.banked_cache_read + excluded.banked_cache_read,
+        banked_cache_write = usage_watermarks.banked_cache_write + excluded.banked_cache_write
+    `),
+    /** Live buckets this session holds, so a vanished one can be spotted. */
+    liveBuckets: db.prepare(`
+      SELECT day, model, harness,
+             banked_input AS input, banked_output AS output,
+             banked_cache_read AS cache_read, banked_cache_write AS cache_write
+      FROM usage_watermarks
+      WHERE session_id = ? AND member_id = ? AND retired = 0 AND model <> ?
+    `),
+    /**
+     * Take back exactly what a vanished bucket contributed. Clamped at zero so
+     * a bookkeeping slip can never drive a day negative, and scoped to this
+     * session's own `banked_*` so it can never eat another session's share of
+     * the same row.
+     */
+    unbankDay: db.prepare(`
+      UPDATE daily_usage SET
+        input = MAX(0, input - ?), output = MAX(0, output - ?),
+        cache_read = MAX(0, cache_read - ?), cache_write = MAX(0, cache_write - ?)
+      WHERE member_id = ? AND day = ? AND harness = ? AND model = ?
+    `),
+    /**
+     * Retire a vanished bucket and clear its contribution, so the same key
+     * returning later banks from a clean slate rather than accumulating onto
+     * a total that has already been taken back.
+     */
+    retireBucket: db.prepare(`
+      UPDATE usage_watermarks
+      SET retired = 1,
+          banked_input = 0, banked_output = 0,
+          banked_cache_read = 0, banked_cache_write = 0
+      WHERE session_id = ? AND member_id = ? AND day = ? AND model = ?
     `),
     /**
      * Has this session's watermark *ever* been lowered, under either scheme,
@@ -262,6 +302,12 @@ function prepare(db: Db) {
              SUM(cache_read) AS cache_read, SUM(cache_write) AS cache_write
       FROM daily_usage WHERE member_id = ? AND day = ?
       GROUP BY model
+      -- Un-banking a migrated bucket leaves the old model's row at zero. It is
+      -- not part of the day's breakdown, and leaving it in would also null the
+      -- day's cost forever, since an unpriced model with no spend would still
+      -- count as unpriced.
+      HAVING SUM(input) > 0 OR SUM(output) > 0
+          OR SUM(cache_read) > 0 OR SUM(cache_write) > 0
     `),
     daySessions: db.prepare(`
       SELECT COUNT(DISTINCT session_id) AS n FROM usage_watermarks
@@ -487,6 +533,59 @@ export class TokenLedger {
       }
     }
 
+    // A bucket can leave a session's reported set entirely. The collector's
+    // `removeUsage` unwinds a restated request from the bucket it first landed
+    // in and deletes that bucket once it empties, so a Codex session that
+    // files spend under `unknown` until `turn_context` names the model
+    // migrates the whole bucket — and the destination, having no watermark of
+    // its own, banks it a second time. Measured: 26 of 493 local rollouts take
+    // that path, so this is ordinary behaviour, not an edge case. A request
+    // restated after midnight moves between day keys the same way.
+    //
+    // Only safe on a *complete* report. `tokens` is summed over every bucket
+    // before the 30-bucket wire cap, so `tokens` equal to the reported sum is
+    // the collector telling us it shipped all of them; anything less means the
+    // cap dropped keys that still exist, and treating those as migrated would
+    // erase real spend on every heartbeat of a long session. Deliberately
+    // derived from the data rather than by comparing a bucket count against a
+    // copy of the schema's cap, which would silently mean the wrong thing if
+    // the cap ever moved.
+    if (bucketed && session.tokens && !rebasing) {
+      const reportedSum = buckets.reduce(
+        (sum, b) => addTokens(sum, bucketTotals(b)),
+        emptyTokens(),
+      );
+      const complete =
+        reportedSum.input === session.tokens.input &&
+        reportedSum.output === session.tokens.output &&
+        reportedSum.cacheRead === session.tokens.cacheRead &&
+        reportedSum.cacheWrite === session.tokens.cacheWrite;
+      if (complete) {
+        const present = new Set(buckets.map((b) => `${b.day}|${b.model}`));
+        const live = this.q.liveBuckets.all(session.id, memberIdValue, FLAT_WATERMARK_MODEL) as ({
+          day: string;
+          model: string;
+          harness: string;
+        } & UsageRow)[];
+        for (const held of live) {
+          if (present.has(`${held.day}|${held.model}`)) continue;
+          const banked = totalsOf(held);
+          this.q.unbankDay.run(
+            banked.input,
+            banked.output,
+            banked.cacheRead,
+            banked.cacheWrite,
+            memberIdValue,
+            held.day,
+            held.harness,
+            held.model,
+          );
+          this.q.retireBucket.run(session.id, memberIdValue, held.day, held.model);
+          changed = true;
+        }
+      }
+    }
+
     for (const b of buckets) {
       const day = bucketed ? b.day : today;
       // Two different questions with two different answers. `b.model` is how
@@ -539,6 +638,12 @@ export class TokenLedger {
         // A transition that measured recovery against it would invent the
         // difference. See the recovery block above.
         shrank ? 1 : 0,
+        // What this write banks, accumulated on the row so a vanished bucket
+        // can hand back exactly its own contribution.
+        grew ? delta.input : 0,
+        grew ? delta.output : 0,
+        grew ? delta.cacheRead : 0,
+        grew ? delta.cacheWrite : 0,
       );
       if (grew) {
         this.q.bumpDay.run(

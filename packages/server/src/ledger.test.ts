@@ -592,6 +592,111 @@ describe('TokenLedger', () => {
     expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
   });
 
+  // --------------------------------------------------- buckets that migrate
+
+  it('does not double-count a bucket that migrated to another model', () => {
+    // The collector's `removeUsage` unwinds a restated request from the bucket
+    // it first landed in and deletes that bucket when it empties — so a
+    // session's reported set can lose a key entirely. Codex does this
+    // routinely: spend is filed under `unknown` until `turn_context` names the
+    // model, and 26 of 493 local rollouts take that path.
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'unknown', 1000)])], TODAY_19);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'gpt-5', 1000)])], TODAY_19 + 1000);
+    const today = ledger.todayFor('m1', TODAY_19);
+    expect(today.tokens.input).toBe(1000);
+    // ...and it moved, rather than being split across both names.
+    expect(today.byModel?.unknown).toBeUndefined();
+    expect(today.byModel?.['gpt-5']?.input).toBe(1000);
+  });
+
+  it('does not double-count a bucket that migrated to another day', () => {
+    // A request restated after midnight moves between day keys the same way.
+    ledger.ingest('m1', [realistic('s1', [bucket(D18, 'gpt-5', 1000)])], TODAY_19);
+    expect(ledger.todayFor('m1', DAY_18).tokens.input).toBe(1000);
+
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'gpt-5', 1000)])], TODAY_19 + 1000);
+    expect(ledger.todayFor('m1', DAY_18).tokens.input).toBe(0);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+  });
+
+  it('handles a partial migration that merges into a surviving bucket', () => {
+    ledger.ingest(
+      'm1',
+      [realistic('s1', [bucket(D19, 'unknown', 1000), bucket(D19, 'gpt-5', 500)])],
+      TODAY_19,
+    );
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1500);
+
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'gpt-5', 1500)])], TODAY_19 + 1000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1500);
+  });
+
+  it('leaves another session’s spend alone when one session’s bucket migrates', () => {
+    // Both sessions bank into the same `(day, model)` row, so un-banking must
+    // remove only what the migrating session put there.
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'unknown', 1000)])], TODAY_19);
+    ledger.ingest('m1', [realistic('s2', [bucket(D19, 'unknown', 300)])], TODAY_19 + 1000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1300);
+
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'gpt-5', 1000)])], TODAY_19 + 2000);
+    const today = ledger.todayFor('m1', TODAY_19);
+    expect(today.tokens.input).toBe(1300);
+    expect(today.byModel?.unknown?.input).toBe(300);
+    expect(today.byModel?.['gpt-5']?.input).toBe(1000);
+  });
+
+  it('does not un-bank a bucket the wire cap merely dropped', () => {
+    // `tokens` is summed over every bucket before the 30-bucket cap, so a
+    // report whose buckets total less than `tokens` is *incomplete* — the
+    // missing keys still exist on the collector. Treating them as migrated
+    // would erase real spend on every heartbeat of a long session.
+    ledger.ingest(
+      'm1',
+      [realistic('s1', [bucket(D18, 'gpt-5', 400), bucket(D19, 'gpt-5', 600)])],
+      TODAY_19,
+    );
+    expect(ledger.todayFor('m1', DAY_18).tokens.input).toBe(400);
+
+    // The next heartbeat ships only the newest bucket, with `tokens` still
+    // describing both.
+    ledger.ingest(
+      'm1',
+      [realistic('s1', [bucket(D19, 'gpt-5', 600)], { flat: tokens(1000) })],
+      TODAY_19 + 1000,
+    );
+    expect(ledger.todayFor('m1', DAY_18).tokens.input).toBe(400);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(600);
+  });
+
+  it('does not let a migrated-away model keep the day’s cost unknown', () => {
+    // Un-banking leaves the old model's row at zero. If a zeroed row still
+    // counted as a model in the day, an unpriced one would null the cost for
+    // the rest of the day even though nothing was ever spent under it.
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'unknown', 1_000_000)])], TODAY_19);
+    expect(ledger.todayFor('m1', TODAY_19).estimatedCostUsd).toBeNull();
+
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, PRICED, 1_000_000)])], TODAY_19 + 1000);
+    const today = ledger.todayFor('m1', TODAY_19);
+    expect(today.tokens.input).toBe(1_000_000);
+    expect(today.estimatedCostUsd).toBe(1);
+  });
+
+  it('re-banks a bucket that comes back after migrating away', () => {
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'unknown', 1000)])], TODAY_19);
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'gpt-5', 1000)])], TODAY_19 + 1000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+    // The same key returning is new spend against a cleared slate, not a
+    // restatement of what was un-banked.
+    ledger.ingest(
+      'm1',
+      [realistic('s1', [bucket(D19, 'gpt-5', 1000), bucket(D19, 'unknown', 200)])],
+      TODAY_19 + 2000,
+    );
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1200);
+  });
+
   // ------------------------------------------- the shape the wire really has
 
   it('handles tokens, buckets and minutes arriving together, as they really do', () => {
