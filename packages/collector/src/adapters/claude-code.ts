@@ -83,22 +83,23 @@ function entryMs(entry: Record<string, unknown>, acc: SessionAccumulator): numbe
 }
 
 /**
- * Ceiling on the resume-dedup index. It holds one entry per distinct
- * requestId the daemon has ever seen, which grows for as long as the process
- * lives — and now grows 2.3x faster, since sidechain requests are no longer
- * thrown away at the first line.
+ * Backstop on the resume-dedup index, which is otherwise bounded by tracker
+ * liveness: `forgetFile` releases a transcript's claims when the tracker drops
+ * it, 30 minutes (`EXPIRE_MS`) after it goes quiet. Steady-state size is
+ * therefore the requestIds of *currently tracked* files — a median local
+ * transcript holds 22 and the largest 3399, so realistically low thousands,
+ * two orders of magnitude below this cap. At ~150 bytes an entry (a
+ * 28-character id plus a Map slot; the file path is a shared reference, not a
+ * copy) the cap bounds the index at ~15MB even if liveness release somehow
+ * never fired.
  *
- * 100k is a ceiling, not a working size: the busiest single day in 49 active
- * days of local transcripts produced 2939 distinct requestIds, and the
- * heaviest 30-day window 31225, so eviction is roughly three months of
- * *uninterrupted* uptime away. At ~150 bytes an entry (a 28-character id
- * plus a Map slot; the file path is a shared reference, not a copy) the cap
- * bounds this at ~15MB.
- *
- * Evicting the oldest is safe because ownership only has to outlive the file
- * that claimed it: the tracker drops a transcript 30 minutes (`EXPIRE_MS`)
- * after it goes quiet, so an id old enough to be evicted here belongs to a
- * file nothing is reporting on any more.
+ * The cap is a second line of defence, not the primary bound, and that
+ * distinction matters: count-based eviction is decoupled from tracker
+ * liveness, so if it ever *did* fire it could drop a claim belonging to a
+ * still-live file. A resume copy reporting that id would then find no owner
+ * and count it a second time on top of the original's still-held total. That
+ * is the known limitation of the cap alone; reaching it now requires ~100k
+ * distinct requestIds among files active within the same 30-minute window.
  */
 const MAX_TRACKED_REQUESTS = 100_000;
 
@@ -128,6 +129,18 @@ export function createClaudeCodeAdapter(
       filePath.endsWith('.jsonl') &&
       !filePath.includes(`${sep}memory${sep}`),
     newAccumulator,
+    /**
+     * The tracker has dropped this transcript, so nothing can report its
+     * requests any more and its claims are dead weight. Releasing them here is
+     * what keeps the index sized by live files rather than by uptime. Linear
+     * in the index, which is precisely why that stays small — a few thousand
+     * entries, scanned only when a file expires.
+     */
+    forgetFile(filePath) {
+      for (const [requestId, owner] of requestOwner) {
+        if (owner === filePath) requestOwner.delete(requestId);
+      }
+    },
     ingestLine(line, acc) {
       let entry: Record<string, unknown>;
       try {

@@ -66,6 +66,13 @@ export interface HarnessAdapter {
   newAccumulator(filePath: string): SessionAccumulator;
   /** Fold one complete transcript line into the accumulator. */
   ingestLine(line: string, acc: SessionAccumulator): void;
+  /**
+   * The tracker has dropped this file and will never fold another line of it.
+   * Adapters that keep state *outside* the accumulator, keyed by path, free it
+   * here. Optional: an adapter whose state lives entirely on the accumulator
+   * (Codex, and any community adapter) has nothing to release.
+   */
+  forgetFile?(filePath: string): void;
 }
 
 /** Byte-offset cursor so only appended bytes are ever re-parsed. */

@@ -51,7 +51,7 @@ export class SessionTracker {
       ({ lines, cursor: entry.cursor } = readAppended(filePath, entry.cursor));
     } catch {
       // File vanished or became unreadable; forget it.
-      this.entries.delete(filePath);
+      this.forget(filePath);
       return false;
     }
     for (const line of lines) {
@@ -64,7 +64,20 @@ export class SessionTracker {
   }
 
   removeFile(filePath: string): void {
+    this.forget(filePath);
+  }
+
+  /**
+   * Drop a file and tell its adapter, so cross-file state keyed by path dies
+   * with the file rather than outliving it. Every removal goes through here —
+   * an adapter that only heard about *some* of them would be worse than one
+   * that heard about none.
+   */
+  private forget(filePath: string): void {
+    const entry = this.entries.get(filePath);
+    if (!entry) return;
     this.entries.delete(filePath);
+    entry.adapter.forgetFile?.(filePath);
   }
 
   /** Paths currently tracked; the watcher's polling fallback re-stats these. */
@@ -83,7 +96,7 @@ export class SessionTracker {
       // and they outnumber displayable sessions better than ten to one.
       const quietMs = now - entry.lastActivityMs;
       if (quietMs >= EXPIRE_MS) {
-        this.entries.delete(filePath);
+        this.forget(filePath);
         continue;
       }
       // `usageOnly` files (subagent sidechains) borrow their parent's

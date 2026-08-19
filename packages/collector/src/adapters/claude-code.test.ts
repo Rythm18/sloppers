@@ -292,6 +292,26 @@ describe('claude-code adapter', () => {
     expect(totalUsage(accA)).toMatchObject({ input: 100, output: 50 });
   });
 
+  it('releases a file’s request claims once the tracker forgets it', () => {
+    const fresh = createClaudeCodeAdapter(HOME);
+    const original = `${HOME}/.claude/projects/-home-dev-myapp/original.jsonl`;
+    const resumed = `${HOME}/.claude/projects/-home-dev-myapp/resumed.jsonl`;
+    const usage = { input_tokens: 100, output_tokens: 50 };
+
+    const accA = fresh.newAccumulator(original);
+    fresh.ingestLine(JSON.stringify(assistant({ requestId: 'shared-1', usage })), accA);
+
+    // The original goes quiet and the tracker drops it. Nothing reports its
+    // requests any more, so a resume picked up later legitimately owns them —
+    // and, more to the point, the claim is no longer held for the life of the
+    // process just because the id was seen once.
+    fresh.forgetFile?.(original);
+
+    const accB = fresh.newAccumulator(resumed);
+    fresh.ingestLine(JSON.stringify(assistant({ requestId: 'shared-1', usage })), accB);
+    expect(totalUsage(accB)).toMatchObject({ input: 100, output: 50 });
+  });
+
   it('bounds the resume-dedup index, evicting the oldest claim first', () => {
     // The index holds one entry per distinct requestId for the life of the
     // process, and sidechains now feed it too. Cap of 3 here; 100k in
