@@ -1,15 +1,22 @@
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { countMinutes, dayOf, decodeMinutes } from '@sloppers/protocol';
 import { describe, expect, it } from 'vitest';
 import { EXPIRE_MS } from './state.js';
 import { SessionTracker } from './tracker.js';
 import type { HarnessAdapter } from './types.js';
-import { addUsage, newAccumulator } from './types.js';
+import { addUsage, markMinute, newAccumulator } from './types.js';
 
 const AT = Date.parse('2026-08-19T05:30:00.000Z');
+const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** A minimal line format: `<sessionId> <kind> [tokens]` */
+/**
+ * A minimal line format: `<sessionId> <kind> [tokens] [dayOffset]`.
+ * `kind` of `sub` marks the file usage-only (a subagent sidechain); `final`
+ * ends the turn. `dayOffset` shifts the entry that many whole days from `AT`,
+ * which is how a test spans enough days to reach the bucket caps.
+ */
 function fakeAdapter(root: string): HarnessAdapter {
   return {
     id: 'fake-harness',
@@ -17,14 +24,16 @@ function fakeAdapter(root: string): HarnessAdapter {
     matches: (p) => p.startsWith(root) && p.endsWith('.log'),
     newAccumulator,
     ingestLine(line, acc) {
-      const [id, kind, tokens] = line.split(' ');
+      const [id, kind, tokens, dayOffset] = line.split(' ');
       if (id) acc.sessionId = id;
       acc.cwd = '/home/dev/proj';
       if (kind === 'sub') acc.usageOnly = true;
       if (kind === 'final') acc.lastEventKind = 'agent-final';
       else acc.lastEventKind = 'other';
+      const ms = AT + (dayOffset ? Number(dayOffset) : 0) * DAY_MS;
+      markMinute(acc, ms);
       if (tokens) {
-        addUsage(acc, AT, 'fake-model', {
+        addUsage(acc, ms, 'fake-model', {
           input: Number(tokens),
           output: 0,
           cacheRead: 0,
@@ -34,6 +43,11 @@ function fakeAdapter(root: string): HarnessAdapter {
       acc.startedAtMs ??= 1000;
     },
   };
+}
+
+/** Every input token the snapshot reports across its usage buckets. */
+function bucketedInput(snap: { usage?: { input: number }[] } | undefined): number {
+  return (snap?.usage ?? []).reduce((sum, b) => sum + b.input, 0);
 }
 
 function setup() {
@@ -160,5 +174,182 @@ describe('SessionTracker', () => {
     rmSync(file);
     expect(tracker.ingestFile(file, 2000)).toBe(false);
     expect(tracker.snapshot(3000)).toEqual([]);
+  });
+});
+
+describe('SessionTracker grouping', () => {
+  it('folds a sidechain file into its parent session instead of listing it', () => {
+    const { root, tracker } = setup();
+    const main = join(root, 'parent.log');
+    const sub = join(root, 'parent-subagent.log');
+    writeFileSync(main, 's-parent work 100\n');
+    writeFileSync(sub, 's-parent sub 40\n');
+    tracker.ingestFile(main, 5000);
+    tracker.ingestFile(sub, 5000);
+
+    const snaps = tracker.snapshot(6000);
+    expect(snaps).toHaveLength(1);
+    expect(snaps[0]?.id).toBe('s-parent');
+    // Display fields come from the parent, not the sidechain.
+    expect(snaps[0]?.project).toBe('proj');
+    expect(bucketedInput(snaps[0])).toBe(140);
+    expect(snaps[0]?.tokens?.input).toBe(140);
+  });
+
+  it('sums a sidechain into its parent bucket when they share day and model', () => {
+    const { root, tracker } = setup();
+    const main = join(root, 'parent.log');
+    const sub = join(root, 'parent-subagent.log');
+    writeFileSync(main, 's-parent work 100\n');
+    writeFileSync(sub, 's-parent sub 40\n');
+    tracker.ingestFile(main, 5000);
+    tracker.ingestFile(sub, 5000);
+
+    const [snap] = tracker.snapshot(6000);
+    expect(snap?.usage).toEqual([
+      { day: dayOf(AT), model: 'fake-model', input: 140, output: 0, cacheRead: 0, cacheWrite: 0 },
+    ]);
+  });
+
+  it('does not double-count a folded sidechain across repeated snapshots', () => {
+    const { root, tracker } = setup();
+    const main = join(root, 'parent.log');
+    const sub = join(root, 'parent-subagent.log');
+    writeFileSync(main, 's-parent work 100\n');
+    writeFileSync(sub, 's-parent sub 40\n');
+    tracker.ingestFile(main, 5000);
+    tracker.ingestFile(sub, 5000);
+
+    // Merging must copy the adapters' buckets, never alias them: folding into
+    // the parent's own map would compound the sidechain on every projection.
+    expect(bucketedInput(tracker.snapshot(6000)[0])).toBe(140);
+    expect(bucketedInput(tracker.snapshot(6001)[0])).toBe(140);
+    expect(bucketedInput(tracker.snapshot(6002)[0])).toBe(140);
+  });
+
+  it('drops a sidechain whose parent session is gone rather than inventing one', () => {
+    const { root, tracker } = setup();
+    const sub = join(root, 'orphan-subagent.log');
+    writeFileSync(sub, 's-orphan sub 40\n');
+    tracker.ingestFile(sub, 5000);
+    expect(tracker.snapshot(6000)).toHaveLength(0);
+  });
+
+  it("retains an orphaned sidechain's spend until its parent turns up", () => {
+    const { root, tracker } = setup();
+    const sub = join(root, 'orphan-subagent.log');
+    const main = join(root, 'late-parent.log');
+    writeFileSync(sub, 's-late sub 40\n');
+    tracker.ingestFile(sub, 5000);
+    expect(tracker.snapshot(6000)).toHaveLength(0);
+    // Not displayed, but held: seedTracker walks in unsorted directory order,
+    // so a sidechain can reach the tracker before the parent it belongs to.
+    expect(tracker.trackedFiles()).toEqual([sub]);
+
+    writeFileSync(main, 's-late work 100\n');
+    tracker.ingestFile(main, 7000);
+    const snaps = tracker.snapshot(8000);
+    expect(snaps).toHaveLength(1);
+    expect(bucketedInput(snaps[0])).toBe(140);
+  });
+
+  it('keeps two non-sidechain files that share a session id as two sessions', () => {
+    const { root, tracker } = setup();
+    const a = join(root, 'a.log');
+    const b = join(root, 'b.log');
+    // Codex reassigns sessionId on every session_meta and never sets
+    // usageOnly, so distinct rollouts really do collide on an id: 7 ids span
+    // more than one of the 494 local rollout files, one of them 29 files.
+    // Grouping on the id alone would hide 92 of them.
+    writeFileSync(a, 's-shared work 100\n');
+    writeFileSync(b, 's-shared work 40\n');
+    tracker.ingestFile(a, 5000);
+    tracker.ingestFile(b, 6000);
+
+    const snaps = tracker.snapshot(7000);
+    expect(snaps).toHaveLength(2);
+    expect(snaps.map((s) => s.id)).toEqual(['s-shared', 's-shared']);
+    expect(snaps.map((s) => s.tokens?.input).sort()).toEqual([100, 40].sort());
+  });
+
+  it('keeps a parent alive and working while its subagent is still writing', () => {
+    const { root, tracker } = setup();
+    const main = join(root, 'parent.log');
+    const sub = join(root, 'parent-subagent.log');
+    writeFileSync(main, 's-parent work 100\n');
+    writeFileSync(sub, 's-parent sub 40\n');
+    const parentAt = 1000;
+    // A parent transcript is not appended to while a subagent runs — the tool
+    // result only lands when the subagent finishes. 28 of 554 local sidechains
+    // wrote while their parent had been quiet for over EXPIRE_MS, the worst by
+    // 155 minutes, so per-entry expiry reaps the parent mid-task.
+    const subAt = parentAt + EXPIRE_MS;
+    tracker.ingestFile(main, parentAt);
+    tracker.ingestFile(sub, subAt);
+
+    const now = subAt + 1000;
+    const snaps = tracker.snapshot(now);
+    expect(snaps).toHaveLength(1);
+    expect(snaps[0]?.state).toBe('working');
+    expect(snaps[0]?.lastActivityAt).toBe(subAt);
+    expect(tracker.trackedFiles()).toHaveLength(2);
+  });
+
+  it('expires a whole group once its newest file goes quiet', () => {
+    const { root, tracker } = setup();
+    const main = join(root, 'parent.log');
+    const sub = join(root, 'parent-subagent.log');
+    writeFileSync(main, 's-parent work 100\n');
+    writeFileSync(sub, 's-parent sub 40\n');
+    tracker.ingestFile(main, 1000);
+    tracker.ingestFile(sub, 2000);
+    expect(tracker.snapshot(2000 + EXPIRE_MS)).toHaveLength(0);
+    expect(tracker.trackedFiles()).toEqual([]);
+  });
+
+  it('caps the usage array without shrinking the flat token total', () => {
+    const { root, tracker } = setup();
+    const file = join(root, 'long.log');
+    // 35 days, one bucket each: more than the wire's `usage` cap of 30.
+    const days = 35;
+    writeFileSync(file, Array.from({ length: days }, (_, i) => `s1 work 10 ${i}\n`).join(''));
+    tracker.ingestFile(file, 5000);
+
+    const [snap] = tracker.snapshot(6000);
+    expect(snap?.usage).toHaveLength(30);
+    // The cap is a wire-schema limit on the bucket array, not a decision to
+    // forget spend: `tokens` is what the ledger banks and it stays complete.
+    expect(snap?.tokens?.input).toBe(days * 10);
+    const reported = new Set((snap?.usage ?? []).map((b) => b.day));
+    expect(reported.has(dayOf(AT + (days - 1) * DAY_MS))).toBe(true);
+    expect(reported.has(dayOf(AT))).toBe(false);
+  });
+
+  it('caps activeMinutes to the seven most recent days', () => {
+    const { root, tracker } = setup();
+    const file = join(root, 'long.log');
+    writeFileSync(file, Array.from({ length: 10 }, (_, i) => `s1 work 10 ${i}\n`).join(''));
+    tracker.ingestFile(file, 5000);
+
+    const [snap] = tracker.snapshot(6000);
+    expect(snap?.activeMinutes?.map((m) => m.day)).toEqual(
+      Array.from({ length: 7 }, (_, i) => dayOf(AT + (9 - i) * DAY_MS)),
+    );
+  });
+
+  it('merges a sidechain and its parent into one day of active minutes', () => {
+    const { root, tracker } = setup();
+    const main = join(root, 'parent.log');
+    const sub = join(root, 'parent-subagent.log');
+    writeFileSync(main, 's-parent work 100\n');
+    writeFileSync(sub, 's-parent sub 40\n');
+    tracker.ingestFile(main, 5000);
+    tracker.ingestFile(sub, 5000);
+
+    const [snap] = tracker.snapshot(6000);
+    expect(snap?.activeMinutes).toHaveLength(1);
+    const bitmap = decodeMinutes(snap?.activeMinutes?.[0]?.minutes ?? '');
+    expect(countMinutes(bitmap)).toBe(1);
+    expect(snap?.activeMinutes?.[0]?.day).toBe(dayOf(AT));
   });
 });
