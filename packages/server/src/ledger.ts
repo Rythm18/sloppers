@@ -85,6 +85,12 @@ export class TokenLedger {
         cache_write = cache_write + excluded.cache_write
     `);
 
+    // Half of an invariant whose other half lives in the collector: it stops
+    // deduplicating a resumed session once its claim is 24h old, and this guard
+    // takes over from there. The two only meet without a gap while this day is
+    // no longer than 24h — true under UTC, which is what the container runs.
+    // Setting TZ to a zone with DST would stretch one day a year to 25h and
+    // open a one-hour seam in which a resume is counted twice.
     const startOfToday = new Date(now).setHours(0, 0, 0, 0);
     const tx = this.db.transaction(() => {
       for (const session of sessions) {
