@@ -342,8 +342,15 @@ describe('end-to-end smoke', () => {
     const replayedDay = dayOf(NOW - REPLAYED_AGO_MS);
     expect(session?.usage?.find((b) => b.day === replayedDay)?.input).toBe(1_000_000);
 
-    // The server banks only what happened today. Without the guard this reads
-    // 1_000_777.
+    // The server banks only what happened today...
     expect(presence.today.tokens.input).toBe(FRESH_INPUT);
+
+    // ...and, the part `presence` cannot show, nothing at all on the day the
+    // replay is dated. Real per-day buckets alone would put the double here
+    // instead of on today — tidier, and still double — so this is the
+    // assertion the guard actually answers for. Read straight off the
+    // ledger because the wire only ever carries "today".
+    const replayed = server.rooms.ledger.todayFor(world.you.memberId, NOW - REPLAYED_AGO_MS);
+    expect(replayed.tokens.input).toBe(0);
   });
 });

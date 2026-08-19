@@ -326,6 +326,18 @@ describe('TokenLedger', () => {
     expect(ledger.todayFor('m1', TODAY_19).sessionsRun).toBe(2);
   });
 
+  it('counts one session once however many models it used', () => {
+    // Watermarks are per (session, day, model), so a two-model session leaves
+    // two rows on one day. Counting rows rather than distinct sessions would
+    // report two sessions run.
+    ledger.ingest(
+      'm1',
+      [bucketed('s1', [bucket(D19, 'claude-opus-5', 1), bucket(D19, 'claude-haiku-4-5', 1)])],
+      TODAY_19,
+    );
+    expect(ledger.todayFor('m1', TODAY_19).sessionsRun).toBe(1);
+  });
+
   it('counts a session against the day it actually worked', () => {
     ledger.ingest('m1', [bucketed('s1', [bucket(D18, 'm', 5)])], DAY_18);
     ledger.ingest('m1', [bucketed('s1', [bucket(D18, 'm', 5), bucket(D19, 'm', 5)])], TODAY_19);
