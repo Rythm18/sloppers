@@ -64,8 +64,33 @@ import type { Db } from './db/index.js';
  * reads. Deliberately unfixed, not overlooked.
  */
 
-/** Where a flat cumulative total lands: we don't know which model spent it. */
+/**
+ * How unattributed spend is *displayed*: a real model name, shared with the
+ * collector, which files spend under exactly this string when a harness
+ * reports tokens before naming a model (`UNKNOWN_MODEL` in the collector's
+ * `core/types.ts` — 26 of 493 local Codex rollouts, a third of their tokens).
+ * It appears in `daily_usage` and so in `byModel`, and it is unpriced, which
+ * is the honest outcome for tokens nobody can attribute.
+ */
 const UNKNOWN_MODEL = 'unknown';
+
+/**
+ * How the flat 0.1.1 path *keys its watermark*, which is a different question
+ * from how its spend is displayed and must not share an answer.
+ *
+ * These were the same string until it bit: `unknown` is a model a bucketed
+ * collector genuinely sends, so an ordinary Codex report made `flatWatermark`
+ * match, `rebasing` fire on every heartbeat, and — since the retired slice
+ * covers only the `unknown` bucket while the reported total covers every
+ * bucket — the named-model tokens were re-banked each time, without bound.
+ *
+ * The empty string cannot be forged over the wire: `usageBucketSchema.model`
+ * is `z.string().min(1)`, so a bucket carrying it fails validation before it
+ * reaches the ledger. Verified directly against the schema, and against the
+ * whole `sessionSnapshotSchema` path, rather than assumed — note that `' '`
+ * would *not* have worked, since `min(1)` accepts it.
+ */
+const FLAT_WATERMARK_MODEL = '';
 
 /** A day's activity bitmap: one bit per minute of a 1440-minute day. */
 const MINUTE_BITMAP_BYTES = MINUTES_PER_DAY / 8;
@@ -110,7 +135,12 @@ function prepare(db: Db) {
      *
      * "Newest", never a sum: the flat path rewrites this row under each server
      * day it is seen on, and every one of those rows holds the whole session
-     * cumulative. Adding them together would invent spend.
+     * cumulative. A sum would overstate the *watermark*, and since a watermark
+     * is subtracted from what the collector reports, an overstated one
+     * understates the growth measured against it — losing spend in the delta
+     * path and losing recovery at a transition. (An earlier version of this
+     * comment said summing "would invent spend", which is backwards: summing
+     * understates in both places it is used.)
      */
     carriedWatermark: db.prepare(`
       SELECT input, output, cache_read, cache_write FROM usage_watermarks
@@ -128,10 +158,11 @@ function prepare(db: Db) {
     `),
     /**
      * Does this session hold live watermarks written by the flat path?
-     * Nothing else ever writes the model `unknown`: both adapters take the
-     * model name from the transcript, and migration 002's `unknown` backfill
-     * went to `daily_usage`, not here. So this is exactly "the collector was
-     * speaking 0.1.1 for this session".
+     *
+     * Keyed on `FLAT_WATERMARK_MODEL`, which no collector can send. The
+     * previous version keyed on `unknown` and justified it with "nothing else
+     * ever writes that model" — which was simply untrue, and cost a round: the
+     * collector writes it for every unattributed bucket.
      */
     flatWatermark: db.prepare(`
       SELECT 1 AS seen FROM usage_watermarks
@@ -175,13 +206,29 @@ function prepare(db: Db) {
     // the exact rows it reuses.
     upsertWatermark: db.prepare(`
       INSERT INTO usage_watermarks
-        (session_id, member_id, day, model, harness, input, output, cache_read, cache_write, updated_at, retired)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        (session_id, member_id, day, model, harness, input, output, cache_read, cache_write, updated_at, retired, shrunk)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
       ON CONFLICT(session_id, member_id, day, model) DO UPDATE SET
         harness = excluded.harness,
         input = excluded.input, output = excluded.output,
         cache_read = excluded.cache_read, cache_write = excluded.cache_write,
-        updated_at = excluded.updated_at, retired = 0
+        updated_at = excluded.updated_at, retired = 0, shrunk = excluded.shrunk
+    `),
+    /**
+     * Did the scheme being retired ever have its watermark lowered? A shrink
+     * lowers the watermark without touching `daily_usage`, so from then on the
+     * watermark no longer says how much has been banked — and recovery, which
+     * measures against it, would invent the difference.
+     */
+    flatShrank: db.prepare(`
+      SELECT 1 AS yes FROM usage_watermarks
+      WHERE session_id = ? AND member_id = ? AND model = ? AND retired = 0 AND shrunk = 1
+      LIMIT 1
+    `),
+    modelShrank: db.prepare(`
+      SELECT 1 AS yes FROM usage_watermarks
+      WHERE session_id = ? AND member_id = ? AND model <> ? AND retired = 0 AND shrunk = 1
+      LIMIT 1
     `),
     bumpDay: db.prepare(`
       INSERT INTO daily_usage
@@ -343,9 +390,9 @@ export class TokenLedger {
     // values, exactly as a `legacy_sessions` row does. The spend was already
     // counted under the old scheme; only growth from here should count.
     const hasFlat =
-      this.q.flatWatermark.get(session.id, memberIdValue, UNKNOWN_MODEL) !== undefined;
+      this.q.flatWatermark.get(session.id, memberIdValue, FLAT_WATERMARK_MODEL) !== undefined;
     const hasModel =
-      this.q.modelWatermark.get(session.id, memberIdValue, UNKNOWN_MODEL) !== undefined;
+      this.q.modelWatermark.get(session.id, memberIdValue, FLAT_WATERMARK_MODEL) !== undefined;
     const rebasing = bucketed ? hasFlat : hasModel && !hasFlat;
 
     let changed = false;
@@ -368,24 +415,35 @@ export class TokenLedger {
       // covers its own slice).
       const accounted = (
         bucketed
-          ? this.q.carriedWatermark.get(session.id, memberIdValue, UNKNOWN_MODEL)
-          : this.q.modelWatermarkTotal.get(session.id, memberIdValue, UNKNOWN_MODEL)
+          ? this.q.carriedWatermark.get(session.id, memberIdValue, FLAT_WATERMARK_MODEL)
+          : this.q.modelWatermarkTotal.get(session.id, memberIdValue, FLAT_WATERMARK_MODEL)
       ) as UsageRow | undefined;
-      if (bucketed) this.q.retireFlatWatermarks.run(session.id, memberIdValue, UNKNOWN_MODEL);
-      else this.q.retireModelWatermarks.run(session.id, memberIdValue, UNKNOWN_MODEL);
+      // A shrink lowers a watermark and leaves `daily_usage` alone, so past one
+      // the watermark understates what was banked and recovery below would
+      // invent the gap. We cannot tell how much was banked — nothing records
+      // the peak — so past a shrink we recover nothing and take the
+      // understatement.
+      const drifted =
+        (bucketed
+          ? this.q.flatShrank.get(session.id, memberIdValue, FLAT_WATERMARK_MODEL)
+          : this.q.modelShrank.get(session.id, memberIdValue, FLAT_WATERMARK_MODEL)) !== undefined;
+      if (bucketed)
+        this.q.retireFlatWatermarks.run(session.id, memberIdValue, FLAT_WATERMARK_MODEL);
+      else this.q.retireModelWatermarks.run(session.id, memberIdValue, FLAT_WATERMARK_MODEL);
 
       // Spend that happened while the collector was stopped for the upgrade
       // would otherwise vanish: the seed adopts the first report's cumulative
       // wholesale, so everything above the last accounted point is written off.
       // That loss is bounded only by how long the collector was down.
       //
-      // Recovering it cannot double-count. The reported total is never more
-      // than the session's true cumulative, and `accounted` is exactly how
-      // much of that has already been banked, so the difference is at most the
-      // genuine unbanked growth — and `max(0, ·)` per field means a report
-      // that totals *less* (the 30-bucket cap is applied after the flat total
-      // is summed, so this is normal) recovers nothing rather than inventing a
-      // refund.
+      // Recovering it cannot double-count, given `drifted` above. The reported
+      // total is never more than the session's true cumulative; on a watermark
+      // that has only ever risen, `accounted` is at least what has been banked
+      // (exactly it, or more when the session was seeded); so the difference is
+      // at most the genuine unbanked growth. `max(0, ·)` per field means a
+      // report totalling *less* — normal, since the 30-bucket cap is applied
+      // after the flat total is summed — recovers nothing rather than inventing
+      // a refund.
       //
       // It is filed under `unknown` on the day it arrived, and that is the
       // honest place for it: we know the amount and genuinely do not know the
@@ -395,12 +453,14 @@ export class TokenLedger {
       // null, which is the correct answer.
       const previous = accounted ? totalsOf(accounted) : emptyTokens();
       const reported = buckets.reduce((sum, b) => addTokens(sum, bucketTotals(b)), emptyTokens());
-      const recovered: TokenTotals = {
-        input: Math.max(0, reported.input - previous.input),
-        output: Math.max(0, reported.output - previous.output),
-        cacheRead: Math.max(0, reported.cacheRead - previous.cacheRead),
-        cacheWrite: Math.max(0, reported.cacheWrite - previous.cacheWrite),
-      };
+      const recovered: TokenTotals = drifted
+        ? emptyTokens()
+        : {
+            input: Math.max(0, reported.input - previous.input),
+            output: Math.max(0, reported.output - previous.output),
+            cacheRead: Math.max(0, reported.cacheRead - previous.cacheRead),
+            cacheWrite: Math.max(0, reported.cacheWrite - previous.cacheWrite),
+          };
       if (
         recovered.input > 0 ||
         recovered.output > 0 ||
@@ -423,10 +483,17 @@ export class TokenLedger {
 
     for (const b of buckets) {
       const day = bucketed ? b.day : today;
+      // Two different questions with two different answers. `b.model` is how
+      // the spend is *displayed* — for a flat report that is `unknown`, the
+      // same name a bucketed collector uses for unattributed spend, so the two
+      // merge in `byModel` as they should. The watermark is *keyed* by the
+      // wire-impossible sentinel for flat reports instead, so a bucketed
+      // collector's own `unknown` bucket can never be mistaken for one.
+      const watermarkModel = bucketed ? b.model : FLAT_WATERMARK_MODEL;
       const row = (
         bucketed
-          ? this.q.bucketWatermark.get(session.id, memberIdValue, b.day, b.model)
-          : this.q.carriedWatermark.get(session.id, memberIdValue, b.model)
+          ? this.q.bucketWatermark.get(session.id, memberIdValue, b.day, watermarkModel)
+          : this.q.carriedWatermark.get(session.id, memberIdValue, watermarkModel)
       ) as UsageRow | undefined;
       // Keyed on the *session* being unknown, not on this bucket's watermark
       // being absent: a session we already bank against is a session we are
@@ -454,13 +521,18 @@ export class TokenLedger {
         session.id,
         memberIdValue,
         day,
-        b.model,
+        watermarkModel,
         session.harness,
         b.input,
         b.output,
         b.cacheRead,
         b.cacheWrite,
         now,
+        // Remembered on the row, because a lowered watermark no longer says
+        // how much has been banked — `daily_usage` keeps what it already had.
+        // A transition that measured recovery against it would invent the
+        // difference. See the recovery block above.
+        shrank ? 1 : 0,
       );
       if (grew) {
         this.q.bumpDay.run(

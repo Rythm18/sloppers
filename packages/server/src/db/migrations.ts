@@ -255,6 +255,40 @@ export const migrations: Migration[] = [
       db.exec('ALTER TABLE usage_watermarks ADD COLUMN retired INTEGER NOT NULL DEFAULT 0');
     },
   },
+  {
+    version: 4,
+    name: 'flat-watermark-sentinel',
+    up(db) {
+      // The flat 0.1.1 path used to key its watermark under the model
+      // `unknown`, on the assumption that nothing else writes that name. That
+      // was wrong: the collector files unattributed spend under exactly
+      // `unknown` (`UNKNOWN_MODEL` in its `core/types.ts`), so an ordinary
+      // Codex report looked like a collector upgrade on every heartbeat.
+      //
+      // The empty string replaces it, and cannot collide: `usageBucketSchema`
+      // declares `model: z.string().min(1)`, so a bucket carrying it is
+      // rejected before it reaches the ledger.
+      //
+      // A blanket rewrite is safe because at this moment every `unknown`
+      // watermark row is flat-era by construction. `usage_watermarks` is
+      // created empty by migration 002 — that migration backfills `daily_usage`
+      // and `legacy_sessions`, and never inserts here — and the only writer
+      // since has been a ledger that read `session.tokens` alone and hardcoded
+      // `unknown`. The bucketed writer, which is what can produce a genuine
+      // `unknown` model row, has not shipped.
+      //
+      // Rewriting cannot collide on the primary key
+      // (session_id, member_id, day, model): nothing has ever written the
+      // empty-string model, so no target row exists.
+      db.exec("UPDATE usage_watermarks SET model = '' WHERE model = 'unknown'");
+
+      // A shrinking cumulative lowers a watermark but never lowers
+      // `daily_usage`, so past a shrink the watermark no longer says how much
+      // has been banked. The re-basing path measures recovery against it and
+      // would invent the gap, so it needs to know.
+      db.exec('ALTER TABLE usage_watermarks ADD COLUMN shrunk INTEGER NOT NULL DEFAULT 0');
+    },
+  },
 ];
 
 /**

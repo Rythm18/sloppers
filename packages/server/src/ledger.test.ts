@@ -61,6 +61,44 @@ function withMinutes(id: string, day: string, minutes: number[]): SessionSnapsho
 }
 
 /**
+ * The shape a real 0.2 collector actually puts on the wire, which none of the
+ * single-field helpers above reproduce: `SessionTracker.snapshot` sets
+ * `tokens` *and* `usage` *and* `activeMinutes` on the same snapshot. `tokens`
+ * is summed over every bucket before the 30-bucket wire cap, so it can exceed
+ * the buckets it ships with — pass `flat` to model that.
+ */
+function realistic(
+  id: string,
+  usage: UsageBucket[],
+  opts: {
+    flat?: TokenTotals;
+    minutes?: { day: string; minutes: number[] };
+    startedAt?: number;
+  } = {},
+): SessionSnapshot {
+  const summed = usage.reduce(
+    (acc, b) => ({
+      input: acc.input + b.input,
+      output: acc.output + b.output,
+      cacheRead: acc.cacheRead + b.cacheRead,
+      cacheWrite: acc.cacheWrite + b.cacheWrite,
+    }),
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  );
+  const out: SessionSnapshot = {
+    ...baseSession,
+    id,
+    tokens: opts.flat ?? summed,
+    usage,
+    ...(opts.startedAt === undefined ? {} : { startedAt: opts.startedAt }),
+  };
+  if (opts.minutes) {
+    out.activeMinutes = [{ day: opts.minutes.day, minutes: encodeMinutes(opts.minutes.minutes) }];
+  }
+  return out;
+}
+
+/**
  * A model with a price, injected for the cost tests. `PRICING.models` is
  * deliberately empty until a later task fills it from official documentation,
  * and an all-unpriced table cannot tell "null because partial" apart from
@@ -376,6 +414,81 @@ describe('TokenLedger', () => {
     );
     expect(ledger.todayFor('m1', DAY_18).tokens.input).toBe(1000);
     // 500 banked during the flat era, plus 500 recovered at the transition.
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+  });
+
+  it('does not mistake a collector’s own unknown-model bucket for the flat sentinel', () => {
+    // `unknown` is a model name the *shipped* collector emits: `addUsage`
+    // files spend under it whenever a harness reports tokens before naming a
+    // model, which 26 of 493 local Codex rollouts do for a third of their
+    // tokens. If that collides with the flat path's sentinel, every heartbeat
+    // looks like an upgrade and the named-model tokens are re-banked forever.
+    const snap = [realistic('s1', [bucket(D19, 'unknown', 1000), bucket(D19, 'gpt-5', 500)])];
+    ledger.ingest('m1', snap, TODAY_19);
+    ledger.ingest('m1', snap, TODAY_19 + 1000);
+    ledger.ingest('m1', snap, TODAY_19 + 2000);
+    ledger.ingest('m1', snap, TODAY_19 + 3000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1500);
+  });
+
+  it('upgrades cleanly when the first bucketed report includes an unknown bucket', () => {
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
+    const snap = [
+      realistic('s1', [bucket(D19, 'unknown', 600), bucket(D19, 'claude-opus-5', 400)]),
+    ];
+    ledger.ingest('m1', snap, TODAY_19 + 1000);
+    ledger.ingest('m1', snap, TODAY_19 + 2000);
+    ledger.ingest('m1', snap, TODAY_19 + 3000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+  });
+
+  it('keeps counting an all-unknown bucketed session', () => {
+    // The whole session can be unattributed — a Codex multi-agent thread that
+    // never emits an early `turn_context` looks exactly like this.
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'unknown', 1000)])], TODAY_19);
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'unknown', 1400)])], TODAY_19 + 1000);
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'unknown', 1400)])], TODAY_19 + 2000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1400);
+    expect(ledger.todayFor('m1', TODAY_19).byModel?.unknown?.input).toBe(1400);
+  });
+
+  it('recovers nothing at a transition whose flat watermark had shrunk', () => {
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
+    // A harness reset drops the cumulative. The ledger lowers the watermark
+    // and subtracts nothing, so `daily_usage` still holds the full 1000 —
+    // which means the watermark no longer says how much has been banked.
+    ledger.ingest('m1', [legacy('s1', tokens(300))], TODAY_19 + 1000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+
+    // Measuring the upgrade against it would invent 700.
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19 + 2000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+  });
+
+  // ------------------------------------------- the shape the wire really has
+
+  it('handles tokens, buckets and minutes arriving together, as they really do', () => {
+    // Every 0.2 snapshot carries all three at once. The single-field helpers
+    // used elsewhere in this file are convenient and are not what ships.
+    const snap = [
+      realistic('s1', [bucket(D19, 'claude-opus-5', 400, 40)], {
+        minutes: { day: D19, minutes: [61, 62] },
+      }),
+    ];
+    ledger.ingest('m1', snap, TODAY_19);
+    ledger.ingest('m1', snap, TODAY_19 + 1000);
+    const today = ledger.todayFor('m1', TODAY_19);
+    expect(today.tokens.input).toBe(400);
+    expect(today.activeMinutes).toBe(2);
+    expect(today.sessionsRun).toBe(1);
+  });
+
+  it('banks the buckets, not the flat total, when the wire cap makes them differ', () => {
+    // `tokens` is summed before the 30-bucket cap, so it legitimately exceeds
+    // the buckets shipped alongside it. The buckets are what carry a day.
+    const snap = [realistic('s1', [bucket(D19, 'claude-opus-5', 1000)], { flat: tokens(5000) })];
+    ledger.ingest('m1', snap, TODAY_19);
+    ledger.ingest('m1', snap, TODAY_19 + 1000);
     expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
   });
 
