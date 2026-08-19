@@ -92,10 +92,14 @@ function bucketTotals(b: UsageBucket): TokenTotals {
 
 function prepare(db: Db) {
   return {
-    /** The watermark for exactly this bucket; how bucketed usage is measured. */
+    /**
+     * The watermark for exactly this bucket; how bucketed usage is measured.
+     * Retired rows are invisible to every lookup below — they are kept only
+     * so `sessionsRun` still knows this session ran on their day.
+     */
     bucketWatermark: db.prepare(`
       SELECT input, output, cache_read, cache_write FROM usage_watermarks
-      WHERE session_id = ? AND member_id = ? AND day = ? AND model = ?
+      WHERE session_id = ? AND member_id = ? AND day = ? AND model = ? AND retired = 0
     `),
     /**
      * The newest watermark for this session/model on *any* day. Only the flat
@@ -103,51 +107,81 @@ function prepare(db: Db) {
      * so a session running across midnight must be measured against whatever
      * was last seen, whenever that was, or the whole running total would be
      * re-banked on the new day.
+     *
+     * "Newest", never a sum: the flat path rewrites this row under each server
+     * day it is seen on, and every one of those rows holds the whole session
+     * cumulative. Adding them together would invent spend.
      */
     carriedWatermark: db.prepare(`
       SELECT input, output, cache_read, cache_write FROM usage_watermarks
-      WHERE session_id = ? AND member_id = ? AND model = ?
+      WHERE session_id = ? AND member_id = ? AND model = ? AND retired = 0
       ORDER BY updated_at DESC, day DESC LIMIT 1
     `),
-    /** Has this session ever been banked against, on any day, for any model? */
+    /**
+     * Has this session ever been banked against, on any day, for any model?
+     * Retired rows count: the question is whether we know this session, and
+     * a re-based session is one we have been tracking all along.
+     */
     sessionSeen: db.prepare(`
       SELECT 1 AS seen FROM usage_watermarks
       WHERE session_id = ? AND member_id = ? LIMIT 1
     `),
     /**
-     * Does this session hold watermarks written by the flat path? Nothing
-     * else ever writes the model `unknown`: both adapters take the model name
-     * from the transcript, and migration 002's `unknown` backfill went to
-     * `daily_usage`, not here. So this is exactly "the collector used to
-     * speak 0.1.1 for this session".
+     * Does this session hold live watermarks written by the flat path?
+     * Nothing else ever writes the model `unknown`: both adapters take the
+     * model name from the transcript, and migration 002's `unknown` backfill
+     * went to `daily_usage`, not here. So this is exactly "the collector was
+     * speaking 0.1.1 for this session".
      */
     flatWatermark: db.prepare(`
       SELECT 1 AS seen FROM usage_watermarks
-      WHERE session_id = ? AND member_id = ? AND model = ? LIMIT 1
+      WHERE session_id = ? AND member_id = ? AND model = ? AND retired = 0 LIMIT 1
     `),
-    /** ...and the converse: watermarks written by the bucketed path. */
+    /** ...and the converse: live watermarks written by the bucketed path. */
     modelWatermark: db.prepare(`
       SELECT 1 AS seen FROM usage_watermarks
-      WHERE session_id = ? AND member_id = ? AND model <> ? LIMIT 1
+      WHERE session_id = ? AND member_id = ? AND model <> ? AND retired = 0 LIMIT 1
     `),
-    forgetFlatWatermarks: db.prepare(
-      'DELETE FROM usage_watermarks WHERE session_id = ? AND member_id = ? AND model = ?',
-    ),
+    /**
+     * The session's cumulative across its live bucket watermarks. A sum is
+     * right here and wrong for `carriedWatermark`: bucket rows are cumulative
+     * *within* their own (day, model) and so are disjoint, while flat rows
+     * each restate the whole session.
+     */
+    modelWatermarkTotal: db.prepare(`
+      SELECT
+        COALESCE(SUM(input), 0) AS input, COALESCE(SUM(output), 0) AS output,
+        COALESCE(SUM(cache_read), 0) AS cache_read,
+        COALESCE(SUM(cache_write), 0) AS cache_write
+      FROM usage_watermarks
+      WHERE session_id = ? AND member_id = ? AND model <> ? AND retired = 0
+    `),
+    retireFlatWatermarks: db.prepare(`
+      UPDATE usage_watermarks SET retired = 1
+      WHERE session_id = ? AND member_id = ? AND model = ?
+    `),
+    retireModelWatermarks: db.prepare(`
+      UPDATE usage_watermarks SET retired = 1
+      WHERE session_id = ? AND member_id = ? AND model <> ?
+    `),
     legacySession: db.prepare(
       'SELECT 1 AS seen FROM legacy_sessions WHERE session_id = ? AND member_id = ?',
     ),
     forgetLegacySession: db.prepare(
       'DELETE FROM legacy_sessions WHERE session_id = ? AND member_id = ?',
     ),
+    // `retired = 0` on both paths: writing a watermark under a key is what
+    // makes it live again, so a scheme the session comes back to un-retires
+    // the exact rows it reuses.
     upsertWatermark: db.prepare(`
       INSERT INTO usage_watermarks
-        (session_id, member_id, day, model, harness, input, output, cache_read, cache_write, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (session_id, member_id, day, model, harness, input, output, cache_read, cache_write, updated_at, retired)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
       ON CONFLICT(session_id, member_id, day, model) DO UPDATE SET
         harness = excluded.harness,
         input = excluded.input, output = excluded.output,
         cache_read = excluded.cache_read, cache_write = excluded.cache_write,
-        updated_at = excluded.updated_at
+        updated_at = excluded.updated_at, retired = 0
     `),
     bumpDay: db.prepare(`
       INSERT INTO daily_usage
@@ -308,22 +342,85 @@ export class TokenLedger {
     // Re-base instead of banking: seed the new attribution at its reported
     // values, exactly as a `legacy_sessions` row does. The spend was already
     // counted under the old scheme; only growth from here should count.
-    const rebasing = bucketed
-      ? this.q.flatWatermark.get(session.id, memberIdValue, UNKNOWN_MODEL) !== undefined
-      : this.q.modelWatermark.get(session.id, memberIdValue, UNKNOWN_MODEL) !== undefined &&
-        this.q.flatWatermark.get(session.id, memberIdValue, UNKNOWN_MODEL) === undefined;
-
-    // Retire the stale flat watermarks, so an upgrade re-bases exactly once
-    // and every later report is an ordinary delta. The downgrade direction
-    // deliberately does *not* delete the per-model rows: they are invisible to
-    // the flat path's lookup (which filters on `unknown`), they still carry
-    // the days this session ran for `sessionsRun`, and leaving them lets a
-    // later re-upgrade re-base off them instead of banking.
-    if (rebasing && bucketed) {
-      this.q.forgetFlatWatermarks.run(session.id, memberIdValue, UNKNOWN_MODEL);
-    }
+    const hasFlat =
+      this.q.flatWatermark.get(session.id, memberIdValue, UNKNOWN_MODEL) !== undefined;
+    const hasModel =
+      this.q.modelWatermark.get(session.id, memberIdValue, UNKNOWN_MODEL) !== undefined;
+    const rebasing = bucketed ? hasFlat : hasModel && !hasFlat;
 
     let changed = false;
+    if (rebasing) {
+      // Retirement is symmetric, and it has to be. Leaving the other scheme's
+      // rows live does not "let a later re-upgrade re-base off them" — an
+      // existing watermark row outranks `seed` below, so the re-base would be
+      // a no-op in exactly the case it is needed. Concretely: buckets 1000 →
+      // flat 1000 → flat 1500 → buckets 1500 banks the flat era's 500 twice,
+      // because the stale per-model row still reads 1000.
+      //
+      // Retired, not deleted: `sessionsRun` counts distinct sessions per day
+      // off this table, and the days a retired row covers are not always the
+      // days the new scheme reports — the flat path files under the server's
+      // day, the bucketed path under the collector's. Deleting would leave a
+      // day reading "1000 tokens, 0 sessions".
+      //
+      // The old scheme's cumulative, before it goes: the latest flat row
+      // (each restates the whole session) or the sum of the bucket rows (each
+      // covers its own slice).
+      const accounted = (
+        bucketed
+          ? this.q.carriedWatermark.get(session.id, memberIdValue, UNKNOWN_MODEL)
+          : this.q.modelWatermarkTotal.get(session.id, memberIdValue, UNKNOWN_MODEL)
+      ) as UsageRow | undefined;
+      if (bucketed) this.q.retireFlatWatermarks.run(session.id, memberIdValue, UNKNOWN_MODEL);
+      else this.q.retireModelWatermarks.run(session.id, memberIdValue, UNKNOWN_MODEL);
+
+      // Spend that happened while the collector was stopped for the upgrade
+      // would otherwise vanish: the seed adopts the first report's cumulative
+      // wholesale, so everything above the last accounted point is written off.
+      // That loss is bounded only by how long the collector was down.
+      //
+      // Recovering it cannot double-count. The reported total is never more
+      // than the session's true cumulative, and `accounted` is exactly how
+      // much of that has already been banked, so the difference is at most the
+      // genuine unbanked growth — and `max(0, ·)` per field means a report
+      // that totals *less* (the 30-bucket cap is applied after the flat total
+      // is summed, so this is normal) recovers nothing rather than inventing a
+      // refund.
+      //
+      // It is filed under `unknown` on the day it arrived, and that is the
+      // honest place for it: we know the amount and genuinely do not know the
+      // day or the model it belongs to. Spreading it across the reported
+      // buckets would be a guess dressed as data, and would price tokens we
+      // cannot attribute. Under `unknown` the day's `estimatedCostUsd` goes
+      // null, which is the correct answer.
+      const previous = accounted ? totalsOf(accounted) : emptyTokens();
+      const reported = buckets.reduce((sum, b) => addTokens(sum, bucketTotals(b)), emptyTokens());
+      const recovered: TokenTotals = {
+        input: Math.max(0, reported.input - previous.input),
+        output: Math.max(0, reported.output - previous.output),
+        cacheRead: Math.max(0, reported.cacheRead - previous.cacheRead),
+        cacheWrite: Math.max(0, reported.cacheWrite - previous.cacheWrite),
+      };
+      if (
+        recovered.input > 0 ||
+        recovered.output > 0 ||
+        recovered.cacheRead > 0 ||
+        recovered.cacheWrite > 0
+      ) {
+        this.q.bumpDay.run(
+          memberIdValue,
+          today,
+          session.harness,
+          UNKNOWN_MODEL,
+          recovered.input,
+          recovered.output,
+          recovered.cacheRead,
+          recovered.cacheWrite,
+        );
+        changed = true;
+      }
+    }
+
     for (const b of buckets) {
       const day = bucketed ? b.day : today;
       const row = (
@@ -437,6 +534,9 @@ export class TokenLedger {
     }
     // Sessions that worked this day, derived from the watermark rows filed
     // under it rather than counted, so it cannot drift from the usage.
+    // Retired rows are included deliberately: a session whose attribution was
+    // re-based still ran on the days its old watermarks covered, and those are
+    // not always days the new scheme reports.
     const sessions = this.q.daySessions.get(memberIdValue, day) as { n: number };
     return {
       tokens,

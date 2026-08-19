@@ -303,6 +303,82 @@ describe('TokenLedger', () => {
     expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1250);
   });
 
+  it('does not re-bank flat-era growth when the collector upgrades back', () => {
+    // The flip-flop that matters is the one with *growth in each era*. A
+    // constant total through all four reports pins the shape of the bug but
+    // never the bug: the stale per-model watermark only bites when the flat
+    // era moved the total past it.
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19);
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19 + 1000);
+    // 500 spent while the collector spoke flat, banked under `unknown`.
+    ledger.ingest('m1', [legacy('s1', tokens(1500))], TODAY_19 + 2000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1500);
+
+    // Back to buckets. The per-model watermark still reads 1000, so the same
+    // 500 is banked a second time unless it was retired on the way down.
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1500)])], TODAY_19 + 3000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1500);
+  });
+
+  it('keeps sessions run consistent with the usage when attribution changes', () => {
+    // The flat path files under the *server's* day; the collector's own day
+    // may differ (it is east or west of UTC). Retiring the flat watermark
+    // must not orphan the day it banked on, or a day reads "1000 tokens,
+    // 0 sessions" and contradicts how `sessionsRun` is documented.
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
+    ledger.ingest('m1', [bucketed('s1', [bucket(D20, 'claude-opus-5', 1000)])], TODAY_19 + 1000);
+    const today = ledger.todayFor('m1', TODAY_19);
+    expect(today.tokens.input).toBe(1000);
+    expect(today.sessionsRun).toBe(1);
+  });
+
+  it('recovers spend that happened while the collector was down for the upgrade', () => {
+    ledger.ingest('m1', [legacy('s1', tokens(1000, 100))], TODAY_19);
+    // Stopped, upgraded, restarted. 900 more input was spent in between, and
+    // the first bucketed report is the only evidence it ever happened.
+    ledger.ingest(
+      'm1',
+      [bucketed('s1', [bucket(D19, 'claude-opus-5', 1900, 150)])],
+      TODAY_19 + 1000,
+    );
+    const today = ledger.todayFor('m1', TODAY_19);
+    expect(today.tokens.input).toBe(1900);
+    expect(today.tokens.output).toBe(150);
+  });
+
+  it('recovers downtime spend across a downgrade too', () => {
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19);
+    ledger.ingest('m1', [legacy('s1', tokens(1600))], TODAY_19 + 1000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1600);
+  });
+
+  it('recovers nothing when the first bucketed report totals less than the flat watermark', () => {
+    // The wire caps `usage` at 30 buckets while the flat total is summed
+    // before capping, so the first bucketed report can legitimately total
+    // less than what was already banked. That is not a refund, and it is not
+    // downtime spend either.
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 600)])], TODAY_19 + 1000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+  });
+
+  it('measures the upgrade against the last flat total, not every day’s', () => {
+    // The flat path rewrites its watermark under each server day it is seen
+    // on, and every one of those rows holds the whole session cumulative —
+    // so summing them would invent spend that was never made. The latest row
+    // is the one that means "accounted for".
+    ledger.ingest('m1', [legacy('s1', tokens(1000), STARTED_18)], DAY_18);
+    ledger.ingest('m1', [legacy('s1', tokens(1500), STARTED_18)], TODAY_19);
+    ledger.ingest(
+      'm1',
+      [bucketed('s1', [bucket(D19, 'claude-opus-5', 2000)], STARTED_18)],
+      TODAY_19 + 1000,
+    );
+    expect(ledger.todayFor('m1', DAY_18).tokens.input).toBe(1000);
+    // 500 banked during the flat era, plus 500 recovered at the transition.
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+  });
+
   it('survives a collector flip-flopping between the two shapes', () => {
     ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
     ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19 + 1000);

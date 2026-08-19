@@ -236,6 +236,25 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    name: 'retired-usage-watermarks',
+    up(db) {
+      // A session's spend is attributed one of two ways: under the model
+      // `unknown` by the flat 0.1.1 path, or under real model names by the
+      // bucketed one. When a collector switches, the ledger re-bases onto the
+      // new scheme and the old scheme's watermarks must stop being consulted.
+      //
+      // Marked rather than deleted, because these rows carry a second meaning
+      // the ledger cannot reconstruct: `sessionsRun` counts distinct sessions
+      // per day off exactly this table, and the days a retired row covers are
+      // not always the days the new scheme reports (the flat path files under
+      // the *server's* day, the bucketed path under the collector's, and for
+      // anyone not on UTC those differ). Deleting them makes a day read
+      // "1000 tokens, 0 sessions".
+      db.exec('ALTER TABLE usage_watermarks ADD COLUMN retired INTEGER NOT NULL DEFAULT 0');
+    },
+  },
 ];
 
 /**
