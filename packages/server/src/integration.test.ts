@@ -5,7 +5,7 @@ import {
   serverToWebSchema,
   type WebWorld,
 } from '@sloppers/protocol';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import { createSloppersServer, type SloppersServer } from './index.js';
 
@@ -334,6 +334,44 @@ describe('server integration', () => {
     expect((await owner.next((m) => m.type === 'roster')).type).toBe('roster');
     sam.send({ type: 'move', position: { x: 100, y: 100, dir: 'up', moving: false } });
     expect((await owner.next((m) => m.type === 'pos')).type).toBe('pos');
+  });
+
+  it('answers a failing join instead of taking the whole server down', async () => {
+    const { client: owner, world } = await join('ridham');
+
+    // Every way in writes, and the two inserts catch only the collision each
+    // of them expects. A resume writes through `touchMember`, which catches
+    // nothing at all — so a database that will not take writes (busy, locked,
+    // read-only) throws straight out of the message handler, which is an
+    // uncaught exception in the process serving every office.
+    server.db.pragma('query_only = true');
+    const resumed = new WebClientHarness(server.port);
+    clients.push(resumed);
+    await resumed.open();
+    const credentials = {
+      type: 'join',
+      memberId: world.you.memberId,
+      memberSecret: world.you.memberSecret,
+    };
+    resumed.send(credentials);
+    const err = await resumed.next((m) => m.type === 'error');
+    expect(err.type === 'error' && err.code).toBe('server-error');
+
+    // Refused, not admitted halfway: nothing was sent that would let this
+    // browser believe it is in an office.
+    expect(err.type === 'error' && err.message).toContain('letting you in');
+
+    // The office is still standing, and the socket that was in it still moves.
+    owner.send({ type: 'move', position: { x: 42, y: 42, dir: 'up', moving: false } });
+    owner.send({ type: 'admin', op: { kind: 'roster' } });
+    expect((await owner.next((m) => m.type === 'roster')).type).toBe('roster');
+
+    // And the refused socket is not spent — the same credentials work the
+    // moment the database will take a write again.
+    server.db.pragma('query_only = false');
+    resumed.send(credentials);
+    const back = (await resumed.next((m) => m.type === 'world')) as WebWorld;
+    expect(back.you.memberId).toBe(world.you.memberId);
   });
 
   /** Flip an owner's office into a given join mode and wait for it to land. */
@@ -768,6 +806,93 @@ describe('server integration', () => {
     const leaderboard = await client.next((m) => m.type === 'leaderboard', 8000);
     if (leaderboard.type !== 'leaderboard') throw new Error('unreachable');
     expect(leaderboard.rows[0]?.stats.tokens.output).toBe(200);
+
+    collector.close();
+  });
+
+  it('answers a snapshot it could not record instead of taking the server down', async () => {
+    const { client: owner, world } = await join('ridham');
+    const base = `http://127.0.0.1:${server.port}`;
+
+    const mint = await fetch(`${base}/api/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        memberId: world.you.memberId,
+        memberSecret: world.you.memberSecret,
+      }),
+    });
+    const { pairingCode } = (await mint.json()) as { pairingCode: string };
+    const redeem = await fetch(`${base}/api/pair/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pairingCode }),
+    });
+    const paired = (await redeem.json()) as PairRedeemResponse;
+
+    const collector = new WebSocket(`ws://127.0.0.1:${server.port}/ws/collector`);
+    await new Promise<void>((resolve) => collector.on('open', () => resolve()));
+    const replies: { code?: string }[] = [];
+    collector.on('message', (d) => replies.push(JSON.parse(String(d))));
+    collector.send(
+      JSON.stringify({ type: 'hello', deviceKey: paired.deviceKey, collectorVersion: '0.2.0' }),
+    );
+    await vi.waitFor(() => expect(replies).toHaveLength(1));
+
+    // A database that will not take a write — busy, locked, read-only. The
+    // ledger folds the whole snapshot in one transaction, so it fails whole,
+    // and an escaping throw here is an uncaught exception in the process
+    // serving every office.
+    server.db.pragma('query_only = true');
+    collector.send(
+      JSON.stringify({
+        type: 'snapshot',
+        sessions: [
+          {
+            id: 'sess-1',
+            harness: 'claude-code',
+            state: 'working',
+            tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+            startedAt: Date.now(),
+            lastActivityAt: Date.now(),
+          },
+        ],
+        machine: {},
+      }),
+    );
+
+    // Told, not swallowed: a collector that hears nothing back assumes the
+    // snapshot landed and stops resending what it holds.
+    await vi.waitFor(() => expect(replies).toHaveLength(2));
+    expect(replies[1]?.code).toBe('server-error');
+
+    // Both sockets are still up, and so is the process they share.
+    expect(collector.readyState).toBe(WebSocket.OPEN);
+    owner.send({ type: 'move', position: { x: 11, y: 11, dir: 'up', moving: false } });
+    owner.send({ type: 'admin', op: { kind: 'roster' } });
+    expect((await owner.next((m) => m.type === 'roster')).type).toBe('roster');
+
+    // Nothing was lost by refusing it: the wire is cumulative, so the next
+    // heartbeat restates the same totals and they land.
+    server.db.pragma('query_only = false');
+    collector.send(
+      JSON.stringify({
+        type: 'snapshot',
+        sessions: [
+          {
+            id: 'sess-1',
+            harness: 'claude-code',
+            state: 'working',
+            tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+            startedAt: Date.now(),
+            lastActivityAt: Date.now(),
+          },
+        ],
+        machine: {},
+      }),
+    );
+    const presence = await owner.next((m) => m.type === 'presence' && m.today.tokens.input === 10);
+    expect(presence.type === 'presence' && presence.today.tokens.input).toBe(10);
 
     collector.close();
   });

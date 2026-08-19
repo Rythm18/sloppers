@@ -4,6 +4,7 @@ import {
   collectorToServerSchema,
   type ServerToCollector,
   type ServerToWeb,
+  type WebJoin,
   webToServerSchema,
 } from '@sloppers/protocol';
 import { type WebSocket, WebSocketServer } from 'ws';
@@ -243,6 +244,114 @@ function handleWeb(
     entered.sendStandingKnocks(member.id);
   };
 
+  /**
+   * The whole handshake, from an arriving `join` to a seat in the office —
+   * lifted out of the message handler so the boundary around the call site
+   * can wrap all three ways in at once.
+   */
+  const joinFromMessage = (msg: WebJoin) => {
+    if (!deps.limiter.allow(ip)) {
+      sendWeb(ws, { type: 'error', code: 'bad-join', message: 'too many joins; slow down' });
+      return ws.close();
+    }
+    const { rooms } = deps;
+
+    if (msg.memberId && msg.memberSecret) {
+      // Resume an existing identity; its member row knows its workspace.
+      // Never the door's business: `joinMode` decides who may become a
+      // member, and this one already is. Locking an office must not lock
+      // out the people inside it.
+      const member = rooms.authMember(msg.memberId, msg.memberSecret);
+      if (!member) {
+        return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'unknown member' });
+      }
+      const resumed = rooms.roomById(member.workspaceId);
+      if (!resumed) {
+        return sendWeb(ws, { type: 'error', code: 'server-error', message: 'room unavailable' });
+      }
+      rooms.touchMember(member.id);
+      resumed.memberJoined(member);
+      enterAs(resumed, member);
+      return;
+    }
+
+    if (!msg.displayName) {
+      return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'displayName required' });
+    }
+
+    let target: Room | null;
+    if (msg.createRoom) {
+      target = rooms.createRoom(msg.createRoom);
+      if (!target) {
+        return sendWeb(ws, {
+          type: 'error',
+          code: 'server-error',
+          message: 'this server is not accepting new offices right now',
+        });
+      }
+    } else if (msg.roomCode) {
+      target = rooms.getRoom(msg.roomCode);
+      if (!target) {
+        return sendWeb(ws, {
+          type: 'error',
+          code: 'room-not-found',
+          message: 'that invite does not point to an office — check the link',
+        });
+      }
+    } else {
+      return sendWeb(ws, {
+        type: 'error',
+        code: 'bad-join',
+        message: 'an invite code or a new office name is required',
+      });
+    }
+
+    // The door: what an arriving stranger meets, and the only place
+    // `joinMode` is consulted. Rebound to a const so the knock's callback
+    // below can close over an office that is certainly there.
+    const door = target;
+    if (door.settings.joinMode === 'locked') {
+      return sendWeb(ws, {
+        type: 'error',
+        code: 'workspace-locked',
+        message: 'this office is not accepting new people right now',
+      });
+    }
+    if (door.settings.joinMode === 'knock') {
+      // The name is deliberately not checked here — a knock writes nothing,
+      // and whoever holds a name can change between knocking and being let
+      // in. `knock-admit` checks it at the moment it would matter.
+      door.knocks.add(ws, msg.displayName, msg.avatar ?? randomAvatar(), (member) => {
+        // Answered either way, so this socket is no longer at the door: it
+        // is either a member now, or free to knock again under a name that
+        // is not already taken.
+        knockingAt = null;
+        if (member) enterAs(door, member, member.secret);
+      });
+      knockingAt = door;
+      // Whether the knock can be heard at all, so the waiting page says
+      // what is true rather than a hopeful guess. It is re-sent from the
+      // room if that changes while they stand there.
+      sendWeb(ws, { type: 'knocking', answerable: door.doorIsAnswerable() });
+      door.broadcastKnocks();
+      return;
+    }
+
+    const created = rooms.createMember(door.id, msg.displayName, msg.avatar);
+    if (created === 'name-taken') {
+      return sendWeb(ws, {
+        type: 'error',
+        code: 'name-taken',
+        message: `someone here is already called ${msg.displayName}`,
+      });
+    }
+    if (created === 'room-full') {
+      return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'this office is full' });
+    }
+    door.memberJoined(created);
+    enterAs(door, created, created.secret);
+  };
+
   ws.on('message', (data) => {
     let raw: unknown;
     try {
@@ -266,106 +375,23 @@ function handleWeb(
 
     if (msg.type === 'join') {
       if (client || knockingAt) return; // already inside, or already at the door
-      if (!deps.limiter.allow(ip)) {
-        sendWeb(ws, { type: 'error', code: 'bad-join', message: 'too many joins; slow down' });
-        return ws.close();
-      }
-      const { rooms } = deps;
-
-      if (msg.memberId && msg.memberSecret) {
-        // Resume an existing identity; its member row knows its workspace.
-        // Never the door's business: `joinMode` decides who may become a
-        // member, and this one already is. Locking an office must not lock
-        // out the people inside it.
-        const member = rooms.authMember(msg.memberId, msg.memberSecret);
-        if (!member) {
-          return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'unknown member' });
-        }
-        const resumed = rooms.roomById(member.workspaceId);
-        if (!resumed) {
-          return sendWeb(ws, { type: 'error', code: 'server-error', message: 'room unavailable' });
-        }
-        rooms.touchMember(member.id);
-        resumed.memberJoined(member);
-        enterAs(resumed, member);
-        return;
-      }
-
-      if (!msg.displayName) {
-        return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'displayName required' });
-      }
-
-      let target: Room | null;
-      if (msg.createRoom) {
-        target = rooms.createRoom(msg.createRoom);
-        if (!target) {
-          return sendWeb(ws, {
-            type: 'error',
-            code: 'server-error',
-            message: 'this server is not accepting new offices right now',
-          });
-        }
-      } else if (msg.roomCode) {
-        target = rooms.getRoom(msg.roomCode);
-        if (!target) {
-          return sendWeb(ws, {
-            type: 'error',
-            code: 'room-not-found',
-            message: 'that invite does not point to an office — check the link',
-          });
-        }
-      } else {
-        return sendWeb(ws, {
+      // Every way in writes: `touchMember` on a resume, `createRoom` or
+      // `createMember` on the other two. The two inserts catch the one
+      // collision each of them expects — a taken invite code, a taken name —
+      // and nothing else, so a locked table, a failed migration, or a counting
+      // query that could not run all escape from here. That is the same reach
+      // an admin op has, and it gets the same answer: one arrival is refused
+      // rather than every office on this process going down with it.
+      try {
+        joinFromMessage(msg);
+      } catch (error) {
+        console.error('join failed:', error);
+        sendWeb(ws, {
           type: 'error',
-          code: 'bad-join',
-          message: 'an invite code or a new office name is required',
+          code: 'server-error',
+          message: 'something went wrong letting you in',
         });
       }
-
-      // The door: what an arriving stranger meets, and the only place
-      // `joinMode` is consulted. Rebound to a const so the knock's callback
-      // below can close over an office that is certainly there.
-      const door = target;
-      if (door.settings.joinMode === 'locked') {
-        return sendWeb(ws, {
-          type: 'error',
-          code: 'workspace-locked',
-          message: 'this office is not accepting new people right now',
-        });
-      }
-      if (door.settings.joinMode === 'knock') {
-        // The name is deliberately not checked here — a knock writes nothing,
-        // and whoever holds a name can change between knocking and being let
-        // in. `knock-admit` checks it at the moment it would matter.
-        door.knocks.add(ws, msg.displayName, msg.avatar ?? randomAvatar(), (member) => {
-          // Answered either way, so this socket is no longer at the door: it
-          // is either a member now, or free to knock again under a name that
-          // is not already taken.
-          knockingAt = null;
-          if (member) enterAs(door, member, member.secret);
-        });
-        knockingAt = door;
-        // Whether the knock can be heard at all, so the waiting page says
-        // what is true rather than a hopeful guess. It is re-sent from the
-        // room if that changes while they stand there.
-        sendWeb(ws, { type: 'knocking', answerable: door.doorIsAnswerable() });
-        door.broadcastKnocks();
-        return;
-      }
-
-      const created = rooms.createMember(door.id, msg.displayName, msg.avatar);
-      if (created === 'name-taken') {
-        return sendWeb(ws, {
-          type: 'error',
-          code: 'name-taken',
-          message: `someone here is already called ${msg.displayName}`,
-        });
-      }
-      if (created === 'room-full') {
-        return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'this office is full' });
-      }
-      door.memberJoined(created);
-      enterAs(door, created, created.secret);
       return;
     }
 
@@ -375,11 +401,12 @@ function handleWeb(
     } else if (msg.type === 'activity') {
       room.setWebPresent(client, msg.present);
     } else if (msg.type === 'admin' && actor) {
-      // Admin ops are the only web message that writes to the database, so
-      // they are the only one that can throw in here — a locked table, a
-      // failed migration, an invite code that would not mint. An escaping
-      // throw is an uncaught exception, and this process is every office on
-      // the server. One bad op costs one socket its answer instead.
+      // The widest-reaching web message that writes to the database — not the
+      // only one, which is why the join branch above carries a boundary of its
+      // own. A locked table, a failed migration, an invite code that would not
+      // mint: an escaping throw is an uncaught exception, and this process is
+      // every office on the server. One bad op costs one socket its answer
+      // instead.
       let result: AdminResult;
       try {
         result = handleAdminOp({ manager: deps.rooms, room, actor }, msg.op);
@@ -462,7 +489,29 @@ function handleCollector(ws: WebSocket, deps: { db: Db; rooms: WorkspaceManager 
     }
 
     if (msg.type === 'snapshot' && room && memberId) {
-      room.ingestSnapshot(memberId, ws, msg, Date.now());
+      // The ledger folds the whole snapshot in one transaction, and a
+      // transaction is exactly what can fail whole: a busy database, a
+      // constraint the migration left behind, a blob that would not write.
+      // The same boundary the admin ops get, for the same reason — this
+      // process is every office on the server, and one collector's snapshot
+      // must not be able to take the rest of them with it.
+      //
+      // The refusal goes back on the wire rather than being swallowed. The
+      // collector treats an unanswered snapshot as landed and clears the
+      // dirty flags behind it, so a silent failure would be a day of
+      // somebody's tokens quietly not counted; `server-error` is a code its
+      // client logs and carries on from, and the next heartbeat restates
+      // everything anyway, because usage on the wire is cumulative.
+      try {
+        room.ingestSnapshot(memberId, ws, msg, Date.now());
+      } catch (error) {
+        console.error(`snapshot from member ${memberId} failed to ingest:`, error);
+        sendCollector(ws, {
+          type: 'error',
+          code: 'server-error',
+          message: 'that snapshot could not be recorded',
+        });
+      }
     }
   });
 
