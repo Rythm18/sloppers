@@ -8,8 +8,14 @@ import { TokenLedger } from './ledger.js';
  * report two sessions that the harness gave the same id — Codex reassigns
  * `sessionId` on every `session_meta`, and since two non-sidechain rollouts are
  * no longer merged into one session, both reach the wire. `TokenLedger.ingest`
- * keys its watermark on the snapshot id alone, so this pins what that costs and
- * proves the collector's disambiguation is what keeps the leaderboard finite.
+ * keys its watermark on the snapshot id alone, so this pins what that costs.
+ *
+ * Scope, so nobody mistakes this for more than it is: both cases hardcode their
+ * ids. This file pins the *downstream hazard* — what the ledger does when a
+ * batch repeats an id, and that it settles when the ids differ — and exercises
+ * no collector code at all. The regression gate on the id scheme itself
+ * (`wireIdFor` in `packages/collector/src/core/tracker.ts`) lives entirely in
+ * `packages/collector/src/core/tracker.test.ts`.
  */
 
 /** Local 10:00 today-ish; `TokenLedger.dayOf` reads local time. */

@@ -45,6 +45,15 @@ function fakeAdapter(root: string): HarnessAdapter {
   };
 }
 
+/**
+ * The harness's own session id, recovered from the wire id. Every wire id is
+ * `<sessionId>#<fingerprint of the file path>`, so the prefix is what the
+ * adapter actually read out of the transcript.
+ */
+function baseId(id: string | undefined): string | undefined {
+  return id?.split('#')[0];
+}
+
 /** Every input token the snapshot reports across its usage buckets. */
 function bucketedInput(snap: { usage?: { input: number }[] } | undefined): number {
   return (snap?.usage ?? []).reduce((sum, b) => sum + b.input, 0);
@@ -64,8 +73,8 @@ describe('SessionTracker', () => {
 
     expect(tracker.ingestFile(file, 5000)).toBe(true);
     const [snap] = tracker.snapshot(6000);
+    expect(baseId(snap?.id)).toBe('s1');
     expect(snap).toMatchObject({
-      id: 's1',
       harness: 'fake-harness',
       state: 'working',
       project: 'proj',
@@ -150,7 +159,7 @@ describe('SessionTracker', () => {
     tracker.ingestFile(a, 1000);
     tracker.ingestFile(b, 9000);
     const snaps = tracker.snapshot(10000);
-    expect(snaps.map((s) => s.id)).toEqual(['s-new', 's-old']);
+    expect(snaps.map((s) => baseId(s.id))).toEqual(['s-new', 's-old']);
   });
 
   it('exposes tracked paths for the polling fallback', () => {
@@ -189,7 +198,7 @@ describe('SessionTracker grouping', () => {
 
     const snaps = tracker.snapshot(6000);
     expect(snaps).toHaveLength(1);
-    expect(snaps[0]?.id).toBe('s-parent');
+    expect(baseId(snaps[0]?.id)).toBe('s-parent');
     // Display fields come from the parent, not the sidechain.
     expect(snaps[0]?.project).toBe('proj');
     expect(bucketedInput(snaps[0])).toBe(140);
@@ -287,9 +296,54 @@ describe('SessionTracker grouping', () => {
     const snaps = tracker.snapshot(7000);
     const ids = snaps.map((s) => s.id);
     expect(new Set(ids).size).toBe(2);
-    // The lowest file path keeps the plain id; only the extra entry is
-    // disambiguated, so the common one-file-per-id case is never renamed.
-    expect(ids).toContain('s-shared');
+    // The harness's own id stays readable as the prefix, so a wire id can
+    // still be traced back to the transcript it came from.
+    expect(ids.every((id) => id.startsWith('s-shared#'))).toBe(true);
+  });
+
+  it("keeps a session's wire id when the session it collided with expires", () => {
+    const { root, tracker } = setup();
+    const a = join(root, 'a.log');
+    const b = join(root, 'b.log');
+    writeFileSync(a, 's-shared work 100\n');
+    writeFileSync(b, 's-shared work 40\n');
+    tracker.ingestFile(a, 1000);
+    tracker.ingestFile(b, 1000);
+    const contested = tracker.snapshot(2000).find((s) => s.tokens?.input === 40)?.id;
+    expect(contested).toBeDefined();
+
+    // `a` goes quiet and is reaped; `b` keeps working. If contention were
+    // recomputed per batch, `b` would now look uncontested and quietly revert
+    // to the bare id — landing on the ledger watermark row `a` already owns,
+    // which loses tokens through the `shrank` branch and reopens the inflation
+    // path if `a` ever resumes. A wire id has to be a property of the session,
+    // not of whoever happens to be alive alongside it.
+    appendFileSync(b, 's-shared work 40\n');
+    const later = 1000 + EXPIRE_MS;
+    tracker.ingestFile(b, later);
+    const survivors = tracker.snapshot(later + 1000);
+    expect(survivors).toHaveLength(1);
+    expect(survivors[0]?.id).toBe(contested);
+  });
+
+  it('gives a session the same wire id alone as alongside its contender', () => {
+    const { root } = setup();
+    const a = join(root, 'a.log');
+    const b = join(root, 'b.log');
+    writeFileSync(a, 's-shared work 100\n');
+    writeFileSync(b, 's-shared work 40\n');
+
+    const alone = new SessionTracker([fakeAdapter(root)]);
+    alone.ingestFile(b, 6000);
+    const soloId = alone.snapshot(7000)[0]?.id;
+
+    const together = new SessionTracker([fakeAdapter(root)]);
+    together.ingestFile(a, 5000);
+    together.ingestFile(b, 6000);
+    const pairedId = together.snapshot(7000).find((s) => s.tokens?.input === 40)?.id;
+
+    expect(soloId).toBeDefined();
+    expect(pairedId).toBe(soloId);
   });
 
   it('derives a colliding id from the file path, so it survives a restart', () => {
@@ -312,7 +366,7 @@ describe('SessionTracker grouping', () => {
     expect(second.slice().sort()).toEqual(first.slice().sort());
   });
 
-  it('leaves an uncontested session id exactly as the harness reported it', () => {
+  it('keeps the harness session id as the prefix of every wire id', () => {
     const { root, tracker } = setup();
     const solo = join(root, 'solo.log');
     const other = join(root, 'other.log');
@@ -320,24 +374,31 @@ describe('SessionTracker grouping', () => {
     writeFileSync(other, 's2 work 40\n');
     tracker.ingestFile(solo, 5000);
     tracker.ingestFile(other, 6000);
-    expect(
-      tracker
-        .snapshot(7000)
-        .map((s) => s.id)
-        .sort(),
-    ).toEqual(['s1', 's2']);
+    const ids = tracker.snapshot(7000).map((s) => s.id);
+    expect(ids.some((id) => id.startsWith('s1#'))).toBe(true);
+    expect(ids.some((id) => id.startsWith('s2#'))).toBe(true);
   });
 
-  it('does not disambiguate a parent just because a sidechain shares its id', () => {
-    const { root, tracker } = setup();
+  it("does not change a parent's wire id when a sidechain joins its session", () => {
+    const { root } = setup();
     const main = join(root, 'parent.log');
     const sub = join(root, 'parent-subagent.log');
     writeFileSync(main, 's-parent work 100\n');
     writeFileSync(sub, 's-parent sub 40\n');
-    tracker.ingestFile(main, 5000);
-    tracker.ingestFile(sub, 5000);
-    // A sidechain is folded, not displayed, so it contests nothing.
-    expect(tracker.snapshot(6000).map((s) => s.id)).toEqual(['s-parent']);
+
+    const before = new SessionTracker([fakeAdapter(root)]);
+    before.ingestFile(main, 5000);
+    const withoutSub = before.snapshot(6000).map((s) => s.id);
+
+    // A sidechain is folded, not displayed, so it must not perturb the id its
+    // parent reports — the spend moves, the identity does not.
+    const after = new SessionTracker([fakeAdapter(root)]);
+    after.ingestFile(main, 5000);
+    after.ingestFile(sub, 5000);
+    const withSub = after.snapshot(6000).map((s) => s.id);
+
+    expect(withSub).toHaveLength(1);
+    expect(withSub).toEqual(withoutSub);
   });
 
   it('never emits two snapshots sharing an id, however many files collide', () => {

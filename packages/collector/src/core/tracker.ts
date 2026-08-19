@@ -32,14 +32,6 @@ interface Group {
   lastActivityMs: number;
 }
 
-/** A group that survived expiry and has an id to report, awaiting projection. */
-interface Live {
-  group: Group;
-  display: Entry;
-  sessionId: string;
-  quietMs: number;
-}
-
 /** Wire cap on `usage`; see `sessionSnapshotSchema` in the protocol. */
 const MAX_USAGE_BUCKETS = 30;
 /** Wire cap on `activeMinutes`; same. */
@@ -107,7 +99,7 @@ export class SessionTracker {
 
   /** Project the live sessions into wire snapshots, newest first. */
   snapshot(now: number): SessionSnapshot[] {
-    const live: Live[] = [];
+    const out: SessionSnapshot[] = [];
     for (const group of this.groups()) {
       // Expiry is group-wide and checked before the display filters. Group-wide
       // because a parent transcript is not appended to while a subagent runs —
@@ -126,18 +118,13 @@ export class SessionTracker {
       }
       const display = group.display;
       if (!display) continue;
-      const { sessionId } = display.acc;
-      if (!sessionId) continue;
-      live.push({ group, display, sessionId, quietMs });
-    }
-
-    const wireIds = assignWireIds(live);
-    const out: SessionSnapshot[] = [];
-    for (const { group, display, sessionId, quietMs } of live) {
       const { acc } = display;
+      const { sessionId } = acc;
+      if (!sessionId) continue;
+
       // File mtimes carry fractional milliseconds; the wire wants integers.
       const snapshot: SessionSnapshot = {
-        id: wireIds.get(display) ?? sessionId,
+        id: wireIdFor(sessionId, acc.filePath),
         harness: display.adapter.id,
         // Both derived from the group's newest activity, so a session whose
         // subagent is mid-task reads `working` rather than decaying to
@@ -225,55 +212,39 @@ const MAX_ID_LENGTH = 128;
 const ID_SUFFIX_SEP = '#';
 
 /**
- * The id each live session reports on the wire.
+ * The id a session reports on the wire: `` `${sessionId}#${fingerprint(path)}` ``.
  *
  * Two rollouts really can share a session id — Codex reassigns `sessionId` on
- * every `session_meta` — and since they no longer merge, a batch can carry the
- * same id twice. `TokenLedger.ingest` keys its watermark on that id alone, so a
+ * every `session_meta`, and 7 ids span more than one of the 494 local rollout
+ * files — and since they no longer merge, a batch could otherwise carry the same
+ * id twice. `TokenLedger.ingest` keys its watermark on that id alone, so a
  * duplicate is not cosmetic: the second snapshot restates the first's watermark
  * downward through the ledger's `shrank` branch, and the difference is re-banked
- * on the next cycle, and the next, without bound. All 7 shared-id groups in the
- * local Codex corpus contain files whose time ranges overlap, so both halves are
- * live inside `EXPIRE_MS` together.
+ * on the next cycle, and the next, without bound.
  *
- * Only a contested id is touched, and even then the lowest file path keeps the
- * original: the overwhelmingly common case is one session per id, and renaming
- * those would orphan their server-side watermarks for nothing. The suffix is
- * derived from the entry's own file path rather than its position in the batch,
- * so a session keeps its identity across restarts and across changes in what
- * else happens to be live — an index- or order-derived suffix would rename
- * sessions as neighbours came and went, which is worse than the bug it fixes.
+ * Deliberately a pure function of this session's own `sessionId` and file path,
+ * with no reference to what else is live and no memory between calls. The
+ * tempting cheaper rule — suffix only ids that collide *in this batch* — makes
+ * identity a property of the moment rather than of the session: when one of a
+ * colliding pair expires, the survivor stops looking contested and silently
+ * reverts to the bare id, landing on the watermark row its former neighbour
+ * still owns. That loses tokens through the same `shrank` branch, and reopens
+ * the inflation path if the neighbour resumes. Memory across calls would not
+ * save it either, since it dies on the restart it is needed for.
+ *
+ * The cost is that every id changes once at upgrade. That is bounded and
+ * one-off: the ledger seeds a session first seen today but started earlier at
+ * its current totals, so only a session started *today* at the moment of upgrade
+ * re-banks, and only its own total, once. Zero sessions on the local corpus were
+ * in that state. Suffixing only Codex — the sole measured source of collisions —
+ * would have saved 38 claude-code ids, but it puts a correctness decision behind
+ * a hardcoded harness name in an open set, so a community adapter that reused
+ * ids like Codex would silently regress.
  */
-function assignWireIds(live: Live[]): Map<Entry, string> {
-  const contested = new Map<string, Entry>();
-  for (const { display, sessionId } of live) {
-    const held = contested.get(sessionId);
-    if (held === undefined) {
-      contested.set(sessionId, display);
-      continue;
-    }
-    // Seen twice: the lowest path holds the plain id, everyone else is suffixed.
-    if (display.acc.filePath < held.acc.filePath) contested.set(sessionId, display);
-  }
-  const counts = new Map<string, number>();
-  for (const { sessionId } of live) counts.set(sessionId, (counts.get(sessionId) ?? 0) + 1);
-
-  const ids = new Map<Entry, string>();
-  for (const { display, sessionId } of live) {
-    const shares = (counts.get(sessionId) ?? 0) > 1;
-    ids.set(
-      display,
-      shares && contested.get(sessionId) !== display
-        ? disambiguate(sessionId, display.acc.filePath)
-        : sessionId,
-    );
-  }
-  return ids;
-}
-
-/** `<id>#<fingerprint of the file path>`, clipped to the wire's id length. */
-function disambiguate(sessionId: string, filePath: string): string {
+function wireIdFor(sessionId: string, filePath: string): string {
   const suffix = ID_SUFFIX_SEP + fingerprint(filePath);
+  // The harness's own id stays readable as the prefix, so a wire id can still
+  // be traced back to the transcript it came from.
   return sessionId.slice(0, MAX_ID_LENGTH - suffix.length) + suffix;
 }
 
