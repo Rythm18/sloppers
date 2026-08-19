@@ -265,6 +265,40 @@ describe('server integration', () => {
     expect(state.type === 'workspace' && state.settings.publicLeaderboard).toBe(true);
   });
 
+  it('pushes the roster to a watching moderator when somebody walks in', async () => {
+    const { client: owner } = await join('ridham');
+
+    // A browser's own arrival is broadcast before its socket is attached, so
+    // nobody ever learns of a join from their own — and the roster is what
+    // the settings panel moderates from. Unasked: no `roster` op is sent
+    // here, the office volunteers it.
+    await join('sam');
+
+    const roster = await owner.next((m) => m.type === 'roster');
+    if (roster.type !== 'roster') throw new Error('unreachable');
+    expect(roster.members.map((m) => m.displayName)).toContain('sam');
+  });
+
+  it('keeps the roster to the people who moderate with it', async () => {
+    await join('ridham');
+    const { client: sam } = await join('sam');
+    const { client: nina } = await join('nina');
+
+    // sam is a plain member: the roster is the moderation view, and the
+    // arrival that just pushed one to every admin must not reach them.
+    // Nina's first step is the marker — it is broadcast strictly after
+    // everything her arrival sent, so a leaked roster cannot hide behind it.
+    nina.send({ type: 'move', position: { x: 7, y: 7, dir: 'up', moving: true } });
+    const heard: string[] = [];
+    let msg: ServerToWeb;
+    do {
+      msg = await sam.next();
+      heard.push(msg.type);
+    } while (msg.type !== 'pos');
+    expect(heard).toContain('member');
+    expect(heard).not.toContain('roster');
+  });
+
   it('carries an admin op over the socket, and refuses one from a plain member', async () => {
     const { client: owner } = await join('ridham');
     const { client: sam, world: samWorld } = await join('sam');

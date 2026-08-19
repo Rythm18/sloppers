@@ -207,29 +207,18 @@ describe('SettingsPanel', () => {
       expect(ops()).toEqual([{ kind: 'roster' }]);
     });
 
-    it('asks again when the room gains somebody the roster has never seen', () => {
+    it('asks once, and leaves the office to volunteer everything after that', () => {
       seed({ role: 'moderator' });
       render(<SettingsPanel />);
       sendAdminMock.mockClear();
 
-      // Admitting somebody does not push a new roster, so the panel would
-      // still be offering yesterday's list of people to moderate.
+      // Admin ops are rate-limited, and people arriving is exactly when a
+      // moderator needs the panel working. The server pushes these changes;
+      // the panel must not go asking for them.
       apply({ type: 'member', member: memberView('sam', 'sam', 'member') });
-      expect(ops()).toEqual([{ kind: 'roster' }]);
+      apply({ type: 'member', member: memberView('lee', 'lee', 'member') });
+      apply({ type: 'member-left', memberId: 'sam' });
 
-      // Their agents reporting in is not a membership change.
-      sendAdminMock.mockClear();
-      apply({
-        type: 'presence',
-        memberId: 'sam',
-        presence: 'grinding',
-        sessions: [],
-        today: {
-          tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-          sessionsRun: 1,
-          activeMinutes: 1,
-        },
-      });
       expect(ops()).toEqual([]);
     });
 

@@ -138,6 +138,11 @@ export class Room {
       role: row.role,
     });
     this.broadcastMember(row.id);
+    // Arriving changes the roster as surely as being kicked does — a new row
+    // through the door, or a `sharing` flag flipping as a collector attaches.
+    // Every other membership change pushes; this one used to leave whoever is
+    // moderating with a list that did not have the newcomer in it.
+    this.broadcastRoster();
   }
 
   addWebClient(client: WebClient): WebWorld | null {

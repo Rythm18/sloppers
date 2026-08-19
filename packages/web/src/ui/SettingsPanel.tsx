@@ -66,9 +66,6 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
   const roomCode = useStore((s) => s.roomCode);
   const you = useStore((s) => s.you);
   const yourName = useStore((s) => (s.you ? (s.members[s.you]?.displayName ?? '') : ''));
-  // Who is in the room, as one comparable string: presence and token counts
-  // churn constantly, and only arrivals and departures are worth a refetch.
-  const whoIsHere = useStore((s) => Object.keys(s.members).sort().join(' '));
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const [name, setName] = useState(roomName);
   const [confirmDelete, setConfirmDelete] = useState('');
@@ -84,14 +81,13 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
     setName(roomName);
   }, [roomName]);
 
-  // The server pushes the roster when it moderates somebody, not when the
-  // door opens — so a panel opened in a quiet office would show an empty
-  // room, and somebody who walked in a moment ago would not be there to
-  // remove. Ask on the way in, and again whenever the room's population
-  // changes underneath.
+  // Roster pushes go out when the office changes, and a browser's own arrival
+  // lands before its socket is listening — so somebody who joined a settled
+  // office has never been told who is in it. Ask once, on the way in. Changes
+  // after that arrive on their own.
   useEffect(() => {
-    if (canModerate && whoIsHere) sendAdmin({ kind: 'roster' });
-  }, [canModerate, whoIsHere]);
+    if (canModerate) sendAdmin({ kind: 'roster' });
+  }, [canModerate]);
 
   // Modal manners: focus starts inside, Tab stays inside, Escape leaves, and
   // whatever had focus before gets it back.
