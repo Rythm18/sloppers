@@ -8,6 +8,30 @@ import WebSocket from 'ws';
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_CAP_MS = 30_000;
 
+/**
+ * The slice of `ws`'s `WebSocket` this client actually depends on, narrowed
+ * to a structural interface so tests can substitute a fake socket without
+ * implementing the library's full surface (`binaryType`, `extensions`,
+ * `addEventListener`, ...). A real `ws.WebSocket` instance satisfies this
+ * interface as-is.
+ */
+export interface CollectorSocket {
+  readyState: number;
+  on(event: 'open', listener: () => void): void;
+  on(event: 'message', listener: (data: unknown) => void): void;
+  on(event: 'close', listener: () => void): void;
+  on(event: 'error', listener: () => void): void;
+  /**
+   * `cb`, if given, fires once this exact write either lands on the socket
+   * or fails — never merely because `send` was *called*. A silent partition
+   * (readyState still OPEN, but the bytes never actually leave) is exactly
+   * the case a caller relying on this needs distinguished from a normal
+   * success.
+   */
+  send(data: string, cb?: (err?: Error) => void): void;
+  close(): void;
+}
+
 export interface CollectorClientOptions {
   wsUrl: string;
   deviceKey: string;
@@ -25,6 +49,17 @@ export interface CollectorClientOptions {
    * backstop to re-mark state dirty and resend it.
    */
   onReady?: () => void;
+  /**
+   * Test seam: constructs the underlying socket. Defaults to a real `ws`
+   * connection; tests substitute a fake `CollectorSocket` to drive send
+   * failures and message timing deterministically, without a real network.
+   */
+  createSocket?: (url: string) => CollectorSocket;
+}
+
+/** A real `ws.WebSocket` instance already satisfies `CollectorSocket`. */
+function defaultCreateSocket(url: string): CollectorSocket {
+  return new WebSocket(url);
 }
 
 /**
@@ -34,7 +69,7 @@ export interface CollectorClientOptions {
  * ones are dropped — only current state matters).
  */
 export class CollectorClient {
-  private ws: WebSocket | null = null;
+  private ws: CollectorSocket | null = null;
   private stopped = false;
   private attempts = 0;
   private ready = false;
@@ -78,17 +113,42 @@ export class CollectorClient {
   private flush(): void {
     if (!this.ready || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     if (!this.pending) return;
-    this.ws.send(JSON.stringify(this.pending));
-    this.pending = null;
+    const payload = JSON.stringify(this.pending);
     const onSent = this.pendingSent;
+    this.pending = null;
     this.pendingSent = null;
-    onSent?.();
+    this.ws.send(payload, (err) => {
+      // `send` returning is not delivery: a silent partition can leave
+      // readyState OPEN while the write never actually lands on the wire.
+      // Only a callback with no error means the bytes actually left — the
+      // one signal it is safe to treat as "no longer needs resending".
+      // minute bitmaps have no catch-up on the server, so getting this wrong
+      // loses a day for good.
+      if (err) return;
+      this.safeCall(onSent);
+    });
+  }
+
+  /**
+   * Invoke a caller-supplied callback with a boundary around it. An
+   * exception from unrelated caller code must never propagate out of this
+   * class's internal event handling — most importantly it must never
+   * suppress `onReady`, the reconnect backstop that makes the whole
+   * dirty-tracking scheme this client supports actually safe.
+   */
+  private safeCall(fn?: (() => void) | null): void {
+    if (!fn) return;
+    try {
+      fn();
+    } catch (err) {
+      this.opts.log(`collector client callback threw: ${String(err)}`);
+    }
   }
 
   private connect(): void {
     if (this.stopped) return;
     const url = `${this.opts.wsUrl.replace(/\/+$/, '')}/ws/collector`;
-    const ws = new WebSocket(url);
+    const ws = (this.opts.createSocket ?? defaultCreateSocket)(url);
     this.ws = ws;
     this.ready = false;
 
@@ -121,7 +181,9 @@ export class CollectorClient {
         this.flush();
         // Every accepted hello-ok, not just the first: a reconnect is exactly
         // when a caller needs to stop trusting its "already sent" bookkeeping.
-        this.opts.onReady?.();
+        // Wrapped so an exception in unrelated caller code can never skip
+        // this — it is the backstop the whole dirty-tracking scheme leans on.
+        this.safeCall(this.opts.onReady);
       } else if (msg.type === 'error' && msg.code === 'unknown-device') {
         this.opts.log('server does not recognize this device — run `sloppers share` again');
         this.stop();

@@ -3,7 +3,7 @@ import { defaultVisibility, encodeMinutes } from '@sloppers/protocol';
 import { describe, expect, it } from 'vitest';
 import { WebSocketServer, type WebSocket as WSSocket } from 'ws';
 import { buildDirtySnapshot, MinuteDirtyTracker } from './daemon.js';
-import { CollectorClient } from './net/client.js';
+import { CollectorClient, type CollectorSocket } from './net/client.js';
 
 const DAY = '2026-08-19';
 const OTHER_DAY = '2026-08-18';
@@ -314,4 +314,143 @@ describe('reconnect resends dirty-cleared minutes', () => {
       server.close();
     }
   }, 10000);
+});
+
+/**
+ * A minimal fake `CollectorSocket`: records every `send` call (payload plus
+ * its completion callback) so a test can control exactly when — and whether
+ * successfully — each write "completes", without a real network. Simulating
+ * an actual failed write against a real `ws.Server` isn't practical (there's
+ * no reliable way to make the library's own send-completion callback report
+ * an error on demand), so this test drives `CollectorClient` directly at its
+ * `createSocket` seam instead. What this does *not* prove: that a genuine OS-
+ * level silent partition reliably surfaces through `ws`'s callback as an
+ * error at all versus never calling back — only that *when* the callback
+ * reports an error, this client correctly treats it as not-delivered.
+ */
+class FakeSocket {
+  readyState = 1; // WebSocket.OPEN
+  sends: { payload: string; cb?: (err?: Error) => void }[] = [];
+  private listeners = new Map<string, ((...args: unknown[]) => void)[]>();
+
+  on(event: string, listener: (...args: unknown[]) => void): void {
+    const arr = this.listeners.get(event) ?? [];
+    arr.push(listener);
+    this.listeners.set(event, arr);
+  }
+
+  emit(event: string, ...args: unknown[]): void {
+    for (const listener of this.listeners.get(event) ?? []) listener(...args);
+  }
+
+  send(payload: string, cb?: (err?: Error) => void): void {
+    this.sends.push({ payload, cb });
+  }
+
+  close(): void {}
+
+  asSocket(): CollectorSocket {
+    return this as unknown as CollectorSocket;
+  }
+}
+
+describe('a failed write does not clear the dirty flag', () => {
+  it('leaves the day dirty on a send error, and the next successful send includes it', async () => {
+    const fake = new FakeSocket();
+    const tracker = new MinuteDirtyTracker();
+    let readyResolve: (() => void) | undefined;
+    const waitForReady = () =>
+      new Promise<void>((resolve) => {
+        readyResolve = resolve;
+      });
+
+    const client = new CollectorClient({
+      wsUrl: 'ws://fake',
+      deviceKey: 'x'.repeat(16),
+      collectorVersion: 'test',
+      log: () => {},
+      onReady: () => readyResolve?.(),
+      createSocket: () => fake.asSocket(),
+    });
+
+    const ready = waitForReady();
+    client.start();
+    fake.emit('open');
+    fake.emit(
+      'message',
+      JSON.stringify({
+        type: 'hello-ok',
+        memberId: 'member-1',
+        displayName: 'Tester',
+        roomCode: 'ABCD-1234',
+      }),
+    );
+    await ready;
+    fake.sends = []; // drop the recorded hello; only snapshots matter below
+
+    const s = session({ activeMinutes: [{ day: DAY, minutes: encodeMinutes([1, 2]) }] });
+    const send = () => {
+      const { sessions, included } = buildDirtySnapshot([s], defaultVisibility, tracker);
+      client.sendSnapshot({ type: 'snapshot', sessions, machine: {} }, () =>
+        tracker.confirmSent(included),
+      );
+    };
+
+    send();
+    expect(fake.sends).toHaveLength(1);
+    const first = JSON.parse(fake.sends[0]?.payload ?? '{}') as CollectorSnapshot;
+    expect(first.sessions[0]?.activeMinutes).toEqual(s.activeMinutes);
+    // Simulate a silent-partition write failure: `send` was called, but the
+    // completion callback reports an error rather than success.
+    fake.sends[0]?.cb?.(new Error('simulated write failure'));
+
+    // The failed write must not have cleared the dirty flag — the next
+    // build has to include the same day again.
+    send();
+    expect(fake.sends).toHaveLength(2);
+    const second = JSON.parse(fake.sends[1]?.payload ?? '{}') as CollectorSnapshot;
+    expect(second.sessions[0]?.activeMinutes).toEqual(s.activeMinutes);
+    // This time the write actually succeeds.
+    fake.sends[1]?.cb?.();
+
+    // Confirmed sent — a further build with nothing new must now be clean.
+    send();
+    expect(fake.sends).toHaveLength(3);
+    const third = JSON.parse(fake.sends[2]?.payload ?? '{}') as CollectorSnapshot;
+    expect(third.sessions[0]?.activeMinutes).toBeUndefined();
+
+    client.stop();
+  });
+});
+
+describe('a throwing onReady does not break the client', () => {
+  it('does not propagate the exception out of hello-ok handling, so the reconnect backstop always runs', () => {
+    const fake = new FakeSocket();
+    const client = new CollectorClient({
+      wsUrl: 'ws://fake',
+      deviceKey: 'x'.repeat(16),
+      collectorVersion: 'test',
+      log: () => {},
+      onReady: () => {
+        throw new Error('boom');
+      },
+      createSocket: () => fake.asSocket(),
+    });
+
+    client.start();
+    fake.emit('open');
+    expect(() =>
+      fake.emit(
+        'message',
+        JSON.stringify({
+          type: 'hello-ok',
+          memberId: 'member-1',
+          displayName: 'Tester',
+          roomCode: 'ABCD-1234',
+        }),
+      ),
+    ).not.toThrow();
+
+    client.stop();
+  });
 });
