@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { mintPairingCode } from '../net/socket.js';
 import { useStore } from '../store.js';
+import { useModalManners } from './modal.js';
 
 /**
  * Turns "share my agents" into one paste: mints a short-lived pairing code
@@ -9,6 +10,14 @@ import { useStore } from '../store.js';
  */
 export function ShareModal() {
   const open = useStore((s) => s.shareOpen);
+  // Mounted only while it is open, the way the other two dialogs are: the
+  // manners below hand the dialog focus, hold Tab inside it, and make the
+  // office behind it unreachable, none of which may happen while it is shut.
+  if (!open) return null;
+  return <ShareModalBody />;
+}
+
+function ShareModalBody() {
   const roomCode = useStore((s) => s.roomCode);
   const setShareOpen = useStore((s) => s.setShareOpen);
   const [code, setCode] = useState<string | null>(null);
@@ -17,6 +26,14 @@ export function ShareModal() {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [failed, setFailed] = useState(false);
+  const scrimRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const close = useCallback(() => setShareOpen(false), [setShareOpen]);
+
+  // The first dialog a new arrival ever meets, and for a while it was the one
+  // hand-rolling its own Escape key with no focus trap and a live office
+  // behind it. Escape, the trap, the restore, and `inert` all come from here.
+  useModalManners(scrimRef, dialogRef, close);
 
   const mint = useCallback(async () => {
     setFailed(false);
@@ -32,27 +49,16 @@ export function ShareModal() {
   }, [roomCode]);
 
   useEffect(() => {
-    if (open) void mint();
-  }, [open, mint]);
+    void mint();
+  }, [mint]);
 
   useEffect(() => {
-    if (!open || !code) return;
+    if (!code) return;
     const tick = () => setRemaining(Math.max(0, Math.round((expiresAt - Date.now()) / 1000)));
     tick();
     const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
-  }, [open, code, expiresAt]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setShareOpen(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, setShareOpen]);
-
-  if (!open) return null;
+  }, [code, expiresAt]);
 
   // Plain-HTTP deployments (LAN, tunnels) need the scheme spelled out —
   // the collector assumes https for any non-localhost bare host.
@@ -76,16 +82,19 @@ export function ShareModal() {
   };
 
   return (
-    <div className="modal-scrim">
-      <div className="share-modal panel" role="dialog" aria-label="share your agents">
+    <div className="modal-scrim" ref={scrimRef}>
+      {/* tabIndex -1: not a tab stop, but the dialog can be handed focus when it opens. */}
+      <section
+        className="share-modal panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="share your agents"
+        ref={dialogRef}
+        tabIndex={-1}
+      >
         <div className="share-modal-head">
           <span className="panel-title">Share your agents</span>
-          <button
-            type="button"
-            className="close"
-            onClick={() => setShareOpen(false)}
-            aria-label="close"
-          >
+          <button type="button" className="close" onClick={close} aria-label="close">
             ×
           </button>
         </div>
@@ -145,7 +154,7 @@ export function ShareModal() {
           </code>
           .
         </p>
-      </div>
+      </section>
     </div>
   );
 }
