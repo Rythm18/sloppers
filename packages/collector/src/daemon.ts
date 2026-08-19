@@ -9,6 +9,7 @@ import { builtinAdapters } from './adapters/index.js';
 import {
   type CollectorConfig,
   configDir,
+  dropPairing,
   isCatchAll,
   loadConfig,
   matchesPairing,
@@ -338,7 +339,13 @@ export function startDaemon(opts: {
   collectorVersion: string;
   home?: string;
   log: (message: string) => void;
-  /** Every workspace's device key was rejected; the daemon needs re-pairing. */
+  /**
+   * The last remaining pairing was just dropped because its device key was
+   * rejected (member deleted, banned, or the workspace removed) — every
+   * earlier rejection along the way was dropped quietly and kept the daemon
+   * running (see `createRuntime`'s `onUnknownDevice`). Nothing is paired any
+   * more; the daemon needs `sloppers share <code>` run again.
+   */
   onUnknownDevice?: () => void;
   /** Another machine took over every workspace; the daemon has stopped. */
   onSuperseded?: () => void;
@@ -371,6 +378,22 @@ export function startDaemon(opts: {
     else opts.onSuperseded?.();
   };
 
+  /**
+   * The terminal case of dropping a rejected pairing: this was the last one,
+   * so nothing is paired any more. Decided — and latched, sharing `stoodDown`
+   * with `standDown` above — synchronously, right where the drop happens,
+   * rather than waiting for the config-file watcher to notice the write and
+   * reconcile it away. Waiting would leave a window where the daemon still
+   * looks paired (a dead runtime sitting in `runtimes`, never sent to again
+   * but not yet removed) after the config on disk already says otherwise.
+   */
+  const finishUnknownDevice = () => {
+    if (stoodDown) return;
+    stoodDown = true;
+    opts.log(STAND_DOWN_MESSAGE['unknown-device']);
+    opts.onUnknownDevice?.();
+  };
+
   const createRuntime = (pairing: PairingConfig): PairingRuntime => {
     const minutes = new MinuteDirtyTracker();
     const runtime: PairingRuntime = {
@@ -385,9 +408,19 @@ export function startDaemon(opts: {
         // trust our local "already sent" bookkeeping about — resend
         // everything we know, to this workspace only.
         onReady: () => minutes.markAllDirty(),
+        // Authoritative only: `CollectorClient` calls this exclusively from a
+        // parsed `{ type: 'error', code: 'unknown-device' }` reply — never
+        // from a close, a timeout, or a connection that simply never opened
+        // (see net/client.ts). A network hiccup reconnects and tries again;
+        // this does not get a second chance, so it drops the one pairing
+        // that was actually rejected and keeps the others running. The write
+        // lands on disk synchronously (`saveConfig` is sync), so if other
+        // pairings still exist, the same config-file watcher that already
+        // handles `sloppers pause`/hide edits notices it, reconciles this
+        // runtime away, and carries on — no need to do that work twice here.
         onUnknownDevice: () => {
-          runtime.standDown = 'unknown-device';
-          standDown();
+          const remaining = dropPairing(runtime.pairing.deviceKey, opts.home);
+          if (remaining.pairings.length === 0) finishUnknownDevice();
         },
         onSuperseded: () => {
           runtime.standDown = 'superseded';

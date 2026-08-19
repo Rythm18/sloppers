@@ -130,6 +130,39 @@ export function addPairing(config: CollectorConfig, pairing: PairingConfig): Col
   return { version: 2, pairings: [...config.pairings, pairing] };
 }
 
+/**
+ * Remove exactly the pairing whose device the server said it does not
+ * recognize (the member was deleted, banned, or the workspace itself was
+ * removed), leaving every other pairing untouched.
+ *
+ * This is destructive and not recoverable from the config alone: the device
+ * key and member id for that workspace are gone, and getting back in means
+ * running `sloppers share <code>` with a fresh invite. Callers must only
+ * reach this from an authoritative "unknown-device" rejection from the
+ * server — never from a network error, a timeout, or an ambiguous close —
+ * so a dropped wifi connection never costs someone their pairing.
+ *
+ * A real write, unlike `loadConfig`'s in-memory-only v1→v2 upgrade (see the
+ * module doc above): the pairing itself genuinely changed, which is exactly
+ * the kind of edit that doc calls out as safe, and correct, to persist —
+ * unlike a pure read, a drop cannot be un-done by simply downgrading back to
+ * 0.1.1. `saveConfig`'s write-then-rename means an interrupted write still
+ * leaves either the old file or the new one fully intact, never a torn one.
+ *
+ * Returns the config actually written, so a caller (the daemon) can tell
+ * synchronously whether any pairing remains, without waiting on the
+ * config-file watcher to find out.
+ */
+export function dropPairing(deviceKey: string, home?: string): CollectorConfig {
+  const current = loadConfig(home) ?? { version: 2, pairings: [] };
+  const next: CollectorConfig = {
+    version: 2,
+    pairings: current.pairings.filter((pairing) => pairing.deviceKey !== deviceKey),
+  };
+  saveConfig(next, home);
+  return next;
+}
+
 export function newConfig(init: {
   httpUrl: string;
   wsUrl: string;

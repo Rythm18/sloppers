@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   addPairing,
+  type CollectorConfig,
+  dropPairing,
   isCatchAll,
   loadConfig,
   matchesPairing,
@@ -12,6 +14,35 @@ import {
   saveConfig,
   shadowedBy,
 } from './config.js';
+
+/** Two pairings, distinguishable by device key — the shape `dropPairing` acts on. */
+function twoPairingConfig(): CollectorConfig {
+  return {
+    version: 2,
+    pairings: [
+      {
+        server: { httpUrl: 'https://a', wsUrl: 'wss://a' },
+        deviceKey: 'k-dead',
+        memberId: 'm-dead',
+        displayName: 'dead',
+        roomCode: 'room-dead',
+        match: ['**'],
+        visibility: { title: true, project: true, branch: true, model: true, tokens: true },
+        paused: false,
+      },
+      {
+        server: { httpUrl: 'https://b', wsUrl: 'wss://b' },
+        deviceKey: 'k-live',
+        memberId: 'm-live',
+        displayName: 'live',
+        roomCode: 'room-live',
+        match: ['~/work/**'],
+        visibility: { title: true, project: true, branch: true, model: true, tokens: true },
+        paused: false,
+      },
+    ],
+  };
+}
 
 describe('collector config', () => {
   it('round-trips through disk', () => {
@@ -236,6 +267,63 @@ describe('isCatchAll', () => {
     // `routeSessions` routes a session with no cwd as the empty path, and
     // only a fallback may claim it — so a catch-all has to match it.
     expect(matchesPairing({ match: ['**'] } as never, '')).toBe(true);
+  });
+});
+
+describe('dropPairing', () => {
+  it('removes only the pairing whose device the server rejected', () => {
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-cfg-'));
+    saveConfig(twoPairingConfig(), home);
+    dropPairing('k-dead', home);
+    const config = loadConfig(home);
+    expect(config?.pairings.map((p) => p.deviceKey)).toEqual(['k-live']);
+  });
+
+  it('leaves every pairing untouched when the given key matches none of them', () => {
+    // A defensive no-op, not an error: a stale or mistyped key must not
+    // silently take out an unrelated pairing.
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-cfg-'));
+    saveConfig(twoPairingConfig(), home);
+    dropPairing('k-nonexistent', home);
+    const config = loadConfig(home);
+    expect(config?.pairings.map((p) => p.deviceKey)).toEqual(['k-dead', 'k-live']);
+  });
+
+  it('drops the last pairing down to an empty, still-loadable config', () => {
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-cfg-'));
+    saveConfig({ version: 2, pairings: [twoPairingConfig().pairings[0] as never] }, home);
+    const result = dropPairing('k-dead', home);
+    expect(result.pairings).toEqual([]);
+    const config = loadConfig(home);
+    expect(config?.version).toBe(2);
+    expect(config?.pairings).toEqual([]);
+  });
+
+  it('is a real write: it upgrades a v1 file to v2 on disk, unlike loadConfig', () => {
+    // Deliberately different from loadConfig's read-only v1->v2 upgrade (see
+    // the module doc): dropping a pairing is a genuine edit to the pairing
+    // itself, which is exactly the kind of change that doc says is safe —
+    // and necessary — to persist.
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-cfg-'));
+    mkdirSync(join(home, '.sloppers'), { recursive: true });
+    const path = join(home, '.sloppers', 'config.json');
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        server: { httpUrl: 'https://x', wsUrl: 'wss://x' },
+        deviceKey: 'k-only',
+        memberId: 'm',
+        displayName: 'ridham',
+        roomCode: 'the-lab',
+        visibility: { title: true, project: true, branch: true, model: true, tokens: true },
+        paused: false,
+      }),
+    );
+    dropPairing('k-only', home);
+    const onDisk: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    expect((onDisk as { version: number }).version).toBe(2);
+    expect((onDisk as { pairings: unknown[] }).pairings).toEqual([]);
   });
 });
 

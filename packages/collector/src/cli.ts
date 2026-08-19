@@ -164,9 +164,13 @@ function runForeground(): void {
   const daemon = startDaemon({
     collectorVersion: VERSION,
     log,
-    // Exit non-zero so launchd/systemd restart us; once the user re-pairs,
-    // the restarted daemon reads the new config and recovers on its own.
-    onUnknownDevice: () => process.exit(1),
+    // The daemon already dropped every rejected pairing on the way here —
+    // this only fires once none are left, so restarting would just throw
+    // straight back out of `startDaemon` ("Not paired yet"). Exit clean so
+    // launchd (KeepAlive: SuccessfulExit:false) and systemd (Restart=on-
+    // failure) do NOT restart us; the user has to run `sloppers share
+    // <code>` again to get back in.
+    onUnknownDevice: () => process.exit(0),
     // Another machine took over — exit clean so the service does NOT restart.
     onSuperseded: () => process.exit(0),
   });

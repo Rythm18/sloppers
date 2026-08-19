@@ -6,7 +6,7 @@ import { defaultVisibility, encodeMinutes } from '@sloppers/protocol';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocketServer, type WebSocket as WSSocket } from 'ws';
 import type { PairingConfig } from './config.js';
-import { saveConfig } from './config.js';
+import { loadConfig, saveConfig } from './config.js';
 import type { RoutableSession } from './core/types.js';
 import {
   buildDirtySnapshot,
@@ -591,8 +591,17 @@ class FakeCollectorServer {
     resolve: (m: CollectorSnapshot) => void;
   }[] = [];
 
-  /** `rejectWith` turns every hello into that error instead of a hello-ok. */
+  /**
+   * Turns every hello into that error instead of a hello-ok. Mutable — not
+   * just a constructor option — so a test can flip a server from healthy to
+   * rejecting mid-flight and force a reconnect, simulating a pairing that
+   * was fine and then got revoked (member deleted after the fact), rather
+   * than one that was rejected from the very first hello.
+   */
+  rejectWith?: 'unknown-device' | 'superseded';
+
   constructor(rejectWith?: 'unknown-device' | 'superseded') {
+    this.rejectWith = rejectWith;
     this.wss = new WebSocketServer({ port: 0 });
     this.wss.on('connection', (ws) => {
       this.sockets.push(ws);
@@ -602,8 +611,8 @@ class FakeCollectorServer {
           this.connections += 1;
           ws.send(
             JSON.stringify(
-              rejectWith
-                ? { type: 'error', code: rejectWith, message: 'no' }
+              this.rejectWith
+                ? { type: 'error', code: this.rejectWith, message: 'no' }
                 : {
                     type: 'hello-ok',
                     memberId: 'member-1',
@@ -998,35 +1007,33 @@ describe('startDaemon runs one client per pairing', () => {
     expect(wire).not.toContain(home);
   }, 30_000);
 
-  it('stands down once a config edit leaves only clients that already gave up', async () => {
-    // The gap: a stand-down is only ever re-checked when a *client* reports.
-    // If one workspace's key is revoked while another is healthy the daemon
-    // correctly stays up — but then removing the healthy one leaves a process
-    // that is running, connected to nothing, and silent. Nothing but a
-    // re-check after reconciling can notice.
+  it('drops exactly the pairing the server rejected, keeps serving the other one through the real config watcher, and exits clean once none remain', async () => {
+    // The whole point of dropping rather than restart-looping: one revoked
+    // member must not take healthy workspaces down with it, and losing the
+    // last one must not restart-loop either — it has to actually stop.
     const home = mkdtempSync(join(tmpdir(), 'sloppers-daemon-'));
     const revoked = new FakeCollectorServer('unknown-device');
     const healthy = new FakeCollectorServer();
     servers.push(revoked, healthy);
-    writeClaudeSession(home, 'a-session', join(home, 'work', 'api'));
 
     const revokedPairing = pairingFor(revoked.port, ['**'], 'a');
-    saveConfig(
-      { version: 2, pairings: [revokedPairing, pairingFor(healthy.port, ['**'], 'b')] },
-      home,
-    );
+    const healthyPairing = pairingFor(healthy.port, ['**'], 'b');
+    saveConfig({ version: 2, pairings: [revokedPairing, healthyPairing] }, home);
 
     const logged: string[] = [];
     let stoodDown: string | undefined;
+    let standDownCalls = 0;
     daemon = startDaemon({
       collectorVersion: 'test',
       home,
       log: (m) => logged.push(m),
       onUnknownDevice: () => {
         stoodDown = 'unknown-device';
+        standDownCalls += 1;
       },
       onSuperseded: () => {
         stoodDown = 'superseded';
+        standDownCalls += 1;
       },
     });
 
@@ -1035,12 +1042,154 @@ describe('startDaemon runs one client per pairing', () => {
     await healthy.waitFor(() => true);
     expect(stoodDown).toBeUndefined();
 
-    // Now the healthy workspace is removed, leaving only the revoked one.
-    saveConfig({ version: 2, pairings: [revokedPairing] }, home);
+    // Nobody edited the config by hand — the rejected pairing disappears
+    // from disk on its own, through the real config-file watcher, the exact
+    // same loop `sloppers pause`/hide edits already ride.
+    await waitUntil(() => (loadConfig(home)?.pairings.length ?? -1) === 1);
+    expect(loadConfig(home)?.pairings.map((p) => p.deviceKey)).toEqual([healthyPairing.deviceKey]);
+    expect(stoodDown).toBeUndefined();
+
+    // The surviving pairing's own client is untouched by its sibling's
+    // demise — proven by forcing a fresh reconnect on it and watching it
+    // complete normally, rather than assuming.
+    healthy.dropOldestConnection();
+    await waitUntil(() => healthy.connections === 2);
+    expect(stoodDown).toBeUndefined();
+
+    // Now the last remaining pairing is rejected too (its member deleted
+    // after the first one already was). Flip the server and force a fresh
+    // hello so this reconnect is the one that gets rejected.
+    healthy.rejectWith = 'unknown-device';
+    healthy.dropOldestConnection();
+
     await waitUntil(() => stoodDown !== undefined);
     expect(stoodDown).toBe('unknown-device');
     // And it says why on the way out rather than exiting mutely.
     expect(logged.some((m) => m.includes('sloppers share'))).toBe(true);
+    // Nothing is paired any more — the state a restart would find too, so
+    // exiting clean (not restart-looping) is the only sane behaviour.
+    expect(loadConfig(home)?.pairings).toEqual([]);
+
+    // No double-handling: `saveConfig` touches the file more than once
+    // (write, rename, chmod), so the watcher can fire more than once for a
+    // single logical drop. Give any lingering callback a chance to run, and
+    // confirm the daemon still only ever stood down once.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(standDownCalls).toBe(1);
+  }, 30_000);
+
+  it('does not drop a pairing on a raw connection close — only an authoritative rejection does', async () => {
+    // Dropping is destructive and irreversible, so it must never fire on a
+    // network hiccup: an ambiguous close carries no reason at all, and a
+    // dropped wifi connection must not cost someone their pairing.
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-daemon-'));
+    const office = new FakeCollectorServer();
+    servers.push(office);
+    const solePairing = pairingFor(office.port, ['**'], 'a');
+    saveConfig({ version: 2, pairings: [solePairing] }, home);
+
+    let stoodDown: string | undefined;
+    daemon = startDaemon({
+      collectorVersion: 'test',
+      home,
+      log: () => {},
+      onUnknownDevice: () => {
+        stoodDown = 'unknown-device';
+      },
+      onSuperseded: () => {
+        stoodDown = 'superseded';
+      },
+    });
+
+    await office.waitFor(() => true);
+    expect(loadConfig(home)?.pairings).toHaveLength(1);
+
+    // Twice, to cover both "offline, nothing has happened yet" and
+    // "mid reconnect-cycle" — neither is a rejection.
+    office.dropOldestConnection();
+    await waitUntil(() => office.connections === 2);
+    expect(loadConfig(home)?.pairings.map((p) => p.deviceKey)).toEqual([solePairing.deviceKey]);
+    expect(stoodDown).toBeUndefined();
+
+    office.dropOldestConnection();
+    await waitUntil(() => office.connections === 3);
+    expect(loadConfig(home)?.pairings.map((p) => p.deviceKey)).toEqual([solePairing.deviceKey]);
+    expect(stoodDown).toBeUndefined();
+  }, 30_000);
+
+  it('a rejection landing right as an unrelated config edit lands does not lose either change or wedge the daemon', async () => {
+    // The interaction the config watcher creates: dropping a pairing is
+    // itself a config write, so it can fire the same watcher a `sloppers
+    // pause` run from another terminal moments earlier (or later) also
+    // fires. Neither edit may clobber the other, and reconciling twice in
+    // quick succession must not double-handle or wedge the survivor.
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-daemon-'));
+    const dropped = new FakeCollectorServer();
+    const kept = new FakeCollectorServer();
+    servers.push(dropped, kept);
+
+    const droppedPairing = pairingFor(dropped.port, ['**'], 'a');
+    const keptPairing = pairingFor(kept.port, ['~/work/**'], 'b');
+    saveConfig({ version: 2, pairings: [droppedPairing, keptPairing] }, home);
+
+    let stoodDown: string | undefined;
+    daemon = startDaemon({
+      collectorVersion: 'test',
+      home,
+      log: () => {},
+      onUnknownDevice: () => {
+        stoodDown = 'unknown-device';
+      },
+      onSuperseded: () => {
+        stoodDown = 'superseded';
+      },
+    });
+
+    await dropped.waitFor(() => true);
+    await kept.waitFor(() => true);
+
+    // A view of the config from *before* the rejection, standing in for a
+    // concurrent `sloppers pause` that read the file first and writes a
+    // moment later — exactly the ordering that would clobber the drop if
+    // the two edits were not both actually landing on disk.
+    const before = loadConfig(home);
+    if (!before) throw new Error('config missing in test setup');
+
+    // Flip the doomed pairing's server to start rejecting and force a
+    // reconnect, so the next hello is the one that gets rejected —
+    // triggering `dropPairing` from inside the daemon's own handler.
+    dropped.rejectWith = 'unknown-device';
+    dropped.dropOldestConnection();
+
+    // Race the unrelated edit against it, based on the pre-rejection view.
+    saveConfig(
+      {
+        ...before,
+        pairings: before.pairings.map((p) =>
+          p.deviceKey === keptPairing.deviceKey ? { ...p, paused: true } : p,
+        ),
+      },
+      home,
+    );
+
+    // Both edits must survive: the rejected pairing gone, the untouched one
+    // paused.
+    await waitUntil(() => {
+      const config = loadConfig(home);
+      return (
+        config?.pairings.length === 1 &&
+        config.pairings[0]?.deviceKey === keptPairing.deviceKey &&
+        config.pairings[0]?.paused === true
+      );
+    });
+    expect(stoodDown).toBeUndefined();
+
+    // The kept pairing's client was reused and re-pointed, not torn down and
+    // rebuilt, and it is not wedged: it still reconnects normally afterward.
+    expect(kept.connections).toBe(1);
+    kept.dropOldestConnection();
+    await waitUntil(() => kept.connections === 2);
+    expect(stoodDown).toBeUndefined();
   }, 30_000);
 
   it('stands down, and says so, when a config edit leaves no workspaces at all', async () => {

@@ -10,6 +10,11 @@ describe('service file generation', () => {
     expect(plist).toContain('dev.sloppers.collector');
     expect(plist).toContain('/home/dev/.sloppers/collector.log');
     expect(plist).toContain('<key>RunAtLoad</key><true/>');
+    // A plain boolean `KeepAlive` restarts regardless of exit status — only
+    // `SuccessfulExit:false` makes launchd stop relaunching after a clean
+    // (status 0) exit, which is what lets the daemon actually stand down
+    // instead of restart-looping once every pairing has been dropped.
+    expect(plist).toContain('<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>');
   });
 
   it('systemd unit restarts on failure', () => {
