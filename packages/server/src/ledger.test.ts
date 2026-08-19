@@ -288,6 +288,21 @@ describe('TokenLedger', () => {
     expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1300);
   });
 
+  it('re-bases once, then banks buckets the session opens later', () => {
+    // The re-basing has to be *retired*, not just applied. A bucket opened
+    // after the transition — a second model, or the next day — has no
+    // watermark of its own, so a transition still considered live would seed
+    // it and lose the spend outright.
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19 + 1000);
+    ledger.ingest(
+      'm1',
+      [bucketed('s1', [bucket(D19, 'claude-opus-5', 1000), bucket(D19, 'claude-haiku-4-5', 250)])],
+      TODAY_19 + 2000,
+    );
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1250);
+  });
+
   it('survives a collector flip-flopping between the two shapes', () => {
     ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
     ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19 + 1000);
