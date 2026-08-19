@@ -268,24 +268,30 @@ export class Room {
    *
    * The name is only checked now, not when they knocked — someone else may
    * have taken it while they waited, or the office may have filled up. Either
-   * refusal leaves them at the door with an error they can act on, and
-   * returns null so the caller can keep them in the queue.
+   * refusal tells them what went wrong and takes them off the door, so they
+   * can knock again under a name that is free; it returns null so the caller
+   * drops the knock rather than leaving the queue an entry nobody can act on.
    */
   admitKnock(knock: Knock): MemberRecord | null {
     // A socket that has already gone would never fire the close handler
     // below, so its member would sit in the office forever.
     if (!knockIsLive(knock)) return null;
     const created = this.manager.createMember(this.id, knock.displayName, knock.avatar);
-    if (created === 'name-taken') {
-      send(knock.ws, {
-        type: 'error',
-        code: 'name-taken',
-        message: `someone here is already called ${knock.displayName}`,
-      });
-      return null;
-    }
-    if (created === 'room-full') {
-      send(knock.ws, { type: 'error', code: 'bad-join', message: 'this office is full' });
+    if (typeof created === 'string') {
+      send(
+        knock.ws,
+        created === 'name-taken'
+          ? {
+              type: 'error',
+              code: 'name-taken',
+              message: `someone here is already called ${knock.displayName}`,
+            }
+          : { type: 'error', code: 'bad-join', message: 'this office is full' },
+      );
+      // Still their connection's business: it is the only thing that knows
+      // this socket was queued, and it has to stop thinking so before the
+      // person behind it can offer another name.
+      knock.admit(null);
       return null;
     }
     this.memberJoined(created);
@@ -304,6 +310,23 @@ export class Room {
       message: 'nobody let you in this time',
     });
     knock.ws.close();
+  }
+
+  /**
+   * The queue as it stands, to one person who has just entered — if they are
+   * someone who can answer it.
+   *
+   * `broadcastKnocks` only fires when the queue itself changes, so without
+   * this a moderator who reloads their tab, or comes online after somebody
+   * started waiting, sees an empty door while a knocker waits indefinitely
+   * with nobody aware of them. Sent even when the queue is empty, so a
+   * reconnecting client replaces whatever it remembered rather than keeping
+   * a list from before.
+   */
+  sendStandingKnocks(memberId: string): void {
+    const runtime = this.members.get(memberId);
+    if (!runtime || !can(runtime.role, 'knock.decide')) return;
+    this.sendTo(memberId, { type: 'knocks', knocks: this.knocks.list() });
   }
 
   /** The waiting queue, to the people allowed to answer it. */

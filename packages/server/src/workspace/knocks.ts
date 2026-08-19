@@ -4,15 +4,19 @@ import type { WebSocket } from 'ws';
 import type { MemberRecord } from './manager.js';
 
 /**
- * What the waiting connection does the moment the door opens.
+ * What the waiting connection does the moment the door is answered: the
+ * member if they were let in, or `null` if the office refused them at the
+ * last moment (their name was taken while they waited, or it filled up) and
+ * they are free to knock again.
  *
  * It rides on the knock because only that socket's own message handler can
- * adopt the member it was just handed: the state that `move`, `activity` and
- * `admin` read is per-connection and invisible from here. Without it an
- * admitted knocker would be in the world but deaf — and a second `join` on
- * that socket would mint them all over again.
+ * act on either outcome: the state that `move`, `activity` and `admin` read —
+ * and the state that decides whether a fresh `join` is allowed — is
+ * per-connection and invisible from here. Without it an admitted knocker
+ * would be in the world but deaf, a second `join` on that socket would mint
+ * them all over again, and a refused one could never try another name.
  */
-export type AdmitHandler = (member: MemberRecord) => void;
+export type AdmitHandler = (member: MemberRecord | null) => void;
 
 export interface Knock extends KnockView {
   ws: WebSocket;

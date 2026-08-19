@@ -226,6 +226,9 @@ function handleWeb(
     const world = entered.addWebClient(joined);
     if (!world) return;
     sendWeb(ws, secret ? { ...world, you: { ...world.you, memberSecret: secret } } : world);
+    // Whoever can answer the door has to be told who is already behind it —
+    // the queue is only pushed when it changes, and it may not change again.
+    entered.sendStandingKnocks(member.id);
   };
 
   ws.on('message', (data) => {
@@ -314,9 +317,13 @@ function handleWeb(
         // The name is deliberately not checked here — a knock writes nothing,
         // and whoever holds a name can change between knocking and being let
         // in. `knock-admit` checks it at the moment it would matter.
-        door.knocks.add(ws, msg.displayName, msg.avatar ?? randomAvatar(), (member) =>
-          enterAs(door, member, member.secret),
-        );
+        door.knocks.add(ws, msg.displayName, msg.avatar ?? randomAvatar(), (member) => {
+          // Answered either way, so this socket is no longer at the door: it
+          // is either a member now, or free to knock again under a name that
+          // is not already taken.
+          knockingAt = null;
+          if (member) enterAs(door, member, member.secret);
+        });
         knockingAt = door;
         sendWeb(ws, { type: 'knocking' });
         door.broadcastKnocks();

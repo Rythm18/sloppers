@@ -2,7 +2,7 @@ import type { AdminOp } from '@sloppers/protocol';
 import { describe, expect, it } from 'vitest';
 import { openDb } from '../db/index.js';
 import { handleAdminOp } from './admin.js';
-import { WorkspaceManager } from './manager.js';
+import { type MemberRecord, WorkspaceManager } from './manager.js';
 
 /**
  * Enough of a browser socket for the knock paths. `readyState` is what
@@ -200,11 +200,10 @@ describe('handleAdminOp', () => {
     const { manager, room, owner } = setup();
     // The knocker's own connection is what finishes the join, so admission
     // has to reach it — not just write a member row.
-    const handedOver: string[] = [];
-    const waiting = room.knocks.add(fakeSocket(), 'theo', 'pixel', (m) => handedOver.push(m.id));
-    const rejected = room.knocks.add(fakeSocket(), 'mallory', 'pixel', (m) =>
-      handedOver.push(m.id),
-    );
+    const handedOver: (string | null)[] = [];
+    const record = (m: MemberRecord | null) => handedOver.push(m?.id ?? null);
+    const waiting = room.knocks.add(fakeSocket(), 'theo', 'pixel', record);
+    const rejected = room.knocks.add(fakeSocket(), 'mallory', 'pixel', record);
 
     expect(
       handleAdminOp({ manager, room, actor: owner }, { kind: 'knock-admit', knockId: waiting.id })
@@ -245,16 +244,25 @@ describe('handleAdminOp', () => {
     expect(room.knocks.list()).toEqual([]);
   });
 
-  it('keeps a knocker queued when their name was taken while they waited', () => {
+  it('frees a knocker whose name was taken while they waited, rather than queuing them', () => {
     const { manager, room, owner, plain } = setup();
-    const waiting = room.knocks.add(fakeSocket(), plain.displayName, 'pixel', noAdmit);
+    // Their connection has to hear about it: it is the only thing that knows
+    // this socket is queued, and it must stop thinking so before the person
+    // behind it can offer another name.
+    const outcomes: (MemberRecord | null)[] = [];
+    const waiting = room.knocks.add(fakeSocket(), plain.displayName, 'pixel', (m) =>
+      outcomes.push(m),
+    );
 
     const result = handleAdminOp(
       { manager, room, actor: owner },
       { kind: 'knock-admit', knockId: waiting.id },
     );
     expect(result.ok).toBe(false);
-    expect(room.knocks.get(waiting.id)?.displayName).toBe(plain.displayName);
+    expect(outcomes).toEqual([null]);
+    // Re-offering the same name to the next moderator who looks would refuse
+    // in exactly the same way, so the queue does not keep it.
+    expect(room.knocks.get(waiting.id)).toBeUndefined();
     expect(manager.events(room.id)).toEqual([]);
   });
 

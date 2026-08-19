@@ -186,14 +186,16 @@ export function handleAdminOp(ctx: AdminContext, op: AdminOp): AdminResult {
         room.broadcastKnocks();
         return invalid(`${knock.displayName} gave up waiting`);
       }
-      // Their name is checked now, not when they knocked, because it may
-      // have been taken while they waited. A refusal keeps them in the queue
-      // so the decision can be made again once they pick another one.
+      // Their name is checked now, not when they knocked, because it may have
+      // been taken while they waited. Either way the knock is spent: a refusal
+      // was already reported to them, and re-offering the same name to the
+      // next moderator who looks would refuse in exactly the same way. They
+      // are free to knock again with a name that is not taken.
       const admitted = room.admitKnock(knock);
-      if (!admitted) return invalid(`${knock.displayName} could not be let in`);
       room.knocks.remove(knock.id);
-      manager.logEvent(room.id, actor.id, 'knock.admit', admitted.id, knock.displayName);
       room.broadcastKnocks();
+      if (!admitted) return invalid(`${knock.displayName} could not be let in`);
+      manager.logEvent(room.id, actor.id, 'knock.admit', admitted.id, knock.displayName);
       return { ok: true };
     }
 

@@ -457,6 +457,118 @@ describe('server integration', () => {
     expect(emptied.type === 'knocks' && emptied.knocks).toHaveLength(0);
   });
 
+  it('hands the standing queue to someone who can answer it as they arrive', async () => {
+    const { client: owner, world } = await join('ridham');
+    const { client: sam, world: samWorld } = await join('sam');
+    const { client: nina, world: ninaWorld } = await join('nina');
+    owner.send({ type: 'admin', op: { kind: 'promote', memberId: samWorld.you.memberId } });
+    await owner.next((m) => m.type === 'roster');
+    await setJoinMode(owner, 'knock');
+
+    // Both step away before anyone turns up at the door.
+    sam.close();
+    nina.close();
+    const visitor = await arrive(world.roomCode, 'theo');
+    await visitor.next((m) => m.type === 'knocking');
+    // The one push the queue will ever make: it does not change again, so
+    // anyone arriving later has to be told some other way.
+    const knock = await firstKnock(owner);
+    expect(knock.displayName).toBe('theo');
+
+    // Sam comes back to a door that was knocked on while he was gone. The
+    // queue is only pushed when it changes, and it will not change again, so
+    // arriving has to carry it or theo waits with nobody aware of him.
+    const samAgain = new WebClientHarness(server.port);
+    clients.push(samAgain);
+    await samAgain.open();
+    samAgain.send({
+      type: 'join',
+      memberId: samWorld.you.memberId,
+      memberSecret: samWorld.you.memberSecret,
+    });
+    const standing = await samAgain.next((m) => m.type === 'knocks');
+    expect(standing.type === 'knocks' && standing.knocks[0]?.displayName).toBe('theo');
+
+    // Arriving is not a way around the permission check: nina is a plain
+    // member, and everything she hears from her own world up to theo landing
+    // in the office has no queue in it.
+    const ninaAgain = new WebClientHarness(server.port);
+    clients.push(ninaAgain);
+    await ninaAgain.open();
+    ninaAgain.send({
+      type: 'join',
+      memberId: ninaWorld.you.memberId,
+      memberSecret: ninaWorld.you.memberSecret,
+    });
+    await ninaAgain.next((m) => m.type === 'world');
+    owner.send({ type: 'admin', op: { kind: 'knock-admit', knockId: knock.id } });
+    const heard: string[] = [];
+    let msg: ServerToWeb;
+    do {
+      msg = await ninaAgain.next();
+      heard.push(msg.type);
+    } while (msg.type !== 'member');
+    expect(heard).not.toContain('knocks');
+  });
+
+  it('tells a moderator arriving at an empty door that it is empty', async () => {
+    const { client: owner, world } = await join('ridham');
+    await setJoinMode(owner, 'knock');
+
+    // An authoritative empty list, so a reloading tab replaces whatever it
+    // remembered instead of keeping a queue from before.
+    const reloaded = new WebClientHarness(server.port);
+    clients.push(reloaded);
+    await reloaded.open();
+    reloaded.send({
+      type: 'join',
+      memberId: world.you.memberId,
+      memberSecret: world.you.memberSecret,
+    });
+    const standing = await reloaded.next((m) => m.type === 'knocks');
+    expect(standing.type === 'knocks' && standing.knocks).toEqual([]);
+  });
+
+  it('lets a knocker refused at the door try again under a free name', async () => {
+    const { client: owner, world } = await join('ridham');
+    await setJoinMode(owner, 'knock');
+
+    // Two people queue up calling themselves the same thing. Whoever is let
+    // in first takes the name; knocking never reserved it.
+    const visitor = await arrive(world.roomCode, 'sam');
+    await visitor.next((m) => m.type === 'knocking');
+    const rival = await arrive(world.roomCode, 'sam');
+    await rival.next((m) => m.type === 'knocking');
+
+    const queue = await owner.next((m) => m.type === 'knocks' && m.knocks.length === 2);
+    if (queue.type !== 'knocks') throw new Error('unreachable');
+    const [early, late] = queue.knocks;
+    if (!early || !late) throw new Error('both knocks should be queued');
+
+    owner.send({ type: 'admin', op: { kind: 'knock-admit', knockId: late.id } });
+    await rival.next((m) => m.type === 'world');
+
+    // Now the first one cannot be let in under that name, and is told so.
+    owner.send({ type: 'admin', op: { kind: 'knock-admit', knockId: early.id } });
+    const refused = await visitor.next((m) => m.type === 'error');
+    expect(refused.type === 'error' && refused.code).toBe('name-taken');
+
+    // The queue does not keep an entry nobody can act on, and the moderator
+    // learns their op did not land.
+    const emptied = await owner.next((m) => m.type === 'knocks' && m.knocks.length === 0);
+    expect(emptied.type === 'knocks' && emptied.knocks).toEqual([]);
+    expect((await owner.next((m) => m.type === 'error')).type).toBe('error');
+
+    // And the person behind that socket is free to offer another name.
+    visitor.send({ type: 'join', roomCode: world.roomCode, displayName: 'sammy' });
+    await visitor.next((m) => m.type === 'knocking');
+    const retry = await firstKnock(owner);
+    expect(retry.displayName).toBe('sammy');
+    owner.send({ type: 'admin', op: { kind: 'knock-admit', knockId: retry.id } });
+    const admitted = await visitor.next((m) => m.type === 'world');
+    expect(admitted.type === 'world' && admitted.you.memberSecret).toBeTruthy();
+  });
+
   it('pair → redeem → collector snapshot → browser sees sessions and leaderboard', async () => {
     const { client, world } = await join('ridham');
     const base = `http://127.0.0.1:${server.port}`;
