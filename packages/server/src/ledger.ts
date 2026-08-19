@@ -31,7 +31,36 @@ import type { Db } from './db/index.js';
  *
  * `activeMinutes` reports are 1440-bit bitmaps per day. They are ORed into
  * the member's stored bitmap for that day, so two sessions sharing a minute
- * count it once and a re-send changes nothing.
+ * count it once and a re-send changes nothing. A collector too old to report
+ * them falls back to the server's own coarse mark — one bit for the minute a
+ * snapshot arrives in while anything is working — so the current day is never
+ * blank whoever is reporting.
+ *
+ * ## What the wire caps cost, now that this reads buckets
+ *
+ * `sessionSnapshotSchema` caps `usage` at 30 buckets and `activeMinutes` at 7
+ * days, and the collector sorts both newest-day-first so the cap drops the
+ * oldest. On the local corpus (532 grouped sessions) bucket counts peak at 27,
+ * but 9 sessions exceed 7 active days, the longest at 25.
+ *
+ * **Buckets lose nothing.** For a session the server already tracks, a bucket
+ * that falls out of the cap simply stops being restated, and not restating a
+ * finished day adds zero — exactly like re-sending it. For a session the
+ * server has never seen, every bucket dated before today is seeded rather than
+ * banked anyway (see `foldUsage`), so the dropped ones were never going to be
+ * counted. Today's buckets sort to the front and would need more than 30
+ * models in a single day to be dropped at all.
+ *
+ * **Minutes do lose history, and there is no way to get it back.** Minute
+ * bitmaps have no seeding rule — an unreported day is simply absent, not
+ * declined — so a cold start on a session past its 7th active day never sends
+ * days 8+ and the server never learns them. Today's minutes are safe (newest
+ * first), and nothing currently displays any day but today, so the loss is
+ * invisible right now; it would surface the moment a history view exists.
+ * Raising the cap is a protocol change and an expensive one — each day is
+ * ~240 base64 characters per session, so 25 days across the wire's 64 sessions
+ * is ~380KB every heartbeat — which is not worth paying for history nothing
+ * reads. Deliberately unfixed, not overlooked.
  */
 
 /** Where a flat cumulative total lands: we don't know which model spent it. */
