@@ -254,9 +254,16 @@ export function matchesPairing(pairing: PairingConfig, cwd: string): boolean {
  * - a POSIX path inside home — the converse, so home is not treated as
  *   special.
  * - a Windows path — excludes `/**`, which is every path on POSIX but no path
- *   at all on Windows. `matchesPairing` deliberately treats `\` as a
- *   separator because the collector ships for Windows, so a rule that called
- *   `/**` universal would be making a claim the matcher itself does not.
+ *   at all on Windows. To be clear about what this is and is not: auto-start
+ *   only installs on darwin and linux (`serviceSupported`), so on every
+ *   platform the daemon actually runs on today, `/**` *is* universal.
+ *   Excluding it is a portability choice, matching `globToRegExp`'s own
+ *   decision to honour `\` as a separator — not a claim that anyone is
+ *   running this on Windows. The trade is deliberate: catch-all detection
+ *   that varied by platform would give the same config different routing on
+ *   different machines, which is worse in a tool people run on several and
+ *   compare results between. `shadowedBy` covers the gap, warning at `share`
+ *   time when a `/**` pairing ahead of a new one would starve it.
  */
 function catchAllProbes(): string[] {
   const home = homedir();

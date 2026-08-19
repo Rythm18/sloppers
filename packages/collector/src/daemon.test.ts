@@ -374,7 +374,14 @@ describe('standDownDecision', () => {
   it('keeps the daemon up while any client is still serving a workspace', () => {
     expect(standDownDecision(['unknown-device', undefined])).toBeNull();
     expect(standDownDecision([undefined, undefined])).toBeNull();
-    expect(standDownDecision([])).toBeNull();
+  });
+
+  it('stands down when there are no workspaces left at all', () => {
+    // Not a rejection and not a takeover — the config simply has nothing in
+    // it any more, which is the same state `startDaemon` refuses to start
+    // into. A daemon left running here is connected to nothing and reporting
+    // nothing, which is the hardest failure to spot from the outside.
+    expect(standDownDecision([])).toBe('unpaired');
   });
 
   it('stands down clean only when every client was superseded', () => {
@@ -584,7 +591,8 @@ class FakeCollectorServer {
     resolve: (m: CollectorSnapshot) => void;
   }[] = [];
 
-  constructor() {
+  /** `rejectWith` turns every hello into that error instead of a hello-ok. */
+  constructor(rejectWith?: 'unknown-device' | 'superseded') {
     this.wss = new WebSocketServer({ port: 0 });
     this.wss.on('connection', (ws) => {
       this.sockets.push(ws);
@@ -593,12 +601,16 @@ class FakeCollectorServer {
         if (msg.type === 'hello') {
           this.connections += 1;
           ws.send(
-            JSON.stringify({
-              type: 'hello-ok',
-              memberId: 'member-1',
-              displayName: 'Tester',
-              roomCode: 'ABCD-1234',
-            }),
+            JSON.stringify(
+              rejectWith
+                ? { type: 'error', code: rejectWith, message: 'no' }
+                : {
+                    type: 'hello-ok',
+                    memberId: 'member-1',
+                    displayName: 'Tester',
+                    roomCode: 'ABCD-1234',
+                  },
+            ),
           );
           return;
         }
@@ -887,6 +899,15 @@ function appendCwdChange(file: string, id: string, cwd: string): void {
   );
 }
 
+/** Poll until `predicate` holds, or give up — for state with no event to await. */
+async function waitUntil(predicate: () => boolean, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for a condition');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 function pairingFor(port: number, match: string[], key: string): PairingConfig {
   return workspace(match, {
     server: { httpUrl: `http://127.0.0.1:${port}`, wsUrl: `ws://127.0.0.1:${port}` },
@@ -975,6 +996,81 @@ describe('startDaemon runs one client per pairing', () => {
     expect(wire).not.toContain(workDir);
     expect(wire).not.toContain(personalDir);
     expect(wire).not.toContain(home);
+  }, 30_000);
+
+  it('stands down once a config edit leaves only clients that already gave up', async () => {
+    // The gap: a stand-down is only ever re-checked when a *client* reports.
+    // If one workspace's key is revoked while another is healthy the daemon
+    // correctly stays up — but then removing the healthy one leaves a process
+    // that is running, connected to nothing, and silent. Nothing but a
+    // re-check after reconciling can notice.
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-daemon-'));
+    const revoked = new FakeCollectorServer('unknown-device');
+    const healthy = new FakeCollectorServer();
+    servers.push(revoked, healthy);
+    writeClaudeSession(home, 'a-session', join(home, 'work', 'api'));
+
+    const revokedPairing = pairingFor(revoked.port, ['**'], 'a');
+    saveConfig(
+      { version: 2, pairings: [revokedPairing, pairingFor(healthy.port, ['**'], 'b')] },
+      home,
+    );
+
+    const logged: string[] = [];
+    let stoodDown: string | undefined;
+    daemon = startDaemon({
+      collectorVersion: 'test',
+      home,
+      log: (m) => logged.push(m),
+      onUnknownDevice: () => {
+        stoodDown = 'unknown-device';
+      },
+      onSuperseded: () => {
+        stoodDown = 'superseded';
+      },
+    });
+
+    // The healthy workspace is serving, so the revoked one must not take the
+    // whole daemon down with it.
+    await healthy.waitFor(() => true);
+    expect(stoodDown).toBeUndefined();
+
+    // Now the healthy workspace is removed, leaving only the revoked one.
+    saveConfig({ version: 2, pairings: [revokedPairing] }, home);
+    await waitUntil(() => stoodDown !== undefined);
+    expect(stoodDown).toBe('unknown-device');
+    // And it says why on the way out rather than exiting mutely.
+    expect(logged.some((m) => m.includes('sloppers share'))).toBe(true);
+  }, 30_000);
+
+  it('stands down, and says so, when a config edit leaves no workspaces at all', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-daemon-'));
+    const office = new FakeCollectorServer();
+    servers.push(office);
+    saveConfig({ version: 2, pairings: [pairingFor(office.port, ['**'], 'a')] }, home);
+
+    const logged: string[] = [];
+    let stoodDown: string | undefined;
+    daemon = startDaemon({
+      collectorVersion: 'test',
+      home,
+      log: (m) => logged.push(m),
+      onUnknownDevice: () => {
+        stoodDown = 'unknown-device';
+      },
+      onSuperseded: () => {
+        stoodDown = 'superseded';
+      },
+    });
+    await office.waitFor(() => true);
+    expect(stoodDown).toBeUndefined();
+
+    saveConfig({ version: 2, pairings: [] }, home);
+    await waitUntil(() => stoodDown !== undefined);
+    // Nothing was revoked and nobody took over, so exit clean: a restart
+    // would only rediscover that there is nothing to share.
+    expect(stoodDown).toBe('superseded');
+    expect(logged.some((m) => m.includes('no workspaces'))).toBe(true);
   }, 30_000);
 
   it('refuses to start when nothing is paired', () => {

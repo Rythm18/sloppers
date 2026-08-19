@@ -265,27 +265,50 @@ export function buildPairingSnapshot(
 export type StandDownReason = 'unknown-device' | 'superseded';
 
 /**
+ * What the daemon as a whole should do. The two client reasons, plus
+ * `unpaired` for the case where there is no client left to have a reason.
+ */
+export type StandDown = StandDownReason | 'unpaired';
+
+/**
  * Whether the whole daemon should stand down, given why each pairing's
  * client stopped (`undefined` for one still serving).
  *
- * Both signals are per-connection — one office revoking a device key, or one
- * office handing this member to another machine, says nothing about the
- * others — so the daemon only exits once every workspace it has is gone. For
- * the single-pairing user that is exactly the previous behaviour: the one
+ * Both client signals are per-connection — one office revoking a device key,
+ * or one office handing this member to another machine, says nothing about
+ * the others — so the daemon only exits once every workspace it has is gone.
+ * For the single-pairing user that is exactly the previous behaviour: the one
  * client reports, the daemon stands down.
  *
  * When the reasons disagree, the restartable answer wins: `superseded` means
  * exit clean so the service does NOT restart us, and applying that while
  * another workspace merely needs re-pairing would leave the daemon down for
  * good instead of coming back to a fixed config.
+ *
+ * An empty list is `unpaired` rather than "carry on". It is not a rejection
+ * and not a takeover — the config simply has nothing in it, which is the same
+ * state `startDaemon` refuses to start into. Carrying on would leave a
+ * process that is running, connected to nothing, reporting nothing and saying
+ * nothing, which is the hardest kind of failure to diagnose from outside.
  */
 export function standDownDecision(
   reasons: readonly (StandDownReason | undefined)[],
-): StandDownReason | null {
-  if (reasons.length === 0) return null;
+): StandDown | null {
+  if (reasons.length === 0) return 'unpaired';
   if (reasons.some((reason) => reason === undefined)) return null;
   return reasons.every((reason) => reason === 'superseded') ? 'superseded' : 'unknown-device';
 }
+
+/**
+ * What the daemon logs on its way out. Standing down silently is the failure
+ * the whole re-check exists to prevent, so every path says why.
+ */
+const STAND_DOWN_MESSAGE: Record<StandDown, string> = {
+  'unknown-device':
+    'no workspace is sharing any more — this device is not recognized; run `sloppers share` again',
+  superseded: 'no workspace is sharing any more — another machine took over every one',
+  unpaired: 'no workspaces left in the config — nothing to share; standing down',
+};
 
 /** Everything the daemon holds for one pairing — one client, one workspace. */
 interface PairingRuntime {
@@ -332,10 +355,20 @@ export function startDaemon(opts: {
   /** One runtime per pairing, in config order — routing reads that order. */
   let runtimes: PairingRuntime[] = [];
 
+  // Latched, because the check runs from two places — a client reporting, and
+  // reconcile changing who is left — and the daemon only stands down once.
+  let stoodDown = false;
   const standDown = () => {
+    if (stoodDown) return;
     const decision = standDownDecision(runtimes.map((runtime) => runtime.standDown));
-    if (decision === 'superseded') opts.onSuperseded?.();
-    else if (decision === 'unknown-device') opts.onUnknownDevice?.();
+    if (!decision) return;
+    stoodDown = true;
+    opts.log(STAND_DOWN_MESSAGE[decision]);
+    // `unpaired` exits clean like `superseded`: nothing is wrong that a
+    // restart could fix, and `startDaemon` would only throw on the way back
+    // up, so a restarting service would flap instead of standing still.
+    if (decision === 'unknown-device') opts.onUnknownDevice?.();
+    else opts.onSuperseded?.();
   };
 
   const createRuntime = (pairing: PairingConfig): PairingRuntime => {
@@ -396,6 +429,12 @@ export function startDaemon(opts: {
     }
     for (const dropped of spare) dropped.client.stop();
     runtimes = next;
+    // Who is left has just changed, and standing down is a property of the
+    // whole set — dropping the last healthy pairing can retire a daemon whose
+    // other clients had already given up, and dropping every pairing retires
+    // it outright. Without this re-check the only trigger is a *client*
+    // reporting, so either edit leaves a process alive with nothing to do.
+    standDown();
   };
 
   const send = () => {

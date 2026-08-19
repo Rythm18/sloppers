@@ -216,10 +216,14 @@ describe('isCatchAll', () => {
   it('does not treat a sweeping-looking pattern as universal when it is not', () => {
     // `~/**` claims nothing under /srv or /tmp.
     expect(isCatchAll({ match: ['~/**'] } as never)).toBe(false);
-    // `/**` is every path on POSIX and no path at all on Windows, and
-    // `matchesPairing` deliberately honours `\` as a separator — so calling
-    // it universal would claim more than the matcher itself does.
+    // `/**` is every path on POSIX and no path at all on Windows. Auto-start
+    // only installs on darwin and linux, so on every platform the daemon
+    // actually runs on today this *is* universal — excluding it is a
+    // portability choice matching `globToRegExp`'s own handling of `\`, and a
+    // deliberate one: detection that varied by platform would route the same
+    // config differently on different machines. `shadowedBy` covers the gap.
     expect(isCatchAll({ match: ['/**'] } as never)).toBe(false);
+    expect(shadowedBy([{ match: ['/**'] } as never], ['~/work/**'])).toBeDefined();
     // `**/` only matches paths that end in a separator.
     expect(isCatchAll({ match: ['**/'] } as never)).toBe(false);
     // A single `*` stops at a separator.
