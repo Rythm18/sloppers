@@ -1,8 +1,8 @@
 import { homedir } from 'node:os';
 import { join, sep } from 'node:path';
-import { emptyTokens, type TokenTotals } from '@sloppers/protocol';
+import type { TokenTotals } from '@sloppers/protocol';
 import type { HarnessAdapter, SessionAccumulator } from '../core/types.js';
-import { newAccumulator } from '../core/types.js';
+import { addUsage, markMinute, newAccumulator, removeUsage } from '../core/types.js';
 
 /**
  * Claude Code appends every session to
@@ -14,8 +14,10 @@ import { newAccumulator } from '../core/types.js';
  *   `requestId` — one API request's usage may appear on several entries
  *   (one per content block), so usage is deduplicated by request.
  * - `ai-title` / `custom-title`: a human-readable session title.
- * - Entries with `isSidechain: true` are subagent transcripts; whole files
- *   of them are ignored so popups don't fill with phantom sessions.
+ * - Entries with `isSidechain: true` are subagent transcripts. A whole file
+ *   is one or the other — no local transcript mixes the two — and a sidechain
+ *   file carries its *parent's* sessionId, so it is marked `usageOnly`: its
+ *   spend counts, but it is never shown as a session of its own.
  *
  * "Who acts next" is read off the last assistant entry: a text-only message
  * ends the turn (the human acts); a message with a `tool_use` block means a
@@ -38,16 +40,21 @@ interface ClaudeUsage {
   cache_creation_input_tokens?: number;
 }
 
+/** Where one request's tokens currently sit, so they can be moved. */
+interface Contribution {
+  /** The `acc.usage` key this request's totals were added to. */
+  key: string;
+  totals: TokenTotals;
+}
+
 interface Scratch {
-  usageByRequest: Map<string, TokenTotals>;
-  running: TokenTotals;
+  usageByRequest: Map<string, Contribution>;
 }
 
 function scratchOf(acc: SessionAccumulator): Scratch {
   if (!acc.scratch.claude) {
     acc.scratch.claude = {
-      usageByRequest: new Map<string, TokenTotals>(),
-      running: emptyTokens(),
+      usageByRequest: new Map<string, Contribution>(),
     } satisfies Scratch;
   }
   return acc.scratch.claude as Scratch;
@@ -60,6 +67,19 @@ function toTotals(u: ClaudeUsage): TokenTotals {
     cacheRead: u.cache_read_input_tokens ?? 0,
     cacheWrite: u.cache_creation_input_tokens ?? 0,
   };
+}
+
+/**
+ * When this entry happened. Every one of the 82952 usage-bearing entries on
+ * this machine carries a parseable timestamp; the fallbacks exist so a
+ * malformed one costs its bucket accuracy rather than its tokens.
+ */
+function entryMs(entry: Record<string, unknown>, acc: SessionAccumulator): number {
+  if (typeof entry.timestamp === 'string') {
+    const ms = Date.parse(entry.timestamp);
+    if (!Number.isNaN(ms)) return ms;
+  }
+  return acc.startedAtMs ?? Date.now();
 }
 
 export function createClaudeCodeAdapter(home: string = homedir()): HarnessAdapter {
@@ -85,12 +105,12 @@ export function createClaudeCodeAdapter(home: string = homedir()): HarnessAdapte
       const type = entry.type;
       if (!acc.scratch.sidechainDecided && typeof entry.isSidechain === 'boolean') {
         // The first positioned entry tells us whether this whole file is a
-        // subagent sidechain rather than a real session.
+        // subagent sidechain rather than a real session. Keep folding it
+        // either way — a sidechain's tokens are real spend that appears in no
+        // other transcript; it is only its *identity* that must not surface,
+        // since it borrows the parent's sessionId.
         acc.scratch.sidechainDecided = true;
-        if (entry.isSidechain) {
-          acc.ignored = true;
-          return;
-        }
+        if (entry.isSidechain) acc.usageOnly = true;
       }
       if (acc.ignored) return;
 
@@ -126,22 +146,23 @@ export function createClaudeCodeAdapter(home: string = homedir()): HarnessAdapte
             const usage = message.usage as ClaudeUsage | undefined;
             const requestId = entry.requestId;
             if (usage && typeof requestId === 'string') {
+              const ms = entryMs(entry, acc);
+              // The machine was busy at this moment whoever owns the tokens,
+              // so the minute is recorded even for a resume copy.
+              markMinute(acc, ms);
               const owner = requestOwner.get(requestId) ?? acc.filePath;
               requestOwner.set(requestId, owner);
               if (owner === acc.filePath) {
                 const s = scratchOf(acc);
                 const next = toTotals(usage);
+                // A restated request may belong to a different day or model
+                // than it first did, so unwind it from the bucket it actually
+                // landed in — subtracting from the new one would leave the old
+                // bucket overstated and drive the new one negative.
                 const prev = s.usageByRequest.get(requestId);
-                s.usageByRequest.set(requestId, next);
-                // Keep a running sum with O(1) updates: replace this
-                // request's previous contribution instead of resumming.
-                s.running = {
-                  input: s.running.input - (prev?.input ?? 0) + next.input,
-                  output: s.running.output - (prev?.output ?? 0) + next.output,
-                  cacheRead: s.running.cacheRead - (prev?.cacheRead ?? 0) + next.cacheRead,
-                  cacheWrite: s.running.cacheWrite - (prev?.cacheWrite ?? 0) + next.cacheWrite,
-                };
-                acc.tokens = s.running;
+                if (prev) removeUsage(acc, prev.key, prev.totals);
+                const key = addUsage(acc, ms, model, next);
+                s.usageByRequest.set(requestId, { key, totals: next });
               }
             }
           }

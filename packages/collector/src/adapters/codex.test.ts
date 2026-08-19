@@ -1,5 +1,7 @@
+import { dayOf } from '@sloppers/protocol';
 import { describe, expect, it } from 'vitest';
 import type { SessionAccumulator } from '../core/types.js';
+import { totalUsage } from '../core/types.js';
 import { createCodexAdapter } from './codex.js';
 
 const HOME = '/home/dev';
@@ -10,6 +12,17 @@ function ingest(lines: object[]): SessionAccumulator {
   const acc = adapter.newAccumulator(FILE);
   for (const line of lines) adapter.ingestLine(JSON.stringify(line), acc);
   return acc;
+}
+
+const localDay = (iso: string) => dayOf(Date.parse(iso));
+
+/**
+ * An ISO timestamp for a given *local* wall-clock moment. Bucketing is by
+ * local day, so day-boundary tests have to name local times or they only
+ * exercise the boundary in whichever timezone the test runner happens to use.
+ */
+function localIso(y: number, month: number, d: number, h: number, min: number): string {
+  return new Date(y, month - 1, d, h, min).toISOString();
 }
 
 const meta = {
@@ -23,9 +36,9 @@ const meta = {
   },
 };
 
-function tokenCount(total: object) {
+function tokenCount(total: object, timestamp = '2026-08-17T10:05:00.000Z') {
   return {
-    timestamp: '2026-08-17T10:05:00.000Z',
+    timestamp,
     type: 'event_msg',
     payload: { type: 'token_count', info: { total_token_usage: total } },
   };
@@ -62,7 +75,7 @@ describe('codex adapter', () => {
         total_tokens: 6_120_181,
       }),
     ]);
-    expect(acc.tokens).toEqual({
+    expect(totalUsage(acc)).toEqual({
       input: 6_115_878 - 5_616_640,
       output: 4303,
       cacheRead: 5_616_640,
@@ -76,7 +89,85 @@ describe('codex adapter', () => {
       tokenCount({ input_tokens: 100, cached_input_tokens: 0, output_tokens: 10 }),
       tokenCount({ input_tokens: 250, cached_input_tokens: 50, output_tokens: 30 }),
     ]);
-    expect(acc.tokens).toEqual({ input: 200, output: 30, cacheRead: 50, cacheWrite: 0 });
+    expect(totalUsage(acc)).toEqual({ input: 200, output: 30, cacheRead: 50, cacheWrite: 0 });
+  });
+
+  it('buckets codex cumulative totals under the current day and model', () => {
+    const acc = ingest([
+      meta,
+      { type: 'turn_context', payload: { model: 'gpt-5.6-sol' } },
+      tokenCount({ input_tokens: 250, cached_input_tokens: 50, output_tokens: 30 }),
+    ]);
+    const bucket = [...acc.usage.values()][0];
+    expect(bucket?.model).toBe('gpt-5.6-sol');
+    expect(bucket).toMatchObject({ input: 200, output: 30, cacheRead: 50 });
+  });
+
+  it('files each cumulative increment under the day it happened on', () => {
+    // The bug this guards: bucketing the raw cumulative would leave day 1
+    // holding 1000 and day 2 holding 1500 — 2500 booked against 1500 spent.
+    const before = localIso(2026, 8, 18, 23, 50);
+    const after = localIso(2026, 8, 19, 0, 10);
+    const acc = ingest([
+      meta,
+      { type: 'turn_context', payload: { model: 'gpt-5.6-sol' } },
+      tokenCount({ input_tokens: 1000, cached_input_tokens: 0, output_tokens: 0 }, before),
+      tokenCount({ input_tokens: 1500, cached_input_tokens: 0, output_tokens: 0 }, after),
+    ]);
+    expect(acc.usage.get(`${localDay(before)}|gpt-5.6-sol`)).toMatchObject({ input: 1000 });
+    expect(acc.usage.get(`${localDay(after)}|gpt-5.6-sol`)).toMatchObject({ input: 500 });
+    expect(totalUsage(acc)?.input).toBe(1500);
+  });
+
+  it('charges a mid-session model switch to the model that spent the tokens', () => {
+    const acc = ingest([
+      meta,
+      { type: 'turn_context', payload: { model: 'gpt-5.6-sol' } },
+      tokenCount({ input_tokens: 1000, cached_input_tokens: 0, output_tokens: 0 }),
+      { type: 'turn_context', payload: { model: 'gpt-5.6-mini' } },
+      tokenCount({ input_tokens: 1500, cached_input_tokens: 0, output_tokens: 0 }),
+    ]);
+    const byModel = Object.fromEntries([...acc.usage.values()].map((b) => [b.model, b.input]));
+    expect(byModel).toEqual({ 'gpt-5.6-sol': 1000, 'gpt-5.6-mini': 500 });
+  });
+
+  it('a cumulative that goes backwards never un-books or negates a bucket', () => {
+    const day1 = localIso(2026, 8, 18, 23, 50);
+    const day2 = localIso(2026, 8, 19, 0, 10);
+    const acc = adapter.newAccumulator(FILE);
+    const feed = (line: object) => adapter.ingestLine(JSON.stringify(line), acc);
+    feed(meta);
+    feed({ type: 'turn_context', payload: { model: 'gpt-5.6-sol' } });
+    feed(tokenCount({ input_tokens: 1000, cached_input_tokens: 0, output_tokens: 0 }, day1));
+
+    // A truncated file is replayed from the top by the tailer, so a cumulative
+    // can come back lower than one already booked — and land on a different
+    // day than the spend it is re-covering. A plain difference would push that
+    // day's bucket to -600 and claw back spend already counted.
+    feed(tokenCount({ input_tokens: 400, cached_input_tokens: 0, output_tokens: 0 }, day2));
+    for (const bucket of acc.usage.values()) expect(bucket.input).toBeGreaterThanOrEqual(0);
+    expect(totalUsage(acc)?.input).toBe(1000);
+
+    // Growth past the previous peak is new spend, and only the excess counts.
+    feed(tokenCount({ input_tokens: 1200, cached_input_tokens: 0, output_tokens: 0 }, day2));
+    expect(totalUsage(acc)?.input).toBe(1200);
+    expect(acc.usage.get(`${localDay(day2)}|gpt-5.6-sol`)?.input).toBe(200);
+  });
+
+  it('books usage seen before any turn_context rather than dropping it', () => {
+    const acc = ingest([meta, tokenCount({ input_tokens: 90, output_tokens: 10 })]);
+    expect(totalUsage(acc)).toMatchObject({ input: 90, output: 10 });
+  });
+
+  it('records the minute of each token_count', () => {
+    const acc = ingest([
+      meta,
+      tokenCount({ input_tokens: 1 }, '2026-08-17T10:05:00.000Z'),
+      tokenCount({ input_tokens: 2 }, '2026-08-17T10:05:30.000Z'),
+      tokenCount({ input_tokens: 3 }, '2026-08-17T10:07:00.000Z'),
+    ]);
+    const minutes = [...acc.activeMinutes.values()][0];
+    expect(minutes?.size).toBe(2);
   });
 
   it('classifies turn boundaries', () => {
@@ -127,6 +218,6 @@ describe('codex adapter', () => {
       JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', info: null } }),
       acc,
     );
-    expect(acc.tokens).toBeUndefined();
+    expect(acc.usage.size).toBe(0);
   });
 });

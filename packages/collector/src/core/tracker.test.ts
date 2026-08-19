@@ -5,7 +5,9 @@ import { describe, expect, it } from 'vitest';
 import { EXPIRE_MS } from './state.js';
 import { SessionTracker } from './tracker.js';
 import type { HarnessAdapter } from './types.js';
-import { newAccumulator } from './types.js';
+import { addUsage, newAccumulator } from './types.js';
+
+const AT = Date.parse('2026-08-19T05:30:00.000Z');
 
 /** A minimal line format: `<sessionId> <kind> [tokens]` */
 function fakeAdapter(root: string): HarnessAdapter {
@@ -18,10 +20,16 @@ function fakeAdapter(root: string): HarnessAdapter {
       const [id, kind, tokens] = line.split(' ');
       if (id) acc.sessionId = id;
       acc.cwd = '/home/dev/proj';
+      if (kind === 'sub') acc.usageOnly = true;
       if (kind === 'final') acc.lastEventKind = 'agent-final';
       else acc.lastEventKind = 'other';
       if (tokens) {
-        acc.tokens = { input: Number(tokens), output: 0, cacheRead: 0, cacheWrite: 0 };
+        addUsage(acc, AT, 'fake-model', {
+          input: Number(tokens),
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        });
       }
       acc.startedAtMs ??= 1000;
     },
@@ -50,6 +58,15 @@ describe('SessionTracker', () => {
       tokens: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 },
       lastActivityAt: 5000,
     });
+  });
+
+  it('keeps reading usage-only files but never shows them as sessions', () => {
+    const { root, tracker } = setup();
+    const file = join(root, 'sub.log');
+    writeFileSync(file, 's1 sub 250\n');
+    // Still read — the spend is real and appears in no other transcript.
+    expect(tracker.ingestFile(file, 5000)).toBe(true);
+    expect(tracker.snapshot(6000)).toEqual([]);
   });
 
   it('ignores files no adapter claims', () => {

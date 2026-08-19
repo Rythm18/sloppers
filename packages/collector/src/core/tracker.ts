@@ -3,6 +3,7 @@ import type { SessionSnapshot } from '@sloppers/protocol';
 import { deriveSessionState, EXPIRE_MS } from './state.js';
 import { newCursor, readAppended } from './tailer.js';
 import type { HarnessAdapter, SessionAccumulator, TailCursor } from './types.js';
+import { totalUsage } from './types.js';
 
 interface Entry {
   adapter: HarnessAdapter;
@@ -76,12 +77,18 @@ export class SessionTracker {
     const out: SessionSnapshot[] = [];
     for (const [filePath, entry] of this.entries) {
       const { acc } = entry;
-      if (acc.ignored || !acc.sessionId) continue;
+      // Expiry is checked before the display filters so entries that are
+      // never displayed still get reaped: usage-only sidechain accumulators
+      // keep growing buckets and minute sets for as long as they are held,
+      // and they outnumber displayable sessions better than ten to one.
       const quietMs = now - entry.lastActivityMs;
       if (quietMs >= EXPIRE_MS) {
         this.entries.delete(filePath);
         continue;
       }
+      // `usageOnly` files (subagent sidechains) borrow their parent's
+      // sessionId; showing them would duplicate the parent in the room.
+      if (acc.ignored || acc.usageOnly || !acc.sessionId) continue;
       // File mtimes carry fractional milliseconds; the wire wants integers.
       const snapshot: SessionSnapshot = {
         id: acc.sessionId,
@@ -94,7 +101,8 @@ export class SessionTracker {
       if (acc.cwd) snapshot.project = basename(acc.cwd);
       if (acc.branch) snapshot.branch = acc.branch;
       if (acc.model) snapshot.model = acc.model;
-      if (acc.tokens) snapshot.tokens = acc.tokens;
+      const tokens = totalUsage(acc);
+      if (tokens) snapshot.tokens = tokens;
       out.push(snapshot);
     }
     out.sort((a, b) => b.lastActivityAt - a.lastActivityAt);

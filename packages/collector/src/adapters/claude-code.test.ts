@@ -1,5 +1,7 @@
+import { dayOf } from '@sloppers/protocol';
 import { describe, expect, it } from 'vitest';
 import type { SessionAccumulator } from '../core/types.js';
+import { totalUsage } from '../core/types.js';
 import { createClaudeCodeAdapter } from './claude-code.js';
 
 const HOME = '/home/dev';
@@ -10,6 +12,17 @@ function ingest(lines: object[]): SessionAccumulator {
   const acc = adapter.newAccumulator(FILE);
   for (const line of lines) adapter.ingestLine(JSON.stringify(line), acc);
   return acc;
+}
+
+const localDay = (iso: string) => dayOf(Date.parse(iso));
+
+/**
+ * An ISO timestamp for a given *local* wall-clock moment. Bucketing is by
+ * local day, so day-boundary tests have to name local times or they only
+ * exercise the boundary in whichever timezone the test runner happens to use.
+ */
+function localIso(y: number, month: number, d: number, h: number, min: number): string {
+  return new Date(y, month - 1, d, h, min).toISOString();
 }
 
 const base = {
@@ -58,13 +71,133 @@ describe('claude-code adapter', () => {
     expect(acc.startedAtMs).toBe(Date.parse(base.timestamp));
   });
 
-  it('ignores sidechain (subagent) transcript files entirely', () => {
+  it('marks a sidechain file usage-only rather than discarding it', () => {
     const acc = ingest([
-      { ...base, isSidechain: true, type: 'user', message: {} },
-      assistant({ requestId: 'r1' }),
+      {
+        ...assistant({ requestId: 'r-sub', usage: { input_tokens: 42, output_tokens: 8 } }),
+        isSidechain: true,
+      },
     ]);
-    expect(acc.ignored).toBe(true);
-    expect(acc.tokens).toBeUndefined();
+    expect(acc.usageOnly).toBe(true);
+    expect(acc.ignored).toBe(false);
+    expect([...acc.usage.values()][0]?.input).toBe(42);
+  });
+
+  it('buckets usage by the day and model of each message', () => {
+    const day1 = localIso(2026, 8, 18, 23, 50);
+    const day2 = localIso(2026, 8, 19, 0, 10);
+    const acc = ingest([
+      {
+        ...base,
+        timestamp: day1,
+        type: 'assistant',
+        requestId: 'r1',
+        message: {
+          model: 'claude-opus-5',
+          content: [],
+          usage: { input_tokens: 100, output_tokens: 10 },
+        },
+      },
+      {
+        ...base,
+        timestamp: day2,
+        type: 'assistant',
+        requestId: 'r2',
+        message: {
+          model: 'claude-fable-5',
+          content: [],
+          usage: { input_tokens: 5, output_tokens: 1 },
+        },
+      },
+    ]);
+    const buckets = [...acc.usage.values()];
+    expect(buckets).toHaveLength(2);
+    const opus = buckets.find((b) => b.model === 'claude-opus-5');
+    expect(opus?.input).toBe(100);
+    expect(opus?.day).toBe(localDay(day1));
+    expect(buckets.find((b) => b.model === 'claude-fable-5')?.day).toBe(localDay(day2));
+  });
+
+  it('splits one model across days when a session runs through midnight', () => {
+    const before = localIso(2026, 8, 18, 23, 50);
+    const after = localIso(2026, 8, 19, 0, 10);
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    const acc = ingest([
+      {
+        ...base,
+        timestamp: before,
+        type: 'assistant',
+        requestId: 'r1',
+        message: { model: 'm', content: [], usage },
+      },
+      {
+        ...base,
+        timestamp: after,
+        type: 'assistant',
+        requestId: 'r2',
+        message: { model: 'm', content: [], usage },
+      },
+    ]);
+    expect([...acc.usage.values()].map((b) => b.day).sort()).toEqual([
+      localDay(before),
+      localDay(after),
+    ]);
+    expect(totalUsage(acc)).toMatchObject({ input: 200, output: 20 });
+  });
+
+  it('records the minute of each assistant message', () => {
+    const acc = ingest([
+      {
+        ...base,
+        timestamp: '2026-08-19T05:30:00.000Z',
+        type: 'assistant',
+        requestId: 'r1',
+        message: {
+          model: 'claude-opus-5',
+          content: [],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+    ]);
+    const minutes = [...acc.activeMinutes.values()][0];
+    expect(minutes?.size).toBe(1);
+  });
+
+  it('unwinds a re-reported request from the bucket it first landed in', () => {
+    // r1 is first reported on day 1 under `old`, then re-reported on day 2
+    // under `new`. Subtracting from the *new* key would leave day 1 holding
+    // r1's tokens forever and drive day 2 negative; r2 pins day 1 so the test
+    // can tell "unwound correctly" from "bucket dropped wholesale".
+    const day1 = localIso(2026, 8, 18, 10, 0);
+    const day2 = localIso(2026, 8, 19, 10, 0);
+    const acc = ingest([
+      {
+        ...base,
+        timestamp: day1,
+        type: 'assistant',
+        requestId: 'r1',
+        message: { model: 'old', content: [], usage: { input_tokens: 100, output_tokens: 10 } },
+      },
+      {
+        ...base,
+        timestamp: day1,
+        type: 'assistant',
+        requestId: 'r2',
+        message: { model: 'old', content: [], usage: { input_tokens: 7, output_tokens: 3 } },
+      },
+      {
+        ...base,
+        timestamp: day2,
+        type: 'assistant',
+        requestId: 'r1',
+        message: { model: 'new', content: [], usage: { input_tokens: 500, output_tokens: 50 } },
+      },
+    ]);
+    const first = acc.usage.get(`${localDay(day1)}|old`);
+    const second = acc.usage.get(`${localDay(day2)}|new`);
+    expect(first).toMatchObject({ input: 7, output: 3 });
+    expect(second).toMatchObject({ input: 500, output: 50 });
+    expect(totalUsage(acc)).toMatchObject({ input: 507, output: 53 });
   });
 
   it('prefers a custom title over the generated one', () => {
@@ -88,7 +221,7 @@ describe('claude-code adapter', () => {
       assistant({ requestId: 'r1', usage, content: [{ type: 'tool_use', name: 'Bash' }] }),
       assistant({ requestId: 'r2', usage }),
     ]);
-    expect(acc.tokens).toEqual({ input: 20, output: 40, cacheRead: 200, cacheWrite: 10 });
+    expect(totalUsage(acc)).toEqual({ input: 20, output: 40, cacheRead: 200, cacheWrite: 10 });
   });
 
   it('takes the latest usage when a request is re-reported', () => {
@@ -96,7 +229,7 @@ describe('claude-code adapter', () => {
       assistant({ requestId: 'r1', usage: { input_tokens: 1, output_tokens: 1 } }),
       assistant({ requestId: 'r1', usage: { input_tokens: 3, output_tokens: 9 } }),
     ]);
-    expect(acc.tokens).toEqual({ input: 3, output: 9, cacheRead: 0, cacheWrite: 0 });
+    expect(totalUsage(acc)).toEqual({ input: 3, output: 9, cacheRead: 0, cacheWrite: 0 });
   });
 
   it('skips synthetic assistant entries', () => {
@@ -104,7 +237,7 @@ describe('claude-code adapter', () => {
       assistant({ requestId: 'r1', model: '<synthetic>', usage: { input_tokens: 999 } }),
     ]);
     expect(acc.model).toBeUndefined();
-    expect(acc.tokens).toBeUndefined();
+    expect(acc.usage.size).toBe(0);
   });
 
   it('classifies who acts next from the last entry', () => {
@@ -143,7 +276,7 @@ describe('claude-code adapter', () => {
 
     const accA = fresh.newAccumulator(original);
     fresh.ingestLine(JSON.stringify(assistant({ requestId: 'shared-1', usage })), accA);
-    expect(accA.tokens).toMatchObject({ input: 100, output: 50 });
+    expect(totalUsage(accA)).toMatchObject({ input: 100, output: 50 });
 
     // Resume copies history (same requestIds) into a new file, then adds new work.
     const accB = fresh.newAccumulator(resumed);
@@ -154,9 +287,9 @@ describe('claude-code adapter', () => {
       ),
       accB,
     );
-    expect(accB.tokens).toMatchObject({ input: 7, output: 3 });
+    expect(totalUsage(accB)).toMatchObject({ input: 7, output: 3 });
     // The original file's totals are untouched.
-    expect(accA.tokens).toMatchObject({ input: 100, output: 50 });
+    expect(totalUsage(accA)).toMatchObject({ input: 100, output: 50 });
   });
 
   it('survives malformed lines', () => {
