@@ -101,11 +101,15 @@ describe('DeviceLinkModal', () => {
 
   it('stops ticking, and stops it even for a link that was dead on arrival', () => {
     // "Stops counting" is a claim about the timer, not about the text — the
-    // text is gated on `expired` and would look identical either way. A tab
-    // in the background has its intervals throttled to roughly once a minute,
-    // so the tick that lands exactly on zero is one this must not wait for.
-    // A live interval re-arms itself, so it can never leave the queue empty
-    // however far the clock is wound on. Zero here means it really stopped.
+    // text is gated on `expired` and would look identical either way. A live
+    // interval re-arms itself, so it can never leave the queue empty however
+    // far the clock is wound on. Zero here means it really stopped.
+    //
+    // Fake timers fire every intermediate tick, so this first case lands on
+    // exactly zero and would pass against a `=== 0` guard too. It is the dead
+    // link below that pins `<= 0`: a real backgrounded tab is throttled to
+    // roughly once a minute and skips clean over zero, which is the case that
+    // one stands in for.
     render(<DeviceLinkModal />);
     mint(2_000);
     act(() => vi.advanceTimersByTime(3_000));
