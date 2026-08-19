@@ -1,4 +1,5 @@
 import { randomBytes, randomInt } from 'node:crypto';
+import { AVATAR_IDS } from '@sloppers/protocol';
 
 /**
  * A workspace's permanent identity. Random rather than derived from the
@@ -48,4 +49,14 @@ export function roomSuffix(): string {
 
 export function relinkToken(): string {
   return randomBytes(24).toString('hex');
+}
+
+/**
+ * A face for someone who did not pick one. Cosmetic, so `Math.random` is
+ * plenty — but it is server-chosen in both places a person can arrive
+ * (minting a member, and queueing at the door), so it lives here rather than
+ * twice.
+ */
+export function randomAvatar(): string {
+  return AVATAR_IDS[Math.floor(Math.random() * AVATAR_IDS.length)] ?? 'pixel';
 }

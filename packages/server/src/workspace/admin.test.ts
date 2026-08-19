@@ -10,6 +10,8 @@ import { WorkspaceManager } from './manager.js';
  */
 const fakeSocket = (readyState = 1) =>
   ({ readyState, OPEN: 1, send: () => {}, close: () => {}, once: () => {} }) as never;
+/** Stands in for the knocker's own connection finishing its join. */
+const noAdmit = () => {};
 
 function setup() {
   const db = openDb(':memory:');
@@ -196,8 +198,13 @@ describe('handleAdminOp', () => {
 
   it('admits one knock into a real member and turns another away', () => {
     const { manager, room, owner } = setup();
-    const waiting = room.knocks.add(fakeSocket(), 'theo', 'pixel');
-    const rejected = room.knocks.add(fakeSocket(), 'mallory', 'pixel');
+    // The knocker's own connection is what finishes the join, so admission
+    // has to reach it — not just write a member row.
+    const handedOver: string[] = [];
+    const waiting = room.knocks.add(fakeSocket(), 'theo', 'pixel', (m) => handedOver.push(m.id));
+    const rejected = room.knocks.add(fakeSocket(), 'mallory', 'pixel', (m) =>
+      handedOver.push(m.id),
+    );
 
     expect(
       handleAdminOp({ manager, room, actor: owner }, { kind: 'knock-admit', knockId: waiting.id })
@@ -205,6 +212,7 @@ describe('handleAdminOp', () => {
     ).toBe(true);
     const admitted = manager.memberByName(room.id, 'theo');
     expect(admitted?.role).toBe('member');
+    expect(handedOver).toEqual([admitted?.id]);
     expect(room.knocks.get(waiting.id)).toBeUndefined();
 
     expect(
@@ -225,7 +233,7 @@ describe('handleAdminOp', () => {
 
   it('refuses a knock nobody is behind any more, and drops it', () => {
     const { manager, room, owner } = setup();
-    const gone = room.knocks.add(fakeSocket(3 /* CLOSED */), 'theo', 'pixel');
+    const gone = room.knocks.add(fakeSocket(3 /* CLOSED */), 'theo', 'pixel', noAdmit);
 
     const result = handleAdminOp(
       { manager, room, actor: owner },
@@ -239,7 +247,7 @@ describe('handleAdminOp', () => {
 
   it('keeps a knocker queued when their name was taken while they waited', () => {
     const { manager, room, owner, plain } = setup();
-    const waiting = room.knocks.add(fakeSocket(), plain.displayName, 'pixel');
+    const waiting = room.knocks.add(fakeSocket(), plain.displayName, 'pixel', noAdmit);
 
     const result = handleAdminOp(
       { manager, room, actor: owner },

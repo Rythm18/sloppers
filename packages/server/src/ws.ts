@@ -8,6 +8,7 @@ import {
 } from '@sloppers/protocol';
 import { type WebSocket, WebSocketServer } from 'ws';
 import type { Db } from './db/index.js';
+import { randomAvatar } from './ids.js';
 import { type AdminResult, handleAdminOp } from './workspace/admin.js';
 import type { Room, WebClient } from './workspace/live.js';
 import type { MemberRecord, WorkspaceManager } from './workspace/manager.js';
@@ -202,6 +203,30 @@ function handleWeb(
   let client: WebClient | null = null;
   /** Who this socket joined as. Roles on it go stale; `handleAdminOp` re-reads. */
   let actor: MemberRecord | null = null;
+  /**
+   * The office this socket is queued at the door of, while it waits. A
+   * knocker is not a member: `room` stays null, so nothing downstream can
+   * move them, see them, or run an op on their behalf until they are let in.
+   */
+  let knockingAt: Room | null = null;
+
+  /**
+   * Adopt a member onto this socket. The one place a connection becomes a
+   * member's connection, so all three ways in — resume, create, and being
+   * admitted from the door — leave the socket in identical shape. The secret
+   * goes out only for a member minted just now, whose browser has nowhere
+   * else to learn it from.
+   */
+  const enterAs = (entered: Room, member: MemberRecord, secret?: string): void => {
+    room = entered;
+    actor = member;
+    knockingAt = null;
+    const joined: WebClient = { ws, memberId: member.id, present: true };
+    client = joined;
+    const world = entered.addWebClient(joined);
+    if (!world) return;
+    sendWeb(ws, secret ? { ...world, you: { ...world.you, memberSecret: secret } } : world);
+  };
 
   ws.on('message', (data) => {
     let raw: unknown;
@@ -217,7 +242,7 @@ function handleWeb(
     const msg = parsed.data;
 
     if (msg.type === 'join') {
-      if (client) return; // already joined
+      if (client || knockingAt) return; // already inside, or already at the door
       if (!deps.limiter.allow(ip)) {
         sendWeb(ws, { type: 'error', code: 'bad-join', message: 'too many joins; slow down' });
         return ws.close();
@@ -226,20 +251,20 @@ function handleWeb(
 
       if (msg.memberId && msg.memberSecret) {
         // Resume an existing identity; its member row knows its workspace.
+        // Never the door's business: `joinMode` decides who may become a
+        // member, and this one already is. Locking an office must not lock
+        // out the people inside it.
         const member = rooms.authMember(msg.memberId, msg.memberSecret);
         if (!member) {
           return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'unknown member' });
         }
-        room = rooms.roomById(member.workspaceId);
-        if (!room) {
+        const resumed = rooms.roomById(member.workspaceId);
+        if (!resumed) {
           return sendWeb(ws, { type: 'error', code: 'server-error', message: 'room unavailable' });
         }
         rooms.touchMember(member.id);
-        room.memberJoined(member);
-        actor = member;
-        client = { ws, memberId: member.id, present: true };
-        const world = room.addWebClient(client);
-        if (world) sendWeb(ws, world);
+        resumed.memberJoined(member);
+        enterAs(resumed, member);
         return;
       }
 
@@ -247,9 +272,10 @@ function handleWeb(
         return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'displayName required' });
       }
 
+      let target: Room | null;
       if (msg.createRoom) {
-        room = rooms.createRoom(msg.createRoom);
-        if (!room) {
+        target = rooms.createRoom(msg.createRoom);
+        if (!target) {
           return sendWeb(ws, {
             type: 'error',
             code: 'server-error',
@@ -257,8 +283,8 @@ function handleWeb(
           });
         }
       } else if (msg.roomCode) {
-        room = rooms.getRoom(msg.roomCode);
-        if (!room) {
+        target = rooms.getRoom(msg.roomCode);
+        if (!target) {
           return sendWeb(ws, {
             type: 'error',
             code: 'room-not-found',
@@ -273,9 +299,32 @@ function handleWeb(
         });
       }
 
-      const created = rooms.createMember(room.id, msg.displayName, msg.avatar);
+      // The door: what an arriving stranger meets, and the only place
+      // `joinMode` is consulted. Rebound to a const so the knock's callback
+      // below can close over an office that is certainly there.
+      const door = target;
+      if (door.settings.joinMode === 'locked') {
+        return sendWeb(ws, {
+          type: 'error',
+          code: 'workspace-locked',
+          message: 'this office is not accepting new people right now',
+        });
+      }
+      if (door.settings.joinMode === 'knock') {
+        // The name is deliberately not checked here — a knock writes nothing,
+        // and whoever holds a name can change between knocking and being let
+        // in. `knock-admit` checks it at the moment it would matter.
+        door.knocks.add(ws, msg.displayName, msg.avatar ?? randomAvatar(), (member) =>
+          enterAs(door, member, member.secret),
+        );
+        knockingAt = door;
+        sendWeb(ws, { type: 'knocking' });
+        door.broadcastKnocks();
+        return;
+      }
+
+      const created = rooms.createMember(door.id, msg.displayName, msg.avatar);
       if (created === 'name-taken') {
-        room = null;
         return sendWeb(ws, {
           type: 'error',
           code: 'name-taken',
@@ -283,14 +332,10 @@ function handleWeb(
         });
       }
       if (created === 'room-full') {
-        room = null;
         return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'this office is full' });
       }
-      room.memberJoined(created);
-      actor = created;
-      client = { ws, memberId: created.id, present: true };
-      const world = room.addWebClient(client);
-      if (world) sendWeb(ws, { ...world, you: { ...world.you, memberSecret: created.secret } });
+      door.memberJoined(created);
+      enterAs(door, created, created.secret);
       return;
     }
 
@@ -324,6 +369,12 @@ function handleWeb(
 
   ws.on('close', () => {
     if (room && client) room.removeWebClient(client);
+    if (knockingAt) {
+      // Someone who closed the tab is no longer at the door, but their knock
+      // would sit in the moderators' queue forever waiting to be answered.
+      knockingAt.knocks.removeBySocket(ws);
+      knockingAt.broadcastKnocks();
+    }
   });
 }
 

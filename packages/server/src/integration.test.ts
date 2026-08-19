@@ -1,4 +1,5 @@
 import {
+  type KnockView,
   type PairRedeemResponse,
   type ServerToWeb,
   serverToWebSchema,
@@ -266,6 +267,194 @@ describe('server integration', () => {
     expect((await owner.next((m) => m.type === 'roster')).type).toBe('roster');
     sam.send({ type: 'move', position: { x: 100, y: 100, dir: 'up', moving: false } });
     expect((await owner.next((m) => m.type === 'pos')).type).toBe('pos');
+  });
+
+  /** Flip an owner's office into a given join mode and wait for it to land. */
+  async function setJoinMode(
+    owner: WebClientHarness,
+    joinMode: 'link' | 'knock' | 'locked',
+  ): Promise<void> {
+    owner.send({
+      type: 'admin',
+      op: { kind: 'settings', settings: { joinMode, publicLeaderboard: false } },
+    });
+    await owner.next((m) => m.type === 'workspace');
+  }
+
+  /** A browser that turns up at the door of an office it was pointed at. */
+  async function arrive(roomCode: string, displayName: string): Promise<WebClientHarness> {
+    const visitor = new WebClientHarness(server.port);
+    clients.push(visitor);
+    await visitor.open();
+    visitor.send({ type: 'join', roomCode, displayName });
+    return visitor;
+  }
+
+  /** The person at the front of the queue, as it reaches someone who can answer. */
+  async function firstKnock(moderator: WebClientHarness): Promise<KnockView> {
+    const queue = await moderator.next((m) => m.type === 'knocks');
+    if (queue.type !== 'knocks') throw new Error('unreachable');
+    const first = queue.knocks[0];
+    if (!first) throw new Error('the queue arrived empty');
+    return first;
+  }
+
+  it('knock mode holds a joiner until a moderator admits them', async () => {
+    const { client: owner, world } = await join('ridham');
+    owner.send({
+      type: 'admin',
+      op: { kind: 'settings', settings: { joinMode: 'knock', publicLeaderboard: false } },
+    });
+    await owner.next((m) => m.type === 'workspace');
+
+    const visitor = new WebClientHarness(server.port);
+    clients.push(visitor);
+    await visitor.open();
+    visitor.send({ type: 'join', roomCode: world.roomCode, displayName: 'sam' });
+    expect((await visitor.next((m) => m.type === 'knocking')).type).toBe('knocking');
+
+    const knock = await firstKnock(owner);
+    owner.send({ type: 'admin', op: { kind: 'knock-admit', knockId: knock.id } });
+    const admitted = await visitor.next((m) => m.type === 'world');
+    expect(admitted.type).toBe('world');
+  });
+
+  it('locked mode refuses new members but still resumes existing ones', async () => {
+    const { client: owner, world } = await join('ridham');
+    owner.send({
+      type: 'admin',
+      op: { kind: 'settings', settings: { joinMode: 'locked', publicLeaderboard: false } },
+    });
+    await owner.next((m) => m.type === 'workspace');
+
+    const stranger = new WebClientHarness(server.port);
+    clients.push(stranger);
+    await stranger.open();
+    stranger.send({ type: 'join', roomCode: world.roomCode, displayName: 'sam' });
+    const err = await stranger.next((m) => m.type === 'error');
+    expect(err.type === 'error' && err.code).toBe('workspace-locked');
+
+    // Locking the door must not lock in the people already inside: resume is
+    // a different branch, and only the create branch consults joinMode.
+    const resumed = new WebClientHarness(server.port);
+    clients.push(resumed);
+    await resumed.open();
+    resumed.send({
+      type: 'join',
+      memberId: world.you.memberId,
+      memberSecret: world.you.memberSecret,
+    });
+    const back = (await resumed.next((m) => m.type === 'world')) as WebWorld;
+    expect(back.you.memberId).toBe(world.you.memberId);
+  });
+
+  it('a rotated invite kills the old link while members keep resuming', async () => {
+    const { client: owner, world } = await join('ridham');
+    owner.send({ type: 'admin', op: { kind: 'rotate-invite' } });
+    const updated = await owner.next((m) => m.type === 'workspace');
+    if (updated.type !== 'workspace') throw new Error('unreachable');
+    expect(updated.roomCode).not.toBe(world.roomCode);
+
+    const stale = new WebClientHarness(server.port);
+    clients.push(stale);
+    await stale.open();
+    stale.send({ type: 'join', roomCode: world.roomCode, displayName: 'sam' });
+    const err = await stale.next((m) => m.type === 'error');
+    expect(err.type === 'error' && err.code).toBe('room-not-found');
+
+    // The rotation revoked a link, not an identity.
+    const resumed = new WebClientHarness(server.port);
+    clients.push(resumed);
+    await resumed.open();
+    resumed.send({
+      type: 'join',
+      memberId: world.you.memberId,
+      memberSecret: world.you.memberSecret,
+    });
+    const back = (await resumed.next((m) => m.type === 'world')) as WebWorld;
+    expect(back.roomCode).toBe(updated.roomCode);
+  });
+
+  it('an admitted knocker becomes an ordinary member: seen, mobile, and single', async () => {
+    const { client: owner, world } = await join('ridham');
+    await setJoinMode(owner, 'knock');
+    const visitor = await arrive(world.roomCode, 'sam');
+    await visitor.next((m) => m.type === 'knocking');
+
+    // Waiting is not membership: nothing this socket sends is acted on until
+    // somebody opens the door, so an op a member would be answered about
+    // draws no answer at all.
+    visitor.send({ type: 'move', position: { x: 10, y: 10, dir: 'up', moving: true } });
+    visitor.send({ type: 'admin', op: { kind: 'roster' } });
+
+    const knock = await firstKnock(owner);
+    expect(knock.displayName).toBe('sam');
+    owner.send({ type: 'admin', op: { kind: 'knock-admit', knockId: knock.id } });
+
+    // Everything the server said between the knock and the world, in order.
+    const whileWaiting: string[] = [];
+    let admitted: ServerToWeb;
+    do {
+      admitted = await visitor.next();
+      whileWaiting.push(admitted.type);
+    } while (admitted.type !== 'world');
+    expect(whileWaiting).not.toContain('roster');
+    expect(whileWaiting).not.toContain('error');
+    if (admitted.type !== 'world') throw new Error('unreachable');
+    // Minted just now, so the secret has to travel with the world.
+    expect(admitted.you.memberSecret).toBeTruthy();
+
+    // They are a real member of the office now: they move, and it is seen.
+    visitor.send({ type: 'move', position: { x: 300, y: 200, dir: 'left', moving: true } });
+    const pos = await owner.next((m) => m.type === 'pos');
+    expect(pos.type === 'pos' && pos.memberId).toBe(admitted.you.memberId);
+
+    // And joining again on the same socket must not mint a second member.
+    // The move behind it lands afterwards, so the assertion is not racing a
+    // join the server has not looked at yet.
+    visitor.send({ type: 'join', roomCode: world.roomCode, displayName: 'sam the second' });
+    visitor.send({ type: 'move', position: { x: 301, y: 200, dir: 'left', moving: true } });
+    const after = await owner.next((m) => m.type === 'pos');
+    expect(after.type === 'pos' && after.position.x).toBe(301);
+    const preview = await fetch(`http://127.0.0.1:${server.port}/api/rooms/${world.roomCode}`);
+    expect(await preview.json()).toEqual({ name: 'the lab', memberCount: 2 });
+  });
+
+  it('keeps the door queue to the people who can answer it', async () => {
+    const { client: owner, world } = await join('ridham');
+    const { client: nina } = await join('nina');
+    await setJoinMode(owner, 'knock');
+    await nina.next((m) => m.type === 'workspace');
+
+    const visitor = await arrive(world.roomCode, 'sam');
+    await visitor.next((m) => m.type === 'knocking');
+    const knock = await firstKnock(owner);
+    owner.send({ type: 'admin', op: { kind: 'knock-admit', knockId: knock.id } });
+
+    // A plain member has no business knowing who is at the door. Everything
+    // nina heard between the knock and the new arrival, with no queue in it —
+    // a queue push would have landed before the member it let in.
+    const heard: string[] = [];
+    let msg: ServerToWeb;
+    do {
+      msg = await nina.next();
+      heard.push(msg.type);
+    } while (msg.type !== 'member');
+    expect(heard).not.toContain('knocks');
+  });
+
+  it('a knocker who gives up disappears from the queue', async () => {
+    const { client: owner, world } = await join('ridham');
+    await setJoinMode(owner, 'knock');
+    const visitor = await arrive(world.roomCode, 'sam');
+    await visitor.next((m) => m.type === 'knocking');
+
+    const queued = await owner.next((m) => m.type === 'knocks');
+    expect(queued.type === 'knocks' && queued.knocks).toHaveLength(1);
+
+    visitor.close();
+    const emptied = await owner.next((m) => m.type === 'knocks');
+    expect(emptied.type === 'knocks' && emptied.knocks).toHaveLength(0);
   });
 
   it('pair → redeem → collector snapshot → browser sees sessions and leaderboard', async () => {

@@ -313,12 +313,16 @@ describe('WorkspaceManager', () => {
     // because the close handler that would clean up has already fired.
     const room = office();
     const closed = { readyState: 3, OPEN: 1, send: () => {}, close: () => {}, once: () => {} };
-    const view = room.knocks.add(closed as never, 'theo', 'pixel');
+    let admitted = false;
+    const view = room.knocks.add(closed as never, 'theo', 'pixel', () => {
+      admitted = true;
+    });
     const pending = room.knocks.get(view.id);
     if (!pending) throw new Error('knock not registered');
 
     expect(room.admitKnock(pending)).toBeNull();
     expect(manager.memberByName(room.id, 'theo')).toBeNull();
+    expect(admitted).toBe(false);
   });
 
   it('rename and settings write through to the live room', () => {

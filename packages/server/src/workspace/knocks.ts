@@ -1,9 +1,22 @@
 import { randomBytes } from 'node:crypto';
 import type { KnockView } from '@sloppers/protocol';
 import type { WebSocket } from 'ws';
+import type { MemberRecord } from './manager.js';
+
+/**
+ * What the waiting connection does the moment the door opens.
+ *
+ * It rides on the knock because only that socket's own message handler can
+ * adopt the member it was just handed: the state that `move`, `activity` and
+ * `admin` read is per-connection and invisible from here. Without it an
+ * admitted knocker would be in the world but deaf — and a second `join` on
+ * that socket would mint them all over again.
+ */
+export type AdmitHandler = (member: MemberRecord) => void;
 
 export interface Knock extends KnockView {
   ws: WebSocket;
+  admit: AdmitHandler;
 }
 
 /**
@@ -24,13 +37,14 @@ export function knockIsLive(knock: Knock): boolean {
 export class KnockRegistry {
   private knocks = new Map<string, Knock>();
 
-  add(ws: WebSocket, displayName: string, avatar: string): KnockView {
+  add(ws: WebSocket, displayName: string, avatar: string, admit: AdmitHandler): KnockView {
     const knock: Knock = {
       id: `k_${randomBytes(8).toString('hex')}`,
       displayName,
       avatar,
       requestedAt: Date.now(),
       ws,
+      admit,
     };
     this.knocks.set(knock.id, knock);
     return { id: knock.id, displayName, avatar, requestedAt: knock.requestedAt };

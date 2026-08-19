@@ -1,6 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
 import {
-  AVATAR_IDS,
   defaultWorkspaceSettings,
   type MemberRole,
   type MemberStatus,
@@ -9,7 +8,7 @@ import {
   type WorkspaceSettings,
 } from '@sloppers/protocol';
 import type { Db } from '../db/index.js';
-import { memberId, memberSecret, roomSuffix, workspaceId } from '../ids.js';
+import { memberId, memberSecret, randomAvatar, roomSuffix, workspaceId } from '../ids.js';
 import { TokenLedger } from '../ledger.js';
 import { Room } from './live.js';
 
@@ -227,7 +226,7 @@ export class WorkspaceManager {
       workspaceId: workspace,
       secret: memberSecret(),
       displayName,
-      avatar: avatar ?? AVATAR_IDS[Math.floor(Math.random() * AVATAR_IDS.length)] ?? 'pixel',
+      avatar: avatar ?? randomAvatar(),
       role: owned === undefined ? 'owner' : 'member',
       status: 'active',
     };

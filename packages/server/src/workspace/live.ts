@@ -260,8 +260,11 @@ export class Room {
   }
 
   /**
-   * Let a waiting knocker in: mint their member, hand their socket the world,
-   * and treat it as an ordinary browser from here on.
+   * Let a waiting knocker in: mint their member, then hand them back to their
+   * own connection, which finishes the join exactly the way an ordinary
+   * joiner's does. Nothing about the admitted socket is special afterwards —
+   * it moves, it is seen, it can run admin ops if its role allows, and it
+   * cannot join a second time.
    *
    * The name is only checked now, not when they knocked — someone else may
    * have taken it while they waited, or the office may have filled up. Either
@@ -286,12 +289,10 @@ export class Room {
       return null;
     }
     this.memberJoined(created);
-    const client: WebClient = { ws: knock.ws, memberId: created.id, present: true };
-    const world = this.addWebClient(client);
-    if (world) send(knock.ws, { ...world, you: { ...world.you, memberSecret: created.secret } });
-    // The join handler put this socket down as a knocker and moved on, so
-    // nothing else would ever take the client back out of the world.
-    knock.ws.once('close', () => this.removeWebClient(client));
+    // Everything socket-shaped — sending the world, registering the client,
+    // arming the close handler — belongs to the connection that knocked, not
+    // to the moderator's op that got us here.
+    knock.admit(created);
     return created;
   }
 
