@@ -69,6 +69,24 @@ describe('SessionTracker', () => {
     expect(tracker.snapshot(6000)).toEqual([]);
   });
 
+  it('expires quiet files that are never displayed, not just displayed ones', () => {
+    const { root, tracker } = setup();
+    const shown = join(root, 'main.log');
+    const hidden = join(root, 'sub.log');
+    writeFileSync(shown, 's1 work 100\n');
+    writeFileSync(hidden, 's2 sub 250\n');
+    tracker.ingestFile(shown, 1000);
+    tracker.ingestFile(hidden, 1000);
+    expect(tracker.trackedFiles()).toHaveLength(2);
+
+    // A usage-only entry never reaches the projection loop's body, so if
+    // expiry were checked after the display filters it would be held — and
+    // keep growing buckets and minute sets — for the life of the process.
+    // Sidechains outnumber displayable sessions better than ten to one.
+    tracker.snapshot(1000 + EXPIRE_MS);
+    expect(tracker.trackedFiles()).toEqual([]);
+  });
+
   it('ignores files no adapter claims', () => {
     const { root, tracker } = setup();
     const file = join(root, 'notes.txt');

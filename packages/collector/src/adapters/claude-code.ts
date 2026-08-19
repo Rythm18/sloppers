@@ -82,10 +82,44 @@ function entryMs(entry: Record<string, unknown>, acc: SessionAccumulator): numbe
   return acc.startedAtMs ?? Date.now();
 }
 
-export function createClaudeCodeAdapter(home: string = homedir()): HarnessAdapter {
+/**
+ * Ceiling on the resume-dedup index. It holds one entry per distinct
+ * requestId the daemon has ever seen, which grows for as long as the process
+ * lives — and now grows 2.3x faster, since sidechain requests are no longer
+ * thrown away at the first line.
+ *
+ * 100k is a ceiling, not a working size: the busiest single day in 49 active
+ * days of local transcripts produced 2939 distinct requestIds, and the
+ * heaviest 30-day window 31225, so eviction is roughly three months of
+ * *uninterrupted* uptime away. At ~150 bytes an entry (a 28-character id
+ * plus a Map slot; the file path is a shared reference, not a copy) the cap
+ * bounds this at ~15MB.
+ *
+ * Evicting the oldest is safe because ownership only has to outlive the file
+ * that claimed it: the tracker drops a transcript 30 minutes (`EXPIRE_MS`)
+ * after it goes quiet, so an id old enough to be evicted here belongs to a
+ * file nothing is reporting on any more.
+ */
+const MAX_TRACKED_REQUESTS = 100_000;
+
+export function createClaudeCodeAdapter(
+  home: string = homedir(),
+  maxTrackedRequests: number = MAX_TRACKED_REQUESTS,
+): HarnessAdapter {
   const root = join(home, '.claude', 'projects');
   /** requestId → transcript file that first reported it (resume dedup). */
   const requestOwner = new Map<string, string>();
+  /** Claim `requestId` for `owner`, evicting the oldest claim past the cap. */
+  const remember = (requestId: string, owner: string) => {
+    requestOwner.set(requestId, owner);
+    // Map iterates in insertion order, and re-setting an existing key does
+    // not reorder it, so the first key is always the oldest claim.
+    while (requestOwner.size > maxTrackedRequests) {
+      const oldest = requestOwner.keys().next().value;
+      if (oldest === undefined) break;
+      requestOwner.delete(oldest);
+    }
+  };
   return {
     id: 'claude-code',
     roots: () => [root],
@@ -151,7 +185,7 @@ export function createClaudeCodeAdapter(home: string = homedir()): HarnessAdapte
               // so the minute is recorded even for a resume copy.
               markMinute(acc, ms);
               const owner = requestOwner.get(requestId) ?? acc.filePath;
-              requestOwner.set(requestId, owner);
+              remember(requestId, owner);
               if (owner === acc.filePath) {
                 const s = scratchOf(acc);
                 const next = toTotals(usage);

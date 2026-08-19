@@ -292,6 +292,31 @@ describe('claude-code adapter', () => {
     expect(totalUsage(accA)).toMatchObject({ input: 100, output: 50 });
   });
 
+  it('bounds the resume-dedup index, evicting the oldest claim first', () => {
+    // The index holds one entry per distinct requestId for the life of the
+    // process, and sidechains now feed it too. Cap of 3 here; 100k in
+    // production, which is ~3 months of uninterrupted uptime away.
+    const capped = createClaudeCodeAdapter(HOME, 3);
+    const usage = { input_tokens: 10, output_tokens: 1 };
+    const first = `${HOME}/.claude/projects/-home-dev-myapp/first.jsonl`;
+    const accA = capped.newAccumulator(first);
+    for (const requestId of ['a', 'b', 'c', 'd']) {
+      capped.ingestLine(JSON.stringify(assistant({ requestId, usage })), accA);
+    }
+    expect(totalUsage(accA)).toMatchObject({ input: 40, output: 4 });
+
+    const accB = capped.newAccumulator(`${HOME}/.claude/projects/-home-dev-myapp/second.jsonl`);
+    // 'd' is one of the 3 most recent claims, so the first file still owns it
+    // and a resumed copy does not double-count it.
+    capped.ingestLine(JSON.stringify(assistant({ requestId: 'd', usage })), accB);
+    expect(totalUsage(accB)).toBeUndefined();
+    // 'a' was evicted as the oldest, so it can be claimed again. That is the
+    // deliberate cost of the bound, paid only by ids far older than the 30
+    // minutes it takes the tracker to forget the file that claimed them.
+    capped.ingestLine(JSON.stringify(assistant({ requestId: 'a', usage })), accB);
+    expect(totalUsage(accB)).toMatchObject({ input: 10, output: 1 });
+  });
+
   it('survives malformed lines', () => {
     const acc = adapter.newAccumulator(FILE);
     adapter.ingestLine('{"broken', acc);
