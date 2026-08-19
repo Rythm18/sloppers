@@ -9,6 +9,7 @@ import { builtinAdapters } from './adapters/index.js';
 import {
   type CollectorConfig,
   configDir,
+  isCatchAll,
   loadConfig,
   matchesPairing,
   type PairingConfig,
@@ -154,23 +155,47 @@ export function buildDirtySnapshot(
 }
 
 /**
- * Which workspace each session belongs to: the first pairing in the list
+ * The order routing actually considers pairings in: the ones that constrain
+ * a directory first, in config order, then the catch-alls, in config order.
+ *
+ * Without this, first-match-wins has a trap every existing user walks into on
+ * their very first attempt. A `sloppers@0.1.1` config upgrades to exactly one
+ * catch-all pairing, so the moment someone pairs a second office with
+ * `~/work/**`, the inherited `**` sits above it and takes every session; the
+ * new workspace connects, stays connected, and shows nothing forever. The
+ * only remedy would be hand-editing JSON, for the most ordinary next step
+ * there is.
+ *
+ * Demoting catch-alls costs nothing, because a pattern that matches
+ * everything can never be the more specific answer: whatever it would have
+ * won, it wins by claiming the whole filesystem, which is the definition of a
+ * fallback. Among specific patterns the config order is still the whole rule
+ * — nothing about one being narrower earns it a session — so a person can
+ * still reason about their config top to bottom, with "catch-alls are the
+ * fallback" as the single extra sentence.
+ *
+ * Partitioning rather than sorting, so the relative order inside each group
+ * is preserved by construction: two catch-alls keep the order they were
+ * written in, and so do two specific pairings.
+ */
+export function routingOrder(pairings: readonly PairingConfig[]): PairingConfig[] {
+  return [
+    ...pairings.filter((pairing) => !isCatchAll(pairing)),
+    ...pairings.filter((pairing) => isCatchAll(pairing)),
+  ];
+}
+
+/**
+ * Which workspace each session belongs to: the first pairing in routing order
  * whose `match` globs contain its `cwd` takes it, and no other pairing sees
  * it. Every pairing gets an entry, including the ones that claimed nothing —
  * a workspace with no live sessions still has to be *sent* an empty snapshot
  * or its office keeps showing whatever it last saw.
  *
- * First match wins, in the order the config lists the pairings, and nothing
- * about a pattern being narrower earns it a session: the ordering is the
- * whole rule, so a person can reason about it by reading their config top to
- * bottom. Overlap is expected and fine — a catch-all last is the natural way
- * to write "everything else goes here" — but a catch-all *first* swallows
- * everything, which is why `sloppers share` warns about exactly that.
- *
  * A session whose cwd is unknown is treated as the empty path, so only a
- * catch-all `**` claims it. That is deliberately the 0.1.1 behaviour: the
- * single pairing an upgraded v1 config produces is a catch-all, so a session
- * whose harness never wrote a cwd keeps being shared exactly as before.
+ * catch-all claims it. That is deliberately the 0.1.1 behaviour: the single
+ * pairing an upgraded v1 config produces is a catch-all, so a session whose
+ * harness never wrote a cwd keeps being shared exactly as before.
  *
  * Generic in the session type because routing only ever reads `cwd`: the
  * daemon passes `RoutableSession`s, and nothing here can see — let alone
@@ -181,9 +206,12 @@ export function routeSessions<T extends { cwd?: string | undefined }>(
   pairings: readonly PairingConfig[],
 ): Map<PairingConfig, T[]> {
   const routed = new Map<PairingConfig, T[]>();
+  // Seeded in config order so the map reads the way the file does; the
+  // ordered list below is what actually decides a winner.
   for (const pairing of pairings) routed.set(pairing, []);
+  const ordered = routingOrder(pairings);
   for (const session of sessions) {
-    const winner = pairings.find((pairing) => matchesPairing(pairing, session.cwd ?? ''));
+    const winner = ordered.find((pairing) => matchesPairing(pairing, session.cwd ?? ''));
     if (winner) routed.get(winner)?.push(session);
   }
   return routed;

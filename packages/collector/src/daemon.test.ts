@@ -14,6 +14,7 @@ import {
   type Daemon,
   MinuteDirtyTracker,
   routeSessions,
+  routingOrder,
   standDownDecision,
   startDaemon,
   unroutedSessions,
@@ -86,26 +87,64 @@ describe('routeSessions', () => {
   });
 
   it('follows the configured order, not pattern specificity: the earlier pairing wins', () => {
-    // Both patterns match; nothing about `/work/**` being narrower earns it
-    // the session. Swapping the two swaps the winner, and that is the whole
-    // rule — first match wins, in the order the config lists them.
-    const broad = pairing(['**']);
-    const narrow = pairing(['/work/**']);
-    const sessions = [{ id: 's1', cwd: '/work/api' }] as never[];
+    // Both patterns match; nothing about `/work/api/**` being narrower earns
+    // it the session. Swapping the two swaps the winner, and among pairings
+    // that actually constrain a directory that is the whole rule.
+    const outer = pairing(['/work/**']);
+    const inner = pairing(['/work/api/**']);
+    const sessions = [{ id: 's1', cwd: '/work/api/src' }] as never[];
 
     expect(
-      routeSessions(sessions, [broad, narrow])
-        .get(broad)
+      routeSessions(sessions, [outer, inner])
+        .get(outer)
         ?.map((s) => s.id),
     ).toEqual(['s1']);
-    expect(routeSessions(sessions, [broad, narrow]).get(narrow)).toEqual([]);
+    expect(routeSessions(sessions, [outer, inner]).get(inner)).toEqual([]);
 
     expect(
-      routeSessions(sessions, [narrow, broad])
-        .get(narrow)
+      routeSessions(sessions, [inner, outer])
+        .get(inner)
         ?.map((s) => s.id),
     ).toEqual(['s1']);
-    expect(routeSessions(sessions, [narrow, broad]).get(broad)).toEqual([]);
+    expect(routeSessions(sessions, [inner, outer]).get(outer)).toEqual([]);
+  });
+
+  it('does not let an inherited catch-all starve a newly added specific pairing', () => {
+    // The shape every existing user hits on their very first attempt: a 0.1.1
+    // config upgrades to one catch-all pairing, and `sloppers share` appends
+    // the new one *after* it. Plain first-match-wins would hand every session
+    // to the inherited `**` and leave the new office empty forever, fixable
+    // only by hand-editing JSON. A catch-all claims everything, so it can
+    // never be the more specific answer: it is a fallback, and sorts behind
+    // anything that actually constrains a directory.
+    const inherited = pairing(['**']);
+    const added = pairing(['/work/**']);
+    const sessions = [
+      { id: 's1', cwd: '/work/api' },
+      { id: 's2', cwd: '/personal/blog' },
+    ] as never[];
+
+    const routed = routeSessions(sessions, [inherited, added]);
+    expect(routed.get(added)?.map((s) => s.id)).toEqual(['s1']);
+    // And the catch-all still takes everything left over — it is demoted,
+    // not disabled.
+    expect(routed.get(inherited)?.map((s) => s.id)).toEqual(['s2']);
+  });
+
+  it('keeps two catch-alls in the order they were written', () => {
+    const first = pairing(['**']);
+    const second = pairing(['***']);
+    const sessions = [{ id: 's1', cwd: '/anywhere' }] as never[];
+    expect(
+      routeSessions(sessions, [first, second])
+        .get(first)
+        ?.map((s) => s.id),
+    ).toEqual(['s1']);
+    expect(
+      routeSessions(sessions, [second, first])
+        .get(second)
+        ?.map((s) => s.id),
+    ).toEqual(['s1']);
   });
 
   it('routes a session whose cwd is unknown only to a catch-all pairing', () => {
@@ -134,6 +173,30 @@ describe('routeSessions', () => {
         .get(home)
         ?.map((s) => s.id),
     ).toEqual(['s1', 's2', 's3']);
+  });
+});
+
+describe('routingOrder', () => {
+  it('puts catch-alls behind every pairing that constrains a directory', () => {
+    const catchAll = pairing(['**']);
+    const work = pairing(['/work/**']);
+    const personal = pairing(['/personal/**']);
+    expect(routingOrder([catchAll, work, personal])).toEqual([work, personal, catchAll]);
+  });
+
+  it('is stable within each group, so config order still decides the rest', () => {
+    const a = pairing(['/a/**']);
+    const b = pairing(['/b/**']);
+    const one = pairing(['**']);
+    const two = pairing(['***']);
+    expect(routingOrder([one, a, two, b])).toEqual([a, b, one, two]);
+  });
+
+  it('leaves a list with no catch-all exactly as it was', () => {
+    const a = pairing(['/a/**']);
+    const b = pairing(['~/**']);
+    expect(routingOrder([a, b])).toEqual([a, b]);
+    expect(routingOrder([])).toEqual([]);
   });
 });
 
@@ -856,9 +919,12 @@ describe('startDaemon runs one client per pairing', () => {
     saveConfig(
       {
         version: 2,
+        // Written in the order a real upgrade produces: the inherited
+        // catch-all first, the workspace added later by `sloppers share
+        // --match` after it. Plain first-match-wins would starve the new one.
         pairings: [
-          pairingFor(work.port, [join(home, 'work', '**')], 'a'),
           pairingFor(personal.port, ['**'], 'b'),
+          pairingFor(work.port, [join(home, 'work', '**')], 'a'),
         ],
       },
       home,
@@ -866,8 +932,8 @@ describe('startDaemon runs one client per pairing', () => {
 
     daemon = startDaemon({ collectorVersion: 'test', home, log: () => {} });
 
-    // First match wins: `~/work/**` comes first, so the work office gets it
-    // and the catch-all office is told it has nothing.
+    // The specific pairing takes the session even though the catch-all is
+    // listed above it, and the catch-all office is told it has nothing.
     const claimed = await work.waitFor((m) => m.sessions.length === 1);
     expect(claimed.sessions[0]?.project).toBe('api');
     expect(claimed.sessions[0]?.activeMinutes?.length).toBe(1);

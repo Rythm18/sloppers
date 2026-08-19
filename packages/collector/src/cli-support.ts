@@ -1,6 +1,6 @@
 import { billedTokens, type SessionSnapshot, type Visibility } from '@sloppers/protocol';
 import pc from 'picocolors';
-import type { CollectorConfig, PairingConfig } from './config.js';
+import { type CollectorConfig, isCatchAll, type PairingConfig } from './config.js';
 import type { RoutableSession } from './core/types.js';
 import { routeSessions, unroutedSessions } from './daemon.js';
 
@@ -89,12 +89,18 @@ function describeSession(snapshot: SessionSnapshot): string {
  * no way to find out that a pattern is wrong. Their cwd is printed in full,
  * which is safe (this is the owner's own terminal, and it never reaches a
  * wire) and is exactly the information needed to fix the pattern.
+ *
+ * `configFilePath` is printed for the same reason: changing what a workspace
+ * claims means editing `match` in that file, and there is no command for it.
+ * Naming the path makes hand-editing a documented escape hatch instead of
+ * something a person has to guess at.
  */
 export function renderStatus(
   config: CollectorConfig,
   sessions: readonly RoutableSession[],
+  configFilePath: string,
 ): string[] {
-  const lines: string[] = [];
+  const lines: string[] = [`config   ${configFilePath}`, ''];
   const routed = routeSessions(sessions, config.pairings);
 
   config.pairings.forEach((pairing, index) => {
@@ -103,7 +109,10 @@ export function renderStatus(
       `workspace ${index + 1}  room ${pc.bold(pairing.roomCode)}  as ${pairing.displayName}`,
     );
     lines.push(`  server   ${pairing.server.httpUrl}`);
-    lines.push(`  match    ${pairing.match.join(', ')}`);
+    // A catch-all is the fallback whatever line it sits on, so say so here —
+    // otherwise an empty catch-all listed first reads like a bug.
+    const fallback = isCatchAll(pairing) ? pc.dim('  (fallback — claims whatever is left)') : '';
+    lines.push(`  match    ${pairing.match.join(', ')}${fallback}`);
     lines.push(`  sharing  ${pairing.paused ? pc.yellow('paused') : pc.green('on')}`);
     const hidden = (Object.entries(pairing.visibility) as [keyof Visibility, boolean][])
       .filter(([, shared]) => !shared)
@@ -135,7 +144,9 @@ export function renderStatus(
         `    ${describeSession(session.snapshot)}  ${pc.dim(session.cwd ?? '(directory unknown)')}`,
       );
     }
-    lines.push(pc.dim("  fix it with: sloppers share <code> --match '<glob>'"));
+    lines.push(
+      pc.dim('  fix it with: sloppers share <code> --match \'<glob>\', or edit "match" above'),
+    );
   }
   return lines;
 }

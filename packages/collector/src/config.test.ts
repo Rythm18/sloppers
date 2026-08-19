@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   addPairing,
+  isCatchAll,
   loadConfig,
   matchesPairing,
   newConfig,
@@ -200,6 +201,40 @@ describe('collector config', () => {
   });
 });
 
+describe('isCatchAll', () => {
+  it('recognises a pattern that constrains nothing, however it is spelled', () => {
+    // Decided by behaviour, not by the literal string `**`: these all match
+    // every path there is, so they are all fallbacks.
+    expect(isCatchAll({ match: ['**'] } as never)).toBe(true);
+    expect(isCatchAll({ match: ['***'] } as never)).toBe(true);
+    expect(isCatchAll({ match: ['*/**'] } as never)).toBe(true);
+    // An `or` across `match`, so one catch-all pattern makes the whole
+    // pairing a fallback whatever else it lists.
+    expect(isCatchAll({ match: ['~/work/**', '**'] } as never)).toBe(true);
+  });
+
+  it('does not treat a sweeping-looking pattern as universal when it is not', () => {
+    // `~/**` claims nothing under /srv or /tmp.
+    expect(isCatchAll({ match: ['~/**'] } as never)).toBe(false);
+    // `/**` is every path on POSIX and no path at all on Windows, and
+    // `matchesPairing` deliberately honours `\` as a separator — so calling
+    // it universal would claim more than the matcher itself does.
+    expect(isCatchAll({ match: ['/**'] } as never)).toBe(false);
+    // `**/` only matches paths that end in a separator.
+    expect(isCatchAll({ match: ['**/'] } as never)).toBe(false);
+    // A single `*` stops at a separator.
+    expect(isCatchAll({ match: ['*'] } as never)).toBe(false);
+    expect(isCatchAll({ match: ['~/work/**'] } as never)).toBe(false);
+    expect(isCatchAll({ match: [] } as never)).toBe(false);
+  });
+
+  it('accepts the empty cwd, since that is how an unknown directory routes', () => {
+    // `routeSessions` routes a session with no cwd as the empty path, and
+    // only a fallback may claim it — so a catch-all has to match it.
+    expect(matchesPairing({ match: ['**'] } as never, '')).toBe(true);
+  });
+});
+
 describe('shadowing', () => {
   it('reduces a pattern to the directory it stands for', () => {
     expect(samplePathFor('~/work/**')).toBe(`${homedir()}/work`);
@@ -210,11 +245,14 @@ describe('shadowing', () => {
     expect(samplePathFor('**')).toBe('');
   });
 
-  it('spots an earlier pairing that already claims everything a new one would', () => {
-    // Routing is first-match-wins, so a catch-all above a new workspace
+  it('spots a preceding pairing that already claims everything a new one would', () => {
+    // Routing is first-match-wins, so a pairing ahead of a new workspace
     // starves it: it connects, stays connected, and never gets a session.
+    // The caller passes only what actually precedes it in routing order — a
+    // demoted catch-all is not ahead of anything and never appears here.
+    const home = { match: ['~/**'], roomCode: 'first' } as never;
+    expect(shadowedBy([home], ['~/work/**'])).toBe(home);
     const catchAll = { match: ['**'], roomCode: 'first' } as never;
-    expect(shadowedBy([catchAll], ['~/work/**'])).toBe(catchAll);
     expect(shadowedBy([catchAll], ['**'])).toBe(catchAll);
   });
 

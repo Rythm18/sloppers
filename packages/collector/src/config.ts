@@ -241,6 +241,48 @@ export function matchesPairing(pairing: PairingConfig, cwd: string): boolean {
 }
 
 /**
+ * Directories spanning everything a session's `cwd` can be, used to decide
+ * whether a pairing constrains anything at all (see `isCatchAll`).
+ *
+ * Each probe is here to exclude a specific near-miss:
+ * - `''` — a harness that never reported a cwd. `routeSessions` routes such a
+ *   session as the empty path, so a fallback has to accept it.
+ * - `/` — the filesystem root, which a pattern needing at least one path
+ *   segment (`~/*`) rejects.
+ * - a POSIX path outside home — excludes `~/**`, which looks sweeping but
+ *   claims nothing under `/srv`, `/tmp`, or any other root-level tree.
+ * - a POSIX path inside home — the converse, so home is not treated as
+ *   special.
+ * - a Windows path — excludes `/**`, which is every path on POSIX but no path
+ *   at all on Windows. `matchesPairing` deliberately treats `\` as a
+ *   separator because the collector ships for Windows, so a rule that called
+ *   `/**` universal would be making a claim the matcher itself does not.
+ */
+function catchAllProbes(): string[] {
+  const home = homedir();
+  return ['', '/', '/srv/apps/api', `${home}/work/api`, 'C:\\Users\\dev\\work'];
+}
+
+/**
+ * Whether a pairing claims every directory there is — which makes it a
+ * fallback rather than a competitor, and is why `routingOrder` puts it last.
+ *
+ * Decided by behaviour, not by spelling: a pairing is a catch-all when it
+ * matches every probe above, so `**`, `***`, and a star followed by a
+ * separator and two stars all qualify, while `/**`, `~/**` and `**` followed
+ * by a separator do not. Keying on the literal string `**` would be both too
+ * narrow (missing equivalent spellings) and a lie about what the matcher does.
+ *
+ * The predicate is over the whole pairing, not one pattern, because
+ * `matchesPairing` is an `or` across `match`: a pairing listing both
+ * `~/work/**` and `**` claims everything, and is a fallback whatever else it
+ * mentions.
+ */
+export function isCatchAll(pairing: PairingConfig): boolean {
+  return catchAllProbes().every((probe) => matchesPairing(pairing, probe));
+}
+
+/**
  * A concrete directory standing in for everything a `match` glob claims:
  * the pattern with `~` expanded and truncated at its first wildcard. Used to
  * ask whether some *other* pairing already claims the same region.
@@ -258,11 +300,15 @@ export function samplePathFor(pattern: string): string {
 
 /**
  * The first of `earlier` that already claims every directory `match` would,
- * if any. Routing is first-match-wins over an ordered list, so a pairing
- * listed above a new one — a catch-all `**`, most often — silently starves
- * it: the new workspace connects, stays connected, and never receives a
- * single session. That is a confusing failure to discover from the outside,
- * so `sloppers share` says it out loud at the moment it becomes true.
+ * if any. Routing is first-match-wins, so a pairing ahead of a new one
+ * silently starves it: the new workspace connects, stays connected, and never
+ * receives a single session. That is a confusing failure to discover from the
+ * outside, so `sloppers share` says it out loud at the moment it becomes true.
+ *
+ * `earlier` must be the pairings that actually precede the new one in
+ * *routing* order, not config order — a catch-all sorts behind every specific
+ * pairing (see `routingOrder`), so an inherited `**` is not ahead of anything
+ * and must not be reported as shadowing it.
  */
 export function shadowedBy(
   earlier: readonly PairingConfig[],

@@ -105,20 +105,28 @@ describe('selectPairings', () => {
 });
 
 describe('renderStatus', () => {
+  const CONFIG_FILE = '/home/dev/.sloppers/config.json';
   const work = pairing({ roomCode: 'work-room', match: ['/work/**'] });
   const personal = pairing({ roomCode: 'personal-room', match: ['**'] });
   const routable = (snapshot: SessionSnapshot, cwd: string | undefined): RoutableSession => ({
     snapshot,
     cwd,
   });
+  const show = (cfg: CollectorConfig, sessions: RoutableSession[] = []) =>
+    plain(renderStatus(cfg, sessions, CONFIG_FILE)).join('\n');
+
+  it('names the config file, since editing a match pattern has no command', () => {
+    // The only way to change what a workspace claims is to edit `match` in
+    // this file. Printing the path makes that a documented escape hatch
+    // rather than something to guess at.
+    expect(show(config(work))).toContain(CONFIG_FILE);
+  });
 
   it('prints each workspace with its pattern and the sessions routed to it', () => {
-    const out = plain(
-      renderStatus(config(work, personal), [
-        routable(session({ id: 'a', project: 'api' }), '/work/api'),
-        routable(session({ id: 'b', project: 'blog' }), '/personal/blog'),
-      ]),
-    ).join('\n');
+    const out = show(config(work, personal), [
+      routable(session({ id: 'a', project: 'api' }), '/work/api'),
+      routable(session({ id: 'b', project: 'blog' }), '/personal/blog'),
+    ]);
     expect(out).toContain('workspace 1  room work-room');
     expect(out).toContain('match    /work/**');
     expect(out).toContain('workspace 2  room personal-room');
@@ -129,49 +137,50 @@ describe('renderStatus', () => {
     expect(workBlock).not.toContain('blog');
   });
 
+  it('marks a catch-all as the fallback, so an empty one does not read as a bug', () => {
+    // A catch-all sorts behind every specific pairing whatever line it is
+    // written on, so the listing has to say why it may be holding nothing.
+    const out = show(config(personal, work));
+    const catchAllBlock = out.slice(out.indexOf('workspace 1'), out.indexOf('workspace 2'));
+    expect(catchAllBlock).toContain('fallback');
+    expect(out.slice(out.indexOf('workspace 2'))).not.toContain('fallback');
+  });
+
   it('says so when a workspace has nothing routed to it', () => {
-    const out = plain(renderStatus(config(work), [])).join('\n');
-    expect(out).toContain('sessions none routed here');
+    expect(show(config(work))).toContain('sessions none routed here');
   });
 
   it('shows the sessions that match no workspace, with the directory to blame', () => {
     // The requirement: a session under no pattern is shared with nobody and
     // reported nowhere. Someone whose tokens stopped counting has to be able
     // to see why, so it is named here along with the cwd that missed.
-    const out = plain(
-      renderStatus(config(work), [
-        routable(session({ id: 'a', project: 'api' }), '/work/api'),
-        routable(session({ id: 'b', project: 'blog' }), '/personal/blog'),
-      ]),
-    ).join('\n');
+    const out = show(config(work), [
+      routable(session({ id: 'a', project: 'api' }), '/work/api'),
+      routable(session({ id: 'b', project: 'blog' }), '/personal/blog'),
+    ]);
     expect(out).toContain('1 live session(s) match no workspace');
     expect(out).toContain('/personal/blog');
     expect(out).toContain("sloppers share <code> --match '<glob>'");
   });
 
   it('says nothing about unrouted sessions when every session found a home', () => {
-    const out = plain(
-      renderStatus(config(personal), [routable(session({ project: 'api' }), '/work/api')]),
-    ).join('\n');
+    const out = show(config(personal), [routable(session({ project: 'api' }), '/work/api')]);
     expect(out).not.toContain('match no workspace');
   });
 
   it('reports no sessions at all separately from unrouted ones', () => {
-    const out = plain(renderStatus(config(work), [])).join('\n');
+    const out = show(config(work));
     expect(out).toContain('no live agent sessions found');
     expect(out).not.toContain('match no workspace');
   });
 
   it('shows each workspace’s own paused state and hidden fields', () => {
-    const out = plain(
-      renderStatus(
-        config(
-          pairing({ roomCode: 'a-room', paused: true }),
-          pairing({ roomCode: 'b-room', visibility: { ...defaultVisibility, tokens: false } }),
-        ),
-        [],
+    const out = show(
+      config(
+        pairing({ roomCode: 'a-room', paused: true }),
+        pairing({ roomCode: 'b-room', visibility: { ...defaultVisibility, tokens: false } }),
       ),
-    ).join('\n');
+    );
     expect(out).toContain('sharing  paused');
     expect(out).toContain('sharing  on');
     expect(out).toContain('hidden   tokens');

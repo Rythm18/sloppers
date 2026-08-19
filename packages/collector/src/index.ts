@@ -8,6 +8,7 @@ export {
   addPairing,
   type CollectorConfig,
   configPath,
+  isCatchAll,
   loadConfig,
   matchesPairing,
   newConfig,
@@ -25,5 +26,5 @@ export type {
 } from './core/types.js';
 export { applyVisibility } from './core/visibility.js';
 export { seedTracker, watchSessions } from './core/watcher.js';
-export { routeSessions, startDaemon, unroutedSessions } from './daemon.js';
+export { routeSessions, routingOrder, startDaemon, unroutedSessions } from './daemon.js';
 export { parseShareTarget, redeemPairingCode, wsUrlFor } from './net/pair.js';

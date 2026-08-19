@@ -10,6 +10,7 @@ import { describeTargets, parseShareArgs, renderStatus, selectPairings } from '.
 import {
   addPairing,
   type CollectorConfig,
+  configPath,
   loadConfig,
   type PairingConfig,
   saveConfig,
@@ -17,7 +18,7 @@ import {
 } from './config.js';
 import { SessionTracker } from './core/tracker.js';
 import { seedTracker } from './core/watcher.js';
-import { startDaemon } from './daemon.js';
+import { routingOrder, startDaemon } from './daemon.js';
 import { parseShareTarget, redeemPairingCode, wsUrlFor } from './net/pair.js';
 import { installService, serviceSupported, uninstallService } from './service/install.js';
 
@@ -44,9 +45,11 @@ usage:
   sloppers uninstall        remove auto-start (config stays; delete ~/.sloppers to forget)
 
 Pair more than once to share different directories with different offices.
-Each session goes to the first workspace whose --match claims its directory;
-[ws] names one by room code (default: all of them). \`sloppers status\` lists
-any session that matches none, since those are shared with nobody.
+Each session goes to the first workspace whose --match claims its directory,
+in config order — except a workspace matching everything, which is always the
+fallback. [ws] names one by room code (default: all of them). \`sloppers
+status\` lists any session that matches none, since those are shared with
+nobody, and prints the config file to edit a workspace's directories.
 
 Only derived status ever leaves this machine — never prompts, code, or files.
 Directory paths stay local too: the office sees a project name, never a path.
@@ -120,10 +123,13 @@ async function share(args: string[]): Promise<void> {
   );
   if (before.length > 0) {
     console.log(pc.dim(`  claiming ${patterns.join(', ')}`));
-    // First match wins, so a pairing listed above this one that already
-    // claims the same directories leaves it permanently empty. Say so now,
-    // rather than letting them wonder why the new office stays silent.
-    const shadow = shadowedBy(before, patterns);
+    // First match wins, so a pairing ahead of this one that already claims
+    // the same directories leaves it permanently empty. Say so now, rather
+    // than letting them wonder why the new office stays silent. "Ahead" is
+    // routing order, not config order: an inherited catch-all sorts behind
+    // this pairing and starves nothing, so it must not be reported.
+    const effective = routingOrder(next.pairings);
+    const shadow = shadowedBy(effective.slice(0, effective.indexOf(pairing)), patterns);
     if (shadow) {
       console.log(
         pc.yellow(
@@ -207,7 +213,7 @@ function status(): void {
   const adapters = builtinAdapters();
   const tracker = new SessionTracker(adapters);
   seedTracker(adapters, tracker);
-  for (const line of renderStatus(config, tracker.routableSnapshot(Date.now()))) {
+  for (const line of renderStatus(config, tracker.routableSnapshot(Date.now()), configPath())) {
     console.log(line);
   }
 }
