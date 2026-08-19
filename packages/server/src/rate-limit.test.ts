@@ -11,6 +11,23 @@ describe('TokenBucket', () => {
     expect(bucket.take(t0)).toBe(false);
     expect(bucket.take(t0 + 100)).toBe(true); // one token per 100ms at 10/s
   });
+
+  it('does not mint free tokens when the clock steps backward then resumes', () => {
+    const bucket = new TokenBucket(10, 3);
+    const t0 = 1_000_000;
+    expect(bucket.take(t0)).toBe(true);
+    expect(bucket.take(t0)).toBe(true);
+    expect(bucket.take(t0)).toBe(true); // burst spent, 0 tokens left
+    // A backward clock step (e.g. an NTP correction) is correctly refused —
+    // but must not retreat the bucket's notion of "last seen".
+    expect(bucket.take(t0 - 500_000)).toBe(false);
+    // 100ms after the *last legitimate* action earns exactly one token at
+    // 10/s. If the backward call above had retreated the clock, this call
+    // would instead see a bogus ~500,100ms gap and hand back the whole
+    // burst (3 tokens) instead of the one the real elapsed time earned.
+    expect(bucket.take(t0 + 100)).toBe(true); // the one token the real gap earned
+    expect(bucket.take(t0 + 100)).toBe(false); // and nothing more than that
+  });
 });
 
 describe('createMessageLimiter', () => {
@@ -61,6 +78,23 @@ describe('createMessageLimiter', () => {
     // still refused, but far enough from the first drain not to count.
     expect(limiter.allow('join', t0 + 11_000)).toBe(false); // drain #2, 11s later
     expect(limiter.abusive()).toBe(false);
+  });
+
+  it('does not let a backward clock step hide two drains that really landed close together', () => {
+    const limiter = createMessageLimiter();
+    const t0 = 9_000_000;
+    for (let i = 0; i < 5; i++) limiter.allow('join', t0); // exhausts the join burst
+    expect(limiter.allow('join', t0)).toBe(false); // drain #1, recorded at t0
+    // A backward-stepped clock produces another refusal (still empty), but
+    // if this retreated the recorded drain time, the *next* real drain would
+    // compute its gap against that stale, earlier mark.
+    expect(limiter.allow('join', t0 - 500_000)).toBe(false); // drain #2, bogus backward reading
+    // In real wall-clock terms this lands 1ms after drain #1 — sustained
+    // abuse, not a one-off. A retreated `latestDrainAt` would make the gap
+    // look like ~500 seconds and hide it; the fix keeps the recorded clock
+    // non-decreasing so it still reads as ~0-1ms.
+    expect(limiter.allow('join', t0 + 1)).toBe(false); // drain #3, real time resumes
+    expect(limiter.abusive()).toBe(true);
   });
 
   it('governs every kind in the client-to-server union', () => {

@@ -8,20 +8,31 @@
 /** Classic token bucket: refills continuously at `ratePerSecond`, caps at `burst`. */
 export class TokenBucket {
   private tokens: number;
-  private last: number;
+  // `null` until the first `take()` establishes the baseline. Seeding this
+  // from `Date.now()` at construction would make that seed compete with
+  // whatever clock the caller actually drives `take()` with — including a
+  // synthetic one, as every test here does — and the non-retreat guard
+  // below would then read the caller's very first real call as a backward
+  // step and refuse to ever move off the construction-time seed.
+  private last: number | null;
 
   constructor(
     private readonly ratePerSecond: number,
     private readonly burst: number,
   ) {
     this.tokens = burst;
-    this.last = Date.now();
+    this.last = null;
   }
 
   take(now: number = Date.now()): boolean {
-    const elapsedMs = Math.max(0, now - this.last);
+    const elapsedMs = this.last === null ? 0 : Math.max(0, now - this.last);
     this.tokens = Math.min(this.burst, this.tokens + (elapsedMs / 1000) * this.ratePerSecond);
-    this.last = now;
+    // Never let a backward step retreat the clock: `Date.now()` is not
+    // monotonic (NTP corrections happen on ordinary long-lived sockets), and
+    // if `last` retreated, the next legitimate call would compute elapsed
+    // time against that stale, earlier mark — refilling the bucket with
+    // tokens nobody's wait actually earned.
+    this.last = this.last === null ? now : Math.max(this.last, now);
     if (this.tokens < 1) return false;
     this.tokens -= 1;
     return true;
@@ -77,8 +88,15 @@ export function createMessageLimiter(): MessageLimiter {
   function allow(kind: MessageKind, now: number = Date.now()): boolean {
     const ok = buckets[kind].take(now);
     if (!ok) {
+      // Same non-retreating clock as `TokenBucket.take`, and for the same
+      // reason: if `latestDrainAt` ever moved backward, a drain that
+      // genuinely landed a moment later would compute a gap against that
+      // stale earlier mark instead of the real previous drain — inflating
+      // the apparent distance between two rapid drains past the abuse
+      // window and hiding the very pattern this is meant to catch.
+      const clamped = latestDrainAt === null ? now : Math.max(latestDrainAt, now);
       previousDrainAt = latestDrainAt;
-      latestDrainAt = now;
+      latestDrainAt = clamped;
     }
     return ok;
   }
