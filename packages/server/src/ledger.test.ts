@@ -15,15 +15,18 @@ const D18 = '2026-08-18';
 const D19 = '2026-08-19';
 const D20 = '2026-08-20';
 
+/** A minute before each day's noon: a session that plainly started that day. */
+const STARTED_18 = DAY_18 - 60_000;
+const STARTED_19 = TODAY_19 - 60_000;
+
 /**
- * `startedAt: 1` puts every session's start well before "today", which is the
- * interesting side of the seeding guard; tests that need a session that
- * plainly started today pass their own `startedAt`.
+ * Started today by default, which is the ordinary case; the seeding guard
+ * fires on sessions that started earlier, so those pass their own `startedAt`.
  */
 const baseSession = {
   harness: 'claude-code',
   state: 'working',
-  startedAt: 1,
+  startedAt: STARTED_19,
   lastActivityAt: 2,
 } as const;
 
@@ -95,14 +98,15 @@ describe('TokenLedger', () => {
     // Seen first on the 18th, so the session is already known and the seeding
     // guard below is out of the picture: both buckets are banked on their own
     // day, including the backfill onto a day that has already ended.
-    ledger.ingest('m1', [bucketed('s1', [bucket(D18, 'claude-opus-5', 60)])], DAY_18);
+    ledger.ingest('m1', [bucketed('s1', [bucket(D18, 'claude-opus-5', 60)], STARTED_18)], DAY_18);
     ledger.ingest(
       'm1',
       [
-        bucketed('s1', [
-          bucket(D18, 'claude-opus-5', 100, 10),
-          bucket(D19, 'claude-opus-5', 40, 4),
-        ]),
+        bucketed(
+          's1',
+          [bucket(D18, 'claude-opus-5', 100, 10), bucket(D19, 'claude-opus-5', 40, 4)],
+          STARTED_18,
+        ),
       ],
       TODAY_19,
     );
@@ -140,14 +144,18 @@ describe('TokenLedger', () => {
   });
 
   it('keeps a watermark per day for a session that runs across midnight', () => {
-    ledger.ingest('m1', [bucketed('s1', [bucket(D18, 'm', 100)])], DAY_18);
+    ledger.ingest('m1', [bucketed('s1', [bucket(D18, 'm', 100)], STARTED_18)], DAY_18);
     // Still running after midnight: yesterday's bucket is restated unchanged
     // and a fresh one opens for today.
-    ledger.ingest('m1', [bucketed('s1', [bucket(D18, 'm', 100), bucket(D19, 'm', 30)])], TODAY_19);
+    ledger.ingest(
+      'm1',
+      [bucketed('s1', [bucket(D18, 'm', 100), bucket(D19, 'm', 30)], STARTED_18)],
+      TODAY_19,
+    );
     // Late work attributed back to yesterday still lands on yesterday.
     ledger.ingest(
       'm1',
-      [bucketed('s1', [bucket(D18, 'm', 120), bucket(D19, 'm', 80)])],
+      [bucketed('s1', [bucket(D18, 'm', 120), bucket(D19, 'm', 80)], STARTED_18)],
       TODAY_19 + 1000,
     );
     expect(ledger.todayFor('m1', DAY_18).tokens.input).toBe(120);
@@ -206,10 +214,86 @@ describe('TokenLedger', () => {
   });
 
   it('banks a bucket dated ahead of the server rather than seeding it', () => {
-    // The mirror case: a collector east of the server legitimately reports
-    // tomorrow. Nothing about that looks like a replay.
+    // The server runs UTC (node:22-alpine, no TZ set anywhere). A collector
+    // east of UTC legitimately reports tomorrow. Nothing about that looks
+    // like a replay, and it is filed on the day the collector named.
     ledger.ingest('m1', [bucketed('s1', [bucket(D20, 'm', 90)])], TODAY_19);
     expect(ledger.todayFor('m1', new Date(2026, 7, 20, 12, 0).getTime()).tokens.input).toBe(90);
+  });
+
+  it('absorbs a resume whose replay is dated on the server’s own today', () => {
+    // The mirror of the case a day comparison catches, and the reason there
+    // is no day comparison. A collector east of UTC stamps work done in the
+    // server's evening with what is already tomorrow locally, so a replay of
+    // it carries the server's *today* as its bucket day — `day < today` is
+    // false and the whole replay is banked a second time.
+    ledger.ingest('m1', [bucketed('s-orig', [bucket(D19, 'm', 1_000_000)], STARTED_18)], DAY_18);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1_000_000);
+
+    // Days later, past any claim the collector still holds: a new session id
+    // over the same replayed bucket.
+    ledger.ingest(
+      'm1',
+      [bucketed('s-resume', [bucket(D19, 'm', 1_000_000)], STARTED_18)],
+      TODAY_19,
+    );
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1_000_000);
+  });
+
+  // ------------------------------------------ changing attribution mid-session
+
+  it('does not re-bank a live session when the collector upgrades to buckets', () => {
+    // 0.1.1 is the published collector and files everything under `unknown`.
+    ledger.ingest('m1', [legacy('s1', tokens(1000, 100))], TODAY_19);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+
+    // The user upgrades mid-session. The same spend comes back attributed to
+    // a real model, against which there is no watermark — so it would be
+    // banked all over again.
+    ledger.ingest(
+      'm1',
+      [bucketed('s1', [bucket(D19, 'claude-opus-5', 1000, 100)])],
+      TODAY_19 + 1000,
+    );
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+
+    // Growth after the transition counts, exactly once.
+    ledger.ingest(
+      'm1',
+      [bucketed('s1', [bucket(D19, 'claude-opus-5', 1400, 100)])],
+      TODAY_19 + 2000,
+    );
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1400);
+  });
+
+  it('does not re-bank a live session when the collector downgrades to flat totals', () => {
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1000, 100)])], TODAY_19);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+
+    ledger.ingest('m1', [legacy('s1', tokens(1000, 100))], TODAY_19 + 1000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
+
+    ledger.ingest('m1', [legacy('s1', tokens(1400, 100))], TODAY_19 + 2000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1400);
+  });
+
+  it('re-bases only once, so a settled session keeps counting normally', () => {
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19 + 1000);
+    // Three more bucketed reports: the transition is spent, so these are
+    // ordinary deltas rather than three more seedings.
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1100)])], TODAY_19 + 2000);
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1200)])], TODAY_19 + 3000);
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1300)])], TODAY_19 + 4000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1300);
+  });
+
+  it('survives a collector flip-flopping between the two shapes', () => {
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19);
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19 + 1000);
+    ledger.ingest('m1', [legacy('s1', tokens(1000))], TODAY_19 + 2000);
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 1000)])], TODAY_19 + 3000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
   });
 
   it('does not re-seed an ordinary restart', () => {
@@ -299,6 +383,17 @@ describe('TokenLedger', () => {
     expect(ledger.todayFor('m1', TODAY_19).activeMinutes).toBe(2);
   });
 
+  it('does not stamp its own day on a collector that speaks in buckets', () => {
+    // The fallback files under the *server's* day (UTC in production) at the
+    // server's minute-of-day; a 0.2 collector files under its own local day
+    // at its own minute. Mixing the two mislabels a non-UTC member's
+    // activity, so a snapshot carrying bucketed data at all is never
+    // supplemented with a guess — even when it reports no minutes.
+    ledger.ingest('m1', [bucketed('s1', [bucket(D18, 'm', 10)], STARTED_18)], TODAY_19);
+    expect(ledger.todayFor('m1', TODAY_19).activeMinutes).toBe(0);
+    expect(ledger.todayFor('m1', DAY_18).activeMinutes).toBe(0);
+  });
+
   it('stops guessing minutes once the collector reports them exactly', () => {
     // The session is `working` and the wall clock says minute 720, but the
     // collector said minute 61 — adding the guess would inflate an exact
@@ -339,8 +434,12 @@ describe('TokenLedger', () => {
   });
 
   it('counts a session against the day it actually worked', () => {
-    ledger.ingest('m1', [bucketed('s1', [bucket(D18, 'm', 5)])], DAY_18);
-    ledger.ingest('m1', [bucketed('s1', [bucket(D18, 'm', 5), bucket(D19, 'm', 5)])], TODAY_19);
+    ledger.ingest('m1', [bucketed('s1', [bucket(D18, 'm', 5)], STARTED_18)], DAY_18);
+    ledger.ingest(
+      'm1',
+      [bucketed('s1', [bucket(D18, 'm', 5), bucket(D19, 'm', 5)], STARTED_18)],
+      TODAY_19,
+    );
     expect(ledger.todayFor('m1', DAY_18).sessionsRun).toBe(1);
     expect(ledger.todayFor('m1', TODAY_19).sessionsRun).toBe(1);
   });

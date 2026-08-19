@@ -34,7 +34,8 @@ import type { Db } from './db/index.js';
  * count it once and a re-send changes nothing. A collector too old to report
  * them falls back to the server's own coarse mark — one bit for the minute a
  * snapshot arrives in while anything is working — so the current day is never
- * blank whoever is reporting.
+ * blank whoever is reporting. The two are never mixed for one member, because
+ * they cut days on different clocks; see `ingest`.
  *
  * ## What the wire caps cost, now that this reads buckets
  *
@@ -46,10 +47,10 @@ import type { Db } from './db/index.js';
  * **Buckets lose nothing.** For a session the server already tracks, a bucket
  * that falls out of the cap simply stops being restated, and not restating a
  * finished day adds zero — exactly like re-sending it. For a session the
- * server has never seen, every bucket dated before today is seeded rather than
- * banked anyway (see `foldUsage`), so the dropped ones were never going to be
- * counted. Today's buckets sort to the front and would need more than 30
- * models in a single day to be dropped at all.
+ * server has never seen, either it started before today, in which case every
+ * one of its buckets is seeded rather than banked (see `foldUsage`) and the
+ * dropped ones were never going to be counted; or it started today, in which
+ * case it has a handful of buckets and cannot approach 30.
  *
  * **Minutes do lose history, and there is no way to get it back.** Minute
  * bitmaps have no seeding rule — an unreported day is simply absent, not
@@ -113,6 +114,25 @@ function prepare(db: Db) {
       SELECT 1 AS seen FROM usage_watermarks
       WHERE session_id = ? AND member_id = ? LIMIT 1
     `),
+    /**
+     * Does this session hold watermarks written by the flat path? Nothing
+     * else ever writes the model `unknown`: both adapters take the model name
+     * from the transcript, and migration 002's `unknown` backfill went to
+     * `daily_usage`, not here. So this is exactly "the collector used to
+     * speak 0.1.1 for this session".
+     */
+    flatWatermark: db.prepare(`
+      SELECT 1 AS seen FROM usage_watermarks
+      WHERE session_id = ? AND member_id = ? AND model = ? LIMIT 1
+    `),
+    /** ...and the converse: watermarks written by the bucketed path. */
+    modelWatermark: db.prepare(`
+      SELECT 1 AS seen FROM usage_watermarks
+      WHERE session_id = ? AND member_id = ? AND model <> ? LIMIT 1
+    `),
+    forgetFlatWatermarks: db.prepare(
+      'DELETE FROM usage_watermarks WHERE session_id = ? AND member_id = ? AND model = ?',
+    ),
     legacySession: db.prepare(
       'SELECT 1 AS seen FROM legacy_sessions WHERE session_id = ? AND member_id = ?',
     ),
@@ -183,11 +203,25 @@ export class TokenLedger {
     const startOfToday = new Date(now).setHours(0, 0, 0, 0);
     let changed = false;
 
-    // A collector reporting exact bitmaps is authoritative about its own
-    // activity, so the server's coarse "something is working right now" mark
-    // is only a fallback for collectors too old to report them. Decided once
-    // per snapshot rather than per session: one collector speaks one version.
-    const reportsMinutes = sessions.some((s) => (s.activeMinutes?.length ?? 0) > 0);
+    // The server's coarse "something is working right now" mark is a fallback
+    // for collectors too old to report bitmaps, and it files under the
+    // *server's* day at the server's minute-of-day, while a 0.2 collector
+    // files under its own local day at its own minute. Those two disagree for
+    // any member not on UTC, so they must never be mixed for one member.
+    //
+    // The gate is therefore "did this snapshot carry any bucketed data at
+    // all", not "did it report minutes": a 0.2 collector whose sessions have
+    // usage but no minutes yet would otherwise pick up a server-day mark. A
+    // pure 0.1.1 snapshot has neither field, and everything about it — usage
+    // included — is already filed under the server's day, so it stays
+    // internally consistent. It cannot be made to *agree* with the collector's
+    // clock, because the 0.1.1 wire carries no offset to agree with.
+    //
+    // A member sharing nothing (`tokens: false` strips both fields) lands in
+    // the same branch and keeps coarse minutes, which is the intent.
+    const speaksBuckets = sessions.some(
+      (s) => s.usage !== undefined || s.activeMinutes !== undefined,
+    );
 
     const tx = this.db.transaction(() => {
       for (const session of sessions) {
@@ -198,7 +232,7 @@ export class TokenLedger {
           }
         }
       }
-      if (!reportsMinutes && sessions.some((s) => s.state === 'working')) {
+      if (!speaksBuckets && sessions.some((s) => s.state === 'working')) {
         const minute = Math.floor((now - startOfToday) / 60_000);
         if (this.markMinute(memberIdValue, today, minute)) changed = true;
       }
@@ -241,15 +275,53 @@ export class TokenLedger {
     // buckets alone do not save it: they put the double on the right day
     // instead of on today, which is tidier and still twice.
     //
-    // Two conditions, and both are load-bearing. `startedAt` predating today
-    // is the original rule: a resume copy inherits the original's first
-    // timestamp, so it is old, while a session that genuinely started minutes
-    // ago is not. The bucket's day predating today narrows it further, so a
-    // long-running session first seen today still banks today's work instead
-    // of losing it with the replay. Requiring *both* is what keeps a collector
-    // west of the server safe: its live buckets can carry yesterday's date
-    // while its `startedAt` is plainly today, and that work must still count.
+    // The test is `startedAt` alone, deliberately. A resume copy inherits the
+    // original's first timestamp (see `claim` in the claude-code adapter), so
+    // it is always old; a session that genuinely started minutes ago never is.
+    //
+    // Also comparing the *bucket's* day against today looks like it would
+    // narrow this usefully, and it is unsafe in one direction. The server runs
+    // UTC (node:22-alpine, no TZ set anywhere; `primary_region` is geography,
+    // not a clock), days are cut on the collector's clock by design, and a
+    // collector east of UTC stamps work done in the server's evening with what
+    // is already tomorrow locally. A replay of that carries the server's own
+    // `today`, sails past `day < today`, and is banked a second time. Nothing
+    // on the wire carries the collector's offset, so the server cannot tell
+    // that date apart from a genuine one.
+    //
+    // The cost of leaving it out is real, and is the conservative direction: a
+    // session that started before today and is first seen now has its
+    // already-completed work for today seeded rather than backfilled, so it
+    // counts only from this moment on. That is what shipped before buckets
+    // existed, and on a number people compete over, understating beats
+    // overstating.
     const startedEarlier = session.startedAt < startOfToday;
+
+    // Changing how a session's spend is *attributed* is not new spend. The
+    // flat path banks under `unknown`, the bucketed path under real model
+    // names, and neither watermark can see the other — so a collector upgrade
+    // mid-session restates the same cumulative under a key with no watermark
+    // and banks it all over again. 0.1.1 is the published version, so this
+    // happens to every user who upgrades, for whatever sessions are live at
+    // that moment. Downgrading does the same in reverse.
+    //
+    // Re-base instead of banking: seed the new attribution at its reported
+    // values, exactly as a `legacy_sessions` row does. The spend was already
+    // counted under the old scheme; only growth from here should count.
+    const rebasing = bucketed
+      ? this.q.flatWatermark.get(session.id, memberIdValue, UNKNOWN_MODEL) !== undefined
+      : this.q.modelWatermark.get(session.id, memberIdValue, UNKNOWN_MODEL) !== undefined &&
+        this.q.flatWatermark.get(session.id, memberIdValue, UNKNOWN_MODEL) === undefined;
+
+    // Retire the stale flat watermarks, so an upgrade re-bases exactly once
+    // and every later report is an ordinary delta. The downgrade direction
+    // deliberately does *not* delete the per-model rows: they are invisible to
+    // the flat path's lookup (which filters on `unknown`), they still carry
+    // the days this session ran for `sessionsRun`, and leaving them lets a
+    // later re-upgrade re-base off them instead of banking.
+    if (rebasing && bucketed) {
+      this.q.forgetFlatWatermarks.run(session.id, memberIdValue, UNKNOWN_MODEL);
+    }
 
     let changed = false;
     for (const b of buckets) {
@@ -262,7 +334,8 @@ export class TokenLedger {
       // Keyed on the *session* being unknown, not on this bucket's watermark
       // being absent: a session we already bank against is a session we are
       // tracking, and a day it opens later is genuine backfill, not a replay.
-      const seed = !seen && (alreadyBanked || (startedEarlier && (!bucketed || b.day < today)));
+      // `rebasing` is the one case a *known* session seeds — see above.
+      const seed = rebasing || (!seen && (alreadyBanked || startedEarlier));
       const watermark: TokenTotals = row ? totalsOf(row) : seed ? bucketTotals(b) : emptyTokens();
       const delta: TokenTotals = {
         input: Math.max(0, b.input - watermark.input),
