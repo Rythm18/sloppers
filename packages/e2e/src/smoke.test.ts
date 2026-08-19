@@ -100,18 +100,14 @@ function writeCodexSession(home: string): void {
  * `CLAIM_RETENTION_MS` — and the original transcript is gone, so nothing in
  * the collector can recognise the replay. Only the server can.
  */
-function writeResumeCopy(home: string, replayedAgoMs: number, freshTokens: number): void {
-  const dir = join(home, '.claude', 'projects', '-work-resumed');
-  mkdirSync(dir, { recursive: true });
-  const replayedAt = new Date(NOW - replayedAgoMs).toISOString();
-  const base = {
-    sessionId: 'e2e-resume-copy',
+const RESUME_SESSION = 'e2e-resume-copy';
+
+/** One assistant turn in the resume copy's transcript. */
+function resumeTurn(requestId: string, timestamp: string, input: number, output: number) {
+  return {
+    sessionId: RESUME_SESSION,
     cwd: '/work/resumed',
     isSidechain: false,
-    timestamp: replayedAt,
-  };
-  const assistant = (requestId: string, timestamp: string, input: number, output: number) => ({
-    ...base,
     type: 'assistant',
     requestId,
     timestamp,
@@ -120,19 +116,33 @@ function writeResumeCopy(home: string, replayedAgoMs: number, freshTokens: numbe
       content: [{ type: 'text', text: 'ok' }],
       usage: { input_tokens: input, output_tokens: output },
     },
-  });
+  };
+}
+
+function resumeCopyPath(home: string): string {
+  return join(home, '.claude', 'projects', '-work-resumed', 'e2e-resume-copy.jsonl');
+}
+
+function writeResumeCopy(home: string, replayedAgoMs: number, freshTokens: number): void {
+  const dir = join(home, '.claude', 'projects', '-work-resumed');
+  mkdirSync(dir, { recursive: true });
+  const replayedAt = new Date(NOW - replayedAgoMs).toISOString();
   const lines = [
-    { ...base, type: 'user', message: { role: 'user', content: 'carry on' } },
-    // The replayed history, stamped with the days it originally happened on.
-    assistant('req-replayed-1', replayedAt, 400_000, 40_000),
-    assistant('req-replayed-2', replayedAt, 600_000, 60_000),
-    // The one thing that actually happened after the resume.
-    assistant('req-fresh', new Date(NOW).toISOString(), freshTokens, 0),
+    {
+      sessionId: RESUME_SESSION,
+      cwd: '/work/resumed',
+      isSidechain: false,
+      timestamp: replayedAt,
+      type: 'user',
+      message: { role: 'user', content: 'carry on' },
+    },
+    // The replayed history, stamped with the day it originally happened on.
+    resumeTurn('req-replayed-1', replayedAt, 400_000, 40_000),
+    resumeTurn('req-replayed-2', replayedAt, 600_000, 60_000),
+    // Work done since the resume, before the collector ever saw the session.
+    resumeTurn('req-fresh', new Date(NOW).toISOString(), freshTokens, 0),
   ];
-  writeFileSync(
-    join(dir, 'e2e-resume-copy.jsonl'),
-    `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`,
-  );
+  writeFileSync(resumeCopyPath(home), `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`);
 }
 
 class WebProbe {
@@ -325,6 +335,7 @@ describe('end-to-end smoke', () => {
   it('absorbs a resume older than the collector’s window', { timeout: 30_000 }, async () => {
     const REPLAYED_AGO_MS = 26 * 60 * 60 * 1000;
     const FRESH_INPUT = 777;
+    const GROWTH_INPUT = 500;
     writeResumeCopy(home, REPLAYED_AGO_MS, FRESH_INPUT);
 
     probe = new WebProbe(server.port);
@@ -335,22 +346,41 @@ describe('end-to-end smoke', () => {
     const presence = await probe.next((m) => m.type === 'presence' && m.sessions.length === 1);
     if (presence.type !== 'presence') throw new Error('unreachable');
 
-    // The collector reports the replay: it has no claim on those requestIds,
-    // so the whole 1.1M reaches the wire as a session it has never seen before.
+    // The collector reports the replay: it holds no claim on those requestIds
+    // after a cold start, so the whole 1.1M reaches the wire as a session it
+    // has never seen before.
     const session = presence.sessions[0];
     expect(session?.tokens?.input).toBe(1_000_000 + FRESH_INPUT);
     const replayedDay = dayOf(NOW - REPLAYED_AGO_MS);
     expect(session?.usage?.find((b) => b.day === replayedDay)?.input).toBe(1_000_000);
 
-    // The server banks only what happened today...
-    expect(presence.today.tokens.input).toBe(FRESH_INPUT);
+    // The server banks none of it. A session first seen now, which started
+    // before today, is seeded whole — the replayed day *and* today. Seeding
+    // today's completed work too is the accepted cost of having no safe day
+    // comparison (see `foldUsage`): the alternative is a rule that doubles for
+    // collectors east of UTC, and understating beats overstating.
+    expect(presence.today.tokens.input).toBe(0);
 
-    // ...and, the part `presence` cannot show, nothing at all on the day the
-    // replay is dated. Real per-day buckets alone would put the double here
-    // instead of on today — tidier, and still double — so this is the
-    // assertion the guard actually answers for. Read straight off the
-    // ledger because the wire only ever carries "today".
+    // The replayed day is the assertion the guard really answers for, and the
+    // wire cannot show it — `presence` only ever carries "today". Real per-day
+    // buckets alone would put the double here rather than on today: tidier,
+    // and still double.
     const replayed = server.rooms.ledger.todayFor(world.you.memberId, NOW - REPLAYED_AGO_MS);
     expect(replayed.tokens.input).toBe(0);
+
+    // Seeded, not silenced: work done from here on counts, exactly once.
+    appendFileSync(
+      resumeCopyPath(home),
+      `${JSON.stringify(
+        resumeTurn('req-after-sighting', new Date().toISOString(), GROWTH_INPUT, 0),
+      )}\n`,
+    );
+    const grown = await probe.next(
+      (m) =>
+        m.type === 'presence' &&
+        m.sessions.some((s) => s.tokens?.input === 1_000_000 + FRESH_INPUT + GROWTH_INPUT),
+    );
+    if (grown.type !== 'presence') throw new Error('unreachable');
+    expect(grown.today.tokens.input).toBe(GROWTH_INPUT);
   });
 });
