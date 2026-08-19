@@ -9,7 +9,7 @@ import {
 import { Hono } from 'hono';
 import type { Db } from './db/index.js';
 import { deviceKey, pairingCode, relinkToken } from './ids.js';
-import type { RoomManager } from './workspace/manager.js';
+import type { WorkspaceManager } from './workspace/manager.js';
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;
 const RELINK_TTL_MS = 10 * 60 * 1000;
@@ -26,9 +26,13 @@ const MIME: Record<string, string> = {
   '.ico': 'image/x-icon',
 };
 
-export function createApp(deps: { db: Db; rooms: RoomManager; webDist?: string }): Hono {
+export function createApp(deps: { db: Db; rooms: WorkspaceManager; webDist?: string }): Hono {
   const { db, rooms } = deps;
   const app = new Hono();
+
+  /** The invite code a member's workspace answers to right now. */
+  const inviteCodeFor = (workspaceId: string): string | null =>
+    rooms.roomById(workspaceId)?.code ?? null;
 
   app.get('/healthz', (c) => c.json({ ok: true }));
 
@@ -67,6 +71,8 @@ export function createApp(deps: { db: Db; rooms: RoomManager; webDist?: string }
     if (row.expires_at < Date.now()) return c.json({ error: 'expired code' }, 410);
     const member = rooms.memberById(row.member_id);
     if (!member) return c.json({ error: 'unknown member' }, 404);
+    const roomCode = inviteCodeFor(member.workspaceId);
+    if (!roomCode) return c.json({ error: 'unknown member' }, 404);
 
     const key = deviceKey();
     db.prepare('INSERT INTO devices (key, member_id, created_at) VALUES (?, ?, ?)').run(
@@ -82,7 +88,7 @@ export function createApp(deps: { db: Db; rooms: RoomManager; webDist?: string }
       deviceKey: key,
       memberId: member.id,
       displayName: member.displayName,
-      roomCode: member.roomCode,
+      roomCode,
       wsUrl: `${proto === 'https' ? 'wss' : 'ws'}://${host}`,
     });
   });
@@ -96,8 +102,8 @@ export function createApp(deps: { db: Db; rooms: RoomManager; webDist?: string }
     const room = rooms.getRoom(c.req.param('code'));
     if (!room) return c.json({ error: 'not found' }, 404);
     const count = db
-      .prepare('SELECT COUNT(*) AS n FROM members WHERE room_code = ?')
-      .get(room.code) as { n: number };
+      .prepare("SELECT COUNT(*) AS n FROM members WHERE workspace_id = ? AND status = 'active'")
+      .get(room.id) as { n: number };
     return c.json({ name: room.name, memberCount: count.n });
   });
 
@@ -115,6 +121,8 @@ export function createApp(deps: { db: Db; rooms: RoomManager; webDist?: string }
       .get(body.data.deviceKey) as { member_id: string } | undefined;
     const member = row ? rooms.memberById(row.member_id) : null;
     if (!member) return c.json({ error: 'unknown device' }, 403);
+    const roomCode = inviteCodeFor(member.workspaceId);
+    if (!roomCode) return c.json({ error: 'unknown device' }, 403);
 
     db.prepare('DELETE FROM relink_tokens WHERE expires_at < ?').run(Date.now());
     const token = relinkToken();
@@ -124,7 +132,7 @@ export function createApp(deps: { db: Db; rooms: RoomManager; webDist?: string }
       member.id,
       expiresAt,
     );
-    return c.json({ token, roomCode: member.roomCode, expiresAt });
+    return c.json({ token, roomCode, expiresAt });
   });
 
   app.post('/api/relink/redeem', async (c) => {
@@ -138,11 +146,13 @@ export function createApp(deps: { db: Db; rooms: RoomManager; webDist?: string }
     if (row.expires_at < Date.now()) return c.json({ error: 'expired token' }, 410);
     const member = rooms.memberById(row.member_id);
     if (!member) return c.json({ error: 'unknown member' }, 404);
+    const roomCode = inviteCodeFor(member.workspaceId);
+    if (!roomCode) return c.json({ error: 'unknown member' }, 404);
     rooms.touchMember(member.id);
     return c.json({
       memberId: member.id,
       memberSecret: member.secret,
-      roomCode: member.roomCode,
+      roomCode,
       displayName: member.displayName,
     });
   });

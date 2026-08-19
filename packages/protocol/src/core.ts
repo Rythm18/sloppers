@@ -123,11 +123,21 @@ export const dailyStatsSchema = z.object({
 });
 export type DailyStats = z.infer<typeof dailyStatsSchema>;
 
+/**
+ * What a member may do in their workspace. Lives here rather than beside the
+ * rest of the workspace vocabulary because `memberViewSchema` needs it and
+ * `workspace.ts` already depends on this module — putting it there would make
+ * the two files import each other in a cycle.
+ */
+export const roleSchema = z.enum(['owner', 'moderator', 'member']);
+export type MemberRole = z.infer<typeof roleSchema>;
+
 /** Everything a browser client knows about one member of the room. */
 export const memberViewSchema = z.object({
   id: z.string().min(1),
   displayName: z.string().min(1).max(32),
   avatar: z.string().min(1).max(32),
+  role: roleSchema,
   presence: presenceStateSchema,
   position: positionSchema,
   sessions: z.array(sessionSnapshotSchema),

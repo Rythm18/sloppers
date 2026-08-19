@@ -3,14 +3,14 @@ import { serve } from '@hono/node-server';
 import { type Db, openDb } from './db/index.js';
 import { startDemo } from './demo.js';
 import { createApp } from './http.js';
-import { RoomManager } from './workspace/manager.js';
+import { WorkspaceManager } from './workspace/manager.js';
 import { attachWebSockets } from './ws.js';
 
 const SWEEP_MS = 15_000;
 
 export interface SloppersServer {
   server: Server;
-  rooms: RoomManager;
+  rooms: WorkspaceManager;
   db: Db;
   port: number;
   close(): Promise<void>;
@@ -28,7 +28,7 @@ export interface SloppersServerOptions {
 
 export function createSloppersServer(opts: SloppersServerOptions): Promise<SloppersServer> {
   const db = openDb(opts.dbPath);
-  const rooms = new RoomManager(db);
+  const rooms = new WorkspaceManager(db);
   const appOptions: Parameters<typeof createApp>[0] = { db, rooms };
   if (opts.webDist !== undefined) appOptions.webDist = opts.webDist;
   const app = createApp(appOptions);
@@ -66,4 +66,4 @@ export { openDb } from './db/index.js';
 export { TokenLedger } from './ledger.js';
 export { derivePresence } from './presence.js';
 export { Room } from './workspace/live.js';
-export { RoomManager } from './workspace/manager.js';
+export { type MemberRecord, WorkspaceManager } from './workspace/manager.js';

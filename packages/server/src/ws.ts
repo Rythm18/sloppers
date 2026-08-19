@@ -9,7 +9,7 @@ import {
 import { type WebSocket, WebSocketServer } from 'ws';
 import type { Db } from './db/index.js';
 import type { Room, WebClient } from './workspace/live.js';
-import type { RoomManager } from './workspace/manager.js';
+import type { WorkspaceManager } from './workspace/manager.js';
 
 const MAX_PAYLOAD = 256 * 1024;
 const HEARTBEAT_MS = 30_000;
@@ -128,7 +128,7 @@ function originAllowed(req: IncomingMessage): boolean {
 
 export function attachWebSockets(
   server: Server,
-  deps: { db: Db; rooms: RoomManager },
+  deps: { db: Db; rooms: WorkspaceManager },
 ): WebSocketsHandle {
   const webWss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD });
   const collectorWss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD });
@@ -186,7 +186,7 @@ function sendCollector(ws: WebSocket, message: ServerToCollector): void {
 function handleWeb(
   ws: WebSocket,
   ip: string,
-  deps: { rooms: RoomManager; limiter: JoinLimiter },
+  deps: { rooms: WorkspaceManager; limiter: JoinLimiter },
 ): void {
   let room: Room | null = null;
   let client: WebClient | null = null;
@@ -213,12 +213,12 @@ function handleWeb(
       const { rooms } = deps;
 
       if (msg.memberId && msg.memberSecret) {
-        // Resume an existing identity; its member row knows its room.
+        // Resume an existing identity; its member row knows its workspace.
         const member = rooms.authMember(msg.memberId, msg.memberSecret);
         if (!member) {
           return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'unknown member' });
         }
-        room = rooms.getRoom(member.roomCode);
+        room = rooms.roomById(member.workspaceId);
         if (!room) {
           return sendWeb(ws, { type: 'error', code: 'server-error', message: 'room unavailable' });
         }
@@ -260,7 +260,7 @@ function handleWeb(
         });
       }
 
-      const created = rooms.createMember(room.code, msg.displayName, msg.avatar);
+      const created = rooms.createMember(room.id, msg.displayName, msg.avatar);
       if (created === 'name-taken') {
         room = null;
         return sendWeb(ws, {
@@ -293,7 +293,7 @@ function handleWeb(
   });
 }
 
-function handleCollector(ws: WebSocket, deps: { db: Db; rooms: RoomManager }): void {
+function handleCollector(ws: WebSocket, deps: { db: Db; rooms: WorkspaceManager }): void {
   let room: Room | null = null;
   let memberId: string | null = null;
 
@@ -328,7 +328,7 @@ function handleCollector(ws: WebSocket, deps: { db: Db; rooms: RoomManager }): v
         });
         return ws.close();
       }
-      room = deps.rooms.getRoom(member.roomCode);
+      room = deps.rooms.roomById(member.workspaceId);
       if (!room) {
         sendCollector(ws, { type: 'error', code: 'server-error', message: 'room unavailable' });
         return ws.close();
@@ -341,7 +341,7 @@ function handleCollector(ws: WebSocket, deps: { db: Db; rooms: RoomManager }): v
         type: 'hello-ok',
         memberId: member.id,
         displayName: member.displayName,
-        roomCode: member.roomCode,
+        roomCode: room.code,
       });
       return;
     }

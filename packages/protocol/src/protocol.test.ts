@@ -105,6 +105,7 @@ describe('web messages', () => {
           id: 'm1',
           displayName: 'Ridham',
           avatar: 'clementine',
+          role: 'owner',
           presence: 'grinding',
           position: { x: 100, y: 200, dir: 'down', moving: false },
           sessions: [session],

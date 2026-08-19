@@ -2,12 +2,14 @@ import {
   billedTokens,
   type CollectorSnapshot,
   type LeaderboardRow,
+  type MemberRole,
   type MemberView,
   type Position,
   type PresenceState,
   type ServerToWeb,
   type SessionSnapshot,
   type WebWorld,
+  type WorkspaceSettings,
 } from '@sloppers/protocol';
 import type { WebSocket } from 'ws';
 import type { Db } from '../db/index.js';
@@ -35,6 +37,7 @@ interface MemberRuntime {
   id: string;
   displayName: string;
   avatar: string;
+  role: MemberRole;
   sharing: boolean;
   position: Position;
   webClients: Set<WebClient>;
@@ -47,6 +50,7 @@ interface MemberRow {
   id: string;
   display_name: string;
   avatar: string;
+  role: MemberRole;
 }
 
 /**
@@ -54,20 +58,30 @@ interface MemberRow {
  * sessions) in memory and folds token updates into the ledger. Fan-out
  * policy: positions relay immediately, presence broadcasts on change,
  * the leaderboard debounces.
+ *
+ * `id` is the workspace's permanent identity; `code` is the invite code and
+ * `name` the display name, both of which an owner can change under us — so
+ * they are mutable and the manager writes through to them.
  */
 export class Room {
   private members = new Map<string, MemberRuntime>();
   private leaderboardTimer: NodeJS.Timeout | null = null;
 
   constructor(
-    readonly code: string,
-    readonly name: string,
+    readonly id: string,
+    public code: string,
+    public name: string,
+    public settings: WorkspaceSettings,
     private db: Db,
     private ledger: TokenLedger,
   ) {
+    // Only active members are part of the live world; kicked and banned rows
+    // survive in the database for the roster and for usage attribution.
     const rows = this.db
-      .prepare('SELECT id, display_name, avatar FROM members WHERE room_code = ?')
-      .all(this.code) as MemberRow[];
+      .prepare(
+        "SELECT id, display_name, avatar, role FROM members WHERE workspace_id = ? AND status = 'active'",
+      )
+      .all(this.id) as MemberRow[];
     for (const row of rows) this.ensureRuntime(row);
   }
 
@@ -81,6 +95,7 @@ export class Room {
         id: row.id,
         displayName: row.display_name,
         avatar: row.avatar,
+        role: row.role,
         sharing: shared !== undefined,
         position: {
           x: SPAWN.x + (Math.random() - 0.5) * 96,
@@ -98,8 +113,13 @@ export class Room {
   }
 
   /** A member was just created or re-fetched; make sure the room knows it. */
-  memberJoined(row: { id: string; displayName: string; avatar: string }): void {
-    this.ensureRuntime({ id: row.id, display_name: row.displayName, avatar: row.avatar });
+  memberJoined(row: { id: string; displayName: string; avatar: string; role: MemberRole }): void {
+    this.ensureRuntime({
+      id: row.id,
+      display_name: row.displayName,
+      avatar: row.avatar,
+      role: row.role,
+    });
     this.broadcastMember(row.id);
   }
 
@@ -206,6 +226,7 @@ export class Room {
       id: runtime.id,
       displayName: runtime.displayName,
       avatar: runtime.avatar,
+      role: runtime.role,
       presence: this.presenceOf(runtime, now),
       position: runtime.position,
       sessions: this.liveSessions(runtime, now),

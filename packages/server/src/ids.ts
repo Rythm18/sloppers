@@ -1,5 +1,14 @@
 import { randomBytes, randomInt } from 'node:crypto';
 
+/**
+ * A workspace's permanent identity. Random rather than derived from the
+ * invite code: the id outlives code rotation, so it must never let someone
+ * holding it reconstruct a code — current or retired.
+ */
+export function workspaceId(): string {
+  return `w_${randomBytes(8).toString('hex')}`;
+}
+
 export function memberId(): string {
   return `m_${randomBytes(8).toString('hex')}`;
 }

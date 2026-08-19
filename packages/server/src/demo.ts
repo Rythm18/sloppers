@@ -1,6 +1,6 @@
 import type { CollectorSnapshot, SessionSnapshot } from '@sloppers/protocol';
 import type { WebSocket } from 'ws';
-import type { RoomManager } from './workspace/manager.js';
+import type { WorkspaceManager } from './workspace/manager.js';
 
 /**
  * `--demo` populates a room with simulated teammates whose agents work,
@@ -43,18 +43,18 @@ function fakeSocket(): WebSocket {
   return { close: () => {}, readyState: 1, OPEN: 1, send: () => {} } as unknown as WebSocket;
 }
 
-export function startDemo(rooms: RoomManager, roomCode = 'demo'): () => void {
+export function startDemo(rooms: WorkspaceManager, roomCode = 'demo'): () => void {
   // The demo floor has a knowable code on purpose — it's a public playground.
   const room = rooms.ensureInternalRoom(roomCode, 'demo floor');
   const bots: Bot[] = [];
 
   for (const [i, cast] of CAST.entries()) {
-    const created = rooms.createMember(roomCode, cast.name);
+    const created = rooms.createMember(room.id, cast.name);
     if (created === 'room-full') continue;
     const memberId =
       created === 'name-taken'
         ? // Server restarted onto an existing demo db; reuse the member.
-          findDemoMember(rooms, roomCode, cast.name)
+          findDemoMember(rooms, room.id, cast.name)
         : created.id;
     if (!memberId) continue;
     if (created !== 'name-taken') room.memberJoined(created);
@@ -159,9 +159,9 @@ function randomPoint(): { x: number; y: number } {
   };
 }
 
-function findDemoMember(rooms: RoomManager, roomCode: string, name: string): string | null {
-  // RoomManager doesn't expose search-by-name; demo members are stable so a
-  // direct query via its db would be circular. Instead re-derive from the
+function findDemoMember(rooms: WorkspaceManager, workspaceId: string, name: string): string | null {
+  // WorkspaceManager doesn't expose search-by-name; demo members are stable so
+  // a direct query via its db would be circular. Instead re-derive from the
   // room's world after load — simplest is a dedicated lookup:
-  return rooms.memberByName(roomCode, name)?.id ?? null;
+  return rooms.memberByName(workspaceId, name)?.id ?? null;
 }

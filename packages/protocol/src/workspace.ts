@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { avatarIdSchema, displayNameSchema, roomNameSchema } from './core.js';
+import { avatarIdSchema, displayNameSchema, roleSchema, roomNameSchema } from './core.js';
 
 /**
  * Everything configurable about a workspace, in one validated blob. Adding a
@@ -25,8 +25,7 @@ export function parseSettings(raw: string): WorkspaceSettings {
   }
 }
 
-export const roleSchema = z.enum(['owner', 'moderator', 'member']);
-export type MemberRole = z.infer<typeof roleSchema>;
+export { type MemberRole, roleSchema } from './core.js';
 
 export const memberStatusSchema = z.enum(['active', 'kicked', 'banned']);
 export type MemberStatus = z.infer<typeof memberStatusSchema>;
