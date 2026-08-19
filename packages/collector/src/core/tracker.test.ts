@@ -268,8 +268,88 @@ describe('SessionTracker grouping', () => {
 
     const snaps = tracker.snapshot(7000);
     expect(snaps).toHaveLength(2);
-    expect(snaps.map((s) => s.id)).toEqual(['s-shared', 's-shared']);
     expect(snaps.map((s) => s.tokens?.input).sort()).toEqual([100, 40].sort());
+  });
+
+  it('gives colliding sessions distinct ids so the ledger can tell them apart', () => {
+    const { root, tracker } = setup();
+    const a = join(root, 'a.log');
+    const b = join(root, 'b.log');
+    writeFileSync(a, 's-shared work 100\n');
+    writeFileSync(b, 's-shared work 40\n');
+    tracker.ingestFile(a, 5000);
+    tracker.ingestFile(b, 6000);
+
+    // `TokenLedger.ingest` keys its watermark on the snapshot id alone. Two
+    // snapshots sharing one id inside a batch make the second restate the
+    // first's watermark downwards, and the delta is re-banked on every cycle
+    // forever — so distinct ids are what keeps the leaderboard finite.
+    const snaps = tracker.snapshot(7000);
+    const ids = snaps.map((s) => s.id);
+    expect(new Set(ids).size).toBe(2);
+    // The lowest file path keeps the plain id; only the extra entry is
+    // disambiguated, so the common one-file-per-id case is never renamed.
+    expect(ids).toContain('s-shared');
+  });
+
+  it('derives a colliding id from the file path, so it survives a restart', () => {
+    const { root, tracker } = setup();
+    const a = join(root, 'a.log');
+    const b = join(root, 'b.log');
+    writeFileSync(a, 's-shared work 100\n');
+    writeFileSync(b, 's-shared work 40\n');
+    tracker.ingestFile(a, 5000);
+    tracker.ingestFile(b, 6000);
+    const first = tracker.snapshot(7000).map((s) => s.id);
+
+    // Same files, a brand new tracker, and the files ingested in the opposite
+    // order: a restart must not rename a session, or every restart would
+    // orphan its server-side watermark and re-bank the whole total.
+    const restarted = new SessionTracker([fakeAdapter(root)]);
+    restarted.ingestFile(b, 6000);
+    restarted.ingestFile(a, 5000);
+    const second = restarted.snapshot(7000).map((s) => s.id);
+    expect(second.slice().sort()).toEqual(first.slice().sort());
+  });
+
+  it('leaves an uncontested session id exactly as the harness reported it', () => {
+    const { root, tracker } = setup();
+    const solo = join(root, 'solo.log');
+    const other = join(root, 'other.log');
+    writeFileSync(solo, 's1 work 100\n');
+    writeFileSync(other, 's2 work 40\n');
+    tracker.ingestFile(solo, 5000);
+    tracker.ingestFile(other, 6000);
+    expect(
+      tracker
+        .snapshot(7000)
+        .map((s) => s.id)
+        .sort(),
+    ).toEqual(['s1', 's2']);
+  });
+
+  it('does not disambiguate a parent just because a sidechain shares its id', () => {
+    const { root, tracker } = setup();
+    const main = join(root, 'parent.log');
+    const sub = join(root, 'parent-subagent.log');
+    writeFileSync(main, 's-parent work 100\n');
+    writeFileSync(sub, 's-parent sub 40\n');
+    tracker.ingestFile(main, 5000);
+    tracker.ingestFile(sub, 5000);
+    // A sidechain is folded, not displayed, so it contests nothing.
+    expect(tracker.snapshot(6000).map((s) => s.id)).toEqual(['s-parent']);
+  });
+
+  it('never emits two snapshots sharing an id, however many files collide', () => {
+    const { root, tracker } = setup();
+    for (let i = 0; i < 5; i++) {
+      const file = join(root, `rollout-${i}.log`);
+      writeFileSync(file, `s-shared work ${10 + i}\n`);
+      tracker.ingestFile(file, 5000 + i);
+    }
+    const ids = tracker.snapshot(7000).map((s) => s.id);
+    expect(ids).toHaveLength(5);
+    expect(new Set(ids).size).toBe(5);
   });
 
   it('keeps a parent alive and working while its subagent is still writing', () => {
