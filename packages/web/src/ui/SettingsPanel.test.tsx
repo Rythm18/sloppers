@@ -121,6 +121,67 @@ describe('SettingsPanel', () => {
     expect(container.contains(document.activeElement)).toBe(true);
   });
 
+  describe('being modal about it', () => {
+    /** The panel with something behind it, the way the app renders it. */
+    function renderOverTheOffice() {
+      const view = render(
+        <>
+          <button type="button" data-testid="behind">
+            out on the floor
+          </button>
+          <SettingsPanel />
+        </>,
+      );
+      const behind = view.getByTestId('behind');
+      return { ...view, behind };
+    }
+
+    it('pulls a wandering focus back in rather than letting Tab out', () => {
+      seed({ role: 'owner' });
+      const { behind } = renderOverTheOffice();
+      const dialog = screen.getByRole('dialog');
+
+      behind.focus();
+      expect(document.activeElement).toBe(behind);
+
+      fireEvent.keyDown(window, { key: 'Tab' });
+
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    });
+
+    it('holds focus at the far end when it wraps', () => {
+      seed({ role: 'owner' });
+      renderOverTheOffice();
+      const dialog = screen.getByRole('dialog');
+      const stops = [
+        ...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled])'),
+      ];
+      const last = stops.at(-1);
+      if (!last) throw new Error('the dialog should have somewhere to put focus');
+
+      last.focus();
+      fireEvent.keyDown(window, { key: 'Tab' });
+      expect(document.activeElement).toBe(stops[0]);
+
+      fireEvent.keyDown(window, { key: 'Tab', shiftKey: true });
+      expect(document.activeElement).toBe(last);
+    });
+
+    it('marks the office behind it inert, and hands it back on the way out', () => {
+      seed({ role: 'owner' });
+      const { behind } = renderOverTheOffice();
+
+      // `aria-modal` alone tells assistive tech the background is unavailable
+      // while leaving it perfectly reachable.
+      expect(screen.getByRole('dialog').getAttribute('aria-modal')).toBe('true');
+      expect(behind.hasAttribute('inert')).toBe(true);
+
+      setOpen(false);
+
+      expect(behind.hasAttribute('inert')).toBe(false);
+    });
+  });
+
   describe('the ops each control sends', () => {
     it('sends the door mode the person picked, leaving the rest of the settings alone', () => {
       seed({ role: 'owner', settings: { joinMode: 'link', publicLeaderboard: true } });
@@ -291,17 +352,42 @@ describe('SettingsPanel', () => {
       expect(document.activeElement).toBe(button('Yes, ban: sam'));
     });
 
-    it('arms one person at a time', () => {
+    it('asks about one person at a time', () => {
       seed({
         role: 'owner',
         roster: [...roster, person('lee', 'lee', 'member')],
       });
       render(<SettingsPanel />);
 
-      fireEvent.click(button('Remove: sam'));
+      fireEvent.click(button('Ban: sam'));
+      expect(screen.queryByRole('button', { name: 'Yes, ban: lee' })).toBeNull();
 
-      expect(screen.queryByRole('button', { name: 'Yes, remove: lee' })).toBeNull();
-      expect(button('Remove: lee')).toBeTruthy();
+      // Two irreversible questions open at once is two chances to answer the
+      // wrong one. Arming lee puts sam's question away.
+      fireEvent.click(button('Remove: lee'));
+
+      expect(screen.queryByRole('button', { name: 'Yes, ban: sam' })).toBeNull();
+      expect(button('Ban: sam')).toBeTruthy();
+      fireEvent.click(button('Yes, remove: lee'));
+      expect(opsAfterOpening()).toEqual([{ kind: 'kick', memberId: 'lee' }]);
+    });
+
+    it('puts the question away when somebody else gets there first', () => {
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+      fireEvent.click(button('Ban: sam'));
+      expect(button('Yes, ban: sam')).toBeTruthy();
+
+      // Another admin banned sam while this question sat open. Answering it
+      // now would fire an op the office refuses, silently.
+      apply({
+        type: 'roster',
+        members: [person('me', 'ridham', 'owner'), person('sam', 'sam', 'member', 'banned')],
+      });
+
+      expect(screen.queryByRole('button', { name: 'Yes, ban: sam' })).toBeNull();
+      expect(opsAfterOpening()).toEqual([]);
+      expect(button('Unban: sam')).toBeTruthy();
     });
   });
 

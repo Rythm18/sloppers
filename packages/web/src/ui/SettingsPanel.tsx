@@ -42,6 +42,11 @@ function outranks(viewer: MemberRole | null, target: MemberRole): boolean {
   return viewer !== null && RANK[viewer] > RANK[target];
 }
 
+/** Whether this viewer could remove this person right now. */
+function removable(viewer: MemberRole | null, target: RosterEntry | undefined): boolean {
+  return target !== undefined && target.status === 'active' && outranks(viewer, target.role);
+}
+
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), a[href]';
 
 /**
@@ -69,10 +74,30 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const [name, setName] = useState(roomName);
   const [confirmDelete, setConfirmDelete] = useState('');
+  // One armed question for the whole panel: two irreversible questions open at
+  // once is two chances to answer the wrong one.
+  const [pending, setPending] = useState<Removal | null>(null);
+  const scrimRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
 
   const isOwner = role === 'owner';
   const canModerate = role === 'owner' || role === 'moderator';
+
+  // The person you armed may have been removed by another admin while the
+  // question sat open. Take the question away rather than leave it asking
+  // about something that already happened — "Yes, ban" would fire an op the
+  // office refuses, and this screen has nowhere to show a refusal.
+  const armed =
+    pending &&
+    removable(
+      role,
+      roster.find((entry) => entry.id === pending.memberId),
+    )
+      ? pending
+      : null;
+  useEffect(() => {
+    if (!armed) setPending(null);
+  }, [armed]);
 
   // A rename — from this tab, another device, anywhere — is the new truth.
   // The draft follows it, or "Rename" would sit enabled against a name the
@@ -89,8 +114,8 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
     if (canModerate) sendAdmin({ kind: 'roster' });
   }, [canModerate]);
 
-  // Modal manners: focus starts inside, Tab stays inside, Escape leaves, and
-  // whatever had focus before gets it back.
+  // Modal manners: focus starts inside, Tab cannot leave — from within or
+  // from without — Escape leaves, and whatever had focus before gets it back.
   useEffect(() => {
     const dialog = dialogRef.current;
     const restoreTo = document.activeElement;
@@ -106,7 +131,13 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
       const last = stops.at(-1);
       if (!first || !last) return;
       const active = document.activeElement;
-      if (event.shiftKey && (active === first || active === dialog)) {
+      // Anywhere but here — the address bar, a stray click that landed
+      // outside, whatever the page did behind our back — is pulled in. A trap
+      // that only wraps its own ends leaves every other way out open.
+      if (!(active instanceof Node) || !dialog.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && (active === first || active === dialog)) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && active === last) {
@@ -121,12 +152,28 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
     };
   }, [setSettingsOpen]);
 
+  // `aria-modal` is a promise that the rest of the page is unavailable, and a
+  // promise is all it is — the office behind this panel stays clickable and
+  // readable to a screen reader unless something says otherwise. `inert` is
+  // the something: the panel's siblings are the whole world behind it.
+  useEffect(() => {
+    const scrim = scrimRef.current;
+    const behind: HTMLElement[] = [];
+    for (const sibling of scrim?.parentElement?.children ?? []) {
+      if (sibling !== scrim && sibling instanceof HTMLElement) behind.push(sibling);
+    }
+    for (const element of behind) element.setAttribute('inert', '');
+    return () => {
+      for (const element of behind) element.removeAttribute('inert');
+    };
+  }, []);
+
   const inviteUrl = `${location.origin}/?room=${encodeURIComponent(roomCode)}`;
   const update = (patch: Partial<WorkspaceSettings>) =>
     sendAdmin({ kind: 'settings', settings: { ...settings, ...patch } });
 
   return (
-    <div className="modal-scrim">
+    <div className="modal-scrim" ref={scrimRef}>
       {/* tabIndex -1: not a tab stop, but the dialog can be handed focus when it opens. */}
       <section
         className="settings-panel panel"
@@ -261,7 +308,14 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
           <section className="settings-section">
             <h3 className="settings-title">People</h3>
             {roster.map((member) => (
-              <PersonRow key={member.id} member={member} role={role} />
+              <PersonRow
+                key={member.id}
+                member={member}
+                role={role}
+                armed={armed?.memberId === member.id ? armed : null}
+                onArm={setPending}
+                onDisarm={() => setPending(null)}
+              />
             ))}
             <p className="settings-note">
               Banning stops that person coming back as themselves. Someone determined can still
@@ -324,29 +378,43 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
  * One person on the roster. Kicking and banning arm first and fire second:
  * the row itself asks, because a misplaced click here costs somebody their
  * seat — and an unbanned person comes back a stranger, stats and all gone.
+ * Which row is armed belongs to the panel, not to the row, so arming one
+ * question puts any other away.
  *
  * Every action carries `label: name` as its accessible name. A list of
  * identical "Remove" buttons is unusable read aloud, and the visible label
  * still leads, so speaking the button by name works too.
  */
-function PersonRow({ member, role }: { member: RosterEntry; role: MemberRole | null }) {
-  const [pending, setPending] = useState<Removal | null>(null);
+function PersonRow({
+  member,
+  role,
+  armed,
+  onArm,
+  onDisarm,
+}: {
+  member: RosterEntry;
+  role: MemberRole | null;
+  /** The removal this row is asking about, or null when it is just a row. */
+  armed: Removal | null;
+  onArm: (op: Removal) => void;
+  onDisarm: () => void;
+}) {
   const confirmRef = useRef<HTMLButtonElement>(null);
 
   // The button that armed this just vanished; focus follows the question
   // rather than falling back to the top of the page.
   useEffect(() => {
-    if (pending) confirmRef.current?.focus();
-  }, [pending]);
+    if (armed) confirmRef.current?.focus();
+  }, [armed]);
 
   const isOwner = role === 'owner';
-  const canRemove = member.status === 'active' && outranks(role, member.role);
+  const canRemove = removable(role, member);
 
-  if (pending) {
+  if (armed) {
     return (
       <div className="settings-row settings-row-asking">
         <span className="settings-note">
-          {pending.kind === 'kick'
+          {armed.kind === 'kick'
             ? `Remove ${member.displayName}? The link still works, so they can walk back in.`
             : `Ban ${member.displayName}? Unbanning later brings them back a stranger, with none of their stats.`}
         </span>
@@ -355,19 +423,19 @@ function PersonRow({ member, role }: { member: RosterEntry; role: MemberRole | n
             type="button"
             className="btn btn-danger"
             ref={confirmRef}
-            aria-label={`${pending.kind === 'kick' ? 'Yes, remove' : 'Yes, ban'}: ${member.displayName}`}
+            aria-label={`${armed.kind === 'kick' ? 'Yes, remove' : 'Yes, ban'}: ${member.displayName}`}
             onClick={() => {
-              sendAdmin(pending);
-              setPending(null);
+              sendAdmin(armed);
+              onDisarm();
             }}
           >
-            {pending.kind === 'kick' ? 'Yes, remove' : 'Yes, ban'}
+            {armed.kind === 'kick' ? 'Yes, remove' : 'Yes, ban'}
           </button>
           <button
             type="button"
             className="btn btn-quiet"
             aria-label={`Never mind: ${member.displayName}`}
-            onClick={() => setPending(null)}
+            onClick={onDisarm}
           >
             Never mind
           </button>
@@ -412,7 +480,7 @@ function PersonRow({ member, role }: { member: RosterEntry; role: MemberRole | n
               type="button"
               className="btn btn-quiet"
               aria-label={`Remove: ${member.displayName}`}
-              onClick={() => setPending({ kind: 'kick', memberId: member.id })}
+              onClick={() => onArm({ kind: 'kick', memberId: member.id })}
             >
               Remove
             </button>
@@ -420,7 +488,7 @@ function PersonRow({ member, role }: { member: RosterEntry; role: MemberRole | n
               type="button"
               className="btn btn-quiet"
               aria-label={`Ban: ${member.displayName}`}
-              onClick={() => setPending({ kind: 'ban', memberId: member.id })}
+              onClick={() => onArm({ kind: 'ban', memberId: member.id })}
             >
               Ban
             </button>

@@ -10,6 +10,7 @@ import { useStore } from '../store.js';
 import { bridge, positionAnchor } from './bridge.js';
 import { buildOffice, isBlocked, type OfficeMap, WORLD_H, WORLD_W } from './map.js';
 import { TILE_SIZE } from './tiles.gen.js';
+import { isTypingSomewhere } from './typing.js';
 
 const SPEED = 110;
 const REMOTE_SPEED = 130;
@@ -179,7 +180,11 @@ export class OfficeScene extends Phaser.Scene {
 
     const keyboard = this.input.keyboard;
     if (keyboard) {
-      this.keys = keyboard.addKeys('up,down,left,right,w,a,s,d') as OfficeScene['keys'];
+      // Capture off (the `false`): Phaser's default is to preventDefault every
+      // key it watches, anywhere on the page — which silently eats w, a, s and
+      // d from any text field the UI puts over the office. There is nothing to
+      // protect the arrows from either; the body does not scroll.
+      this.keys = keyboard.addKeys('up,down,left,right,w,a,s,d', false) as OfficeScene['keys'];
     }
 
     this.unsubscribes.push(
@@ -292,8 +297,16 @@ export class OfficeScene extends Phaser.Scene {
   private updatePlayer(dtMs: number): void {
     if (!this.player || !this.keys) return;
     const k = this.keys;
-    let vx = (k.left.isDown || k.a.isDown ? -1 : 0) + (k.right.isDown || k.d.isDown ? 1 : 0);
-    let vy = (k.up.isDown || k.w.isDown ? -1 : 0) + (k.down.isDown || k.s.isDown ? 1 : 0);
+    // Somebody typing their own name to confirm a deletion is not asking to
+    // walk east. Keyboard state is global to the window, so the office has to
+    // notice where the letters are actually going.
+    const typing = isTypingSomewhere();
+    let vx = typing
+      ? 0
+      : (k.left.isDown || k.a.isDown ? -1 : 0) + (k.right.isDown || k.d.isDown ? 1 : 0);
+    let vy = typing
+      ? 0
+      : (k.up.isDown || k.w.isDown ? -1 : 0) + (k.down.isDown || k.s.isDown ? 1 : 0);
     const moving = vx !== 0 || vy !== 0;
     if (vx !== 0 && vy !== 0) {
       vx *= Math.SQRT1_2;
