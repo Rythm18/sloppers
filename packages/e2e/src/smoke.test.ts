@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type ServerToWeb, serverToWebSchema, type WebWorld } from '@sloppers/protocol';
+import { dayOf, type ServerToWeb, serverToWebSchema, type WebWorld } from '@sloppers/protocol';
 import { createSloppersServer, type SloppersServer } from '@sloppers/server';
 import { newConfig, redeemPairingCode, saveConfig, startDaemon } from 'sloppers';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -94,6 +94,47 @@ function writeCodexSession(home: string): void {
   writeFileSync(file, `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`);
 }
 
+/**
+ * A `--resume` copy, alone on disk: a NEW sessionId over the ORIGINAL entries
+ * and requestIds. The replayed half is `replayedAgoMs` old — well past
+ * `CLAIM_RETENTION_MS` — and the original transcript is gone, so nothing in
+ * the collector can recognise the replay. Only the server can.
+ */
+function writeResumeCopy(home: string, replayedAgoMs: number, freshTokens: number): void {
+  const dir = join(home, '.claude', 'projects', '-work-resumed');
+  mkdirSync(dir, { recursive: true });
+  const replayedAt = new Date(NOW - replayedAgoMs).toISOString();
+  const base = {
+    sessionId: 'e2e-resume-copy',
+    cwd: '/work/resumed',
+    isSidechain: false,
+    timestamp: replayedAt,
+  };
+  const assistant = (requestId: string, timestamp: string, input: number, output: number) => ({
+    ...base,
+    type: 'assistant',
+    requestId,
+    timestamp,
+    message: {
+      model: 'claude-fable-5',
+      content: [{ type: 'text', text: 'ok' }],
+      usage: { input_tokens: input, output_tokens: output },
+    },
+  });
+  const lines = [
+    { ...base, type: 'user', message: { role: 'user', content: 'carry on' } },
+    // The replayed history, stamped with the days it originally happened on.
+    assistant('req-replayed-1', replayedAt, 400_000, 40_000),
+    assistant('req-replayed-2', replayedAt, 600_000, 60_000),
+    // The one thing that actually happened after the resume.
+    assistant('req-fresh', new Date(NOW).toISOString(), freshTokens, 0),
+  ];
+  writeFileSync(
+    join(dir, 'e2e-resume-copy.jsonl'),
+    `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`,
+  );
+}
+
 class WebProbe {
   private ws: WebSocket;
   private queue: ServerToWeb[] = [];
@@ -153,6 +194,32 @@ class WebProbe {
   }
 }
 
+/** Pair a collector to `world`'s member exactly the way the web app and CLI do. */
+async function pairCollector(port: number, world: WebWorld, home: string): Promise<void> {
+  const base = `http://127.0.0.1:${port}`;
+  const mint = await fetch(`${base}/api/pair`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      memberId: world.you.memberId,
+      memberSecret: world.you.memberSecret,
+    }),
+  });
+  const { pairingCode } = (await mint.json()) as { pairingCode: string };
+  const redeemed = await redeemPairingCode(base, pairingCode);
+  saveConfig(
+    newConfig({
+      httpUrl: base,
+      wsUrl: `ws://127.0.0.1:${port}`,
+      deviceKey: redeemed.deviceKey,
+      memberId: redeemed.memberId,
+      displayName: redeemed.displayName,
+      roomCode: redeemed.roomCode,
+    }),
+    home,
+  );
+}
+
 describe('end-to-end smoke', () => {
   let server: SloppersServer;
   let home: string;
@@ -181,29 +248,7 @@ describe('end-to-end smoke', () => {
     const world = await probe.join('e2e', 'ridham');
     expect(world.you.memberSecret).toBeTruthy();
 
-    // Pair exactly the way the web app and CLI do.
-    const base = `http://127.0.0.1:${server.port}`;
-    const mint = await fetch(`${base}/api/pair`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        memberId: world.you.memberId,
-        memberSecret: world.you.memberSecret,
-      }),
-    });
-    const { pairingCode } = (await mint.json()) as { pairingCode: string };
-    const redeemed = await redeemPairingCode(base, pairingCode);
-    saveConfig(
-      newConfig({
-        httpUrl: base,
-        wsUrl: `ws://127.0.0.1:${server.port}`,
-        deviceKey: redeemed.deviceKey,
-        memberId: redeemed.memberId,
-        displayName: redeemed.displayName,
-        roomCode: redeemed.roomCode,
-      }),
-      home,
-    );
+    await pairCollector(server.port, world, home);
 
     daemon = startDaemon({ collectorVersion: 'e2e', home, log: () => {} });
 
@@ -260,5 +305,45 @@ describe('end-to-end smoke', () => {
     const leaderboard = await probe.next((m) => m.type === 'leaderboard');
     if (leaderboard.type !== 'leaderboard') throw new Error('unreachable');
     expect(leaderboard.rows[0]?.displayName).toBe('ridham');
+  });
+
+  /**
+   * The two halves of the resume invariant, meeting for real.
+   *
+   * Deduplicating a `--resume` copy is split between components: the collector
+   * refuses a replayed requestId while the original's claim is under 24h old
+   * (`CLAIM_RETENTION_MS`), and the server absorbs everything older. Each half
+   * is unit-tested in its own package; neither package can test the seam,
+   * because the collector cannot reach a ledger and the server must not depend
+   * on the collector. Here both are real.
+   *
+   * This is the case the collector provably cannot catch: a cold start, the
+   * original transcript gone, a copy replaying a day-old request under a fresh
+   * sessionId. If the server's seeding guard were removed, the replayed
+   * million tokens would land on top of the real ones.
+   */
+  it('absorbs a resume older than the collector’s window', { timeout: 30_000 }, async () => {
+    const REPLAYED_AGO_MS = 26 * 60 * 60 * 1000;
+    const FRESH_INPUT = 777;
+    writeResumeCopy(home, REPLAYED_AGO_MS, FRESH_INPUT);
+
+    probe = new WebProbe(server.port);
+    const world = await probe.join('e2e-resume', 'ridham');
+    await pairCollector(server.port, world, home);
+    daemon = startDaemon({ collectorVersion: 'e2e', home, log: () => {} });
+
+    const presence = await probe.next((m) => m.type === 'presence' && m.sessions.length === 1);
+    if (presence.type !== 'presence') throw new Error('unreachable');
+
+    // The collector reports the replay: it has no claim on those requestIds,
+    // so the whole 1.1M reaches the wire as a session it has never seen before.
+    const session = presence.sessions[0];
+    expect(session?.tokens?.input).toBe(1_000_000 + FRESH_INPUT);
+    const replayedDay = dayOf(NOW - REPLAYED_AGO_MS);
+    expect(session?.usage?.find((b) => b.day === replayedDay)?.input).toBe(1_000_000);
+
+    // The server banks only what happened today. Without the guard this reads
+    // 1_000_777.
+    expect(presence.today.tokens.input).toBe(FRESH_INPUT);
   });
 });
