@@ -179,3 +179,19 @@ export interface TrackedSession {
   adapterId: HarnessId;
   snapshot: SessionSnapshot;
 }
+
+/**
+ * One projected session together with the local directory it is running in,
+ * which is what decides the workspace it belongs to (see `routeSessions`).
+ *
+ * `cwd` sits deliberately *outside* `snapshot` rather than as another field
+ * on it. `SessionSnapshot` is the wire shape, and a full path is not shared
+ * data: it leaks a machine's directory structure and, very often, a person's
+ * name — which is why the wire carries `project`, the basename, instead.
+ * Keeping the two apart means no code that builds an outgoing message can
+ * reach the cwd by accident; it has to go out of its way to.
+ */
+export interface RoutableSession {
+  snapshot: SessionSnapshot;
+  cwd: string | undefined;
+}

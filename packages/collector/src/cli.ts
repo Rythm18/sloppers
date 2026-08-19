@@ -1,11 +1,20 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
-import { billedTokens, relinkMintResponseSchema, type Visibility } from '@sloppers/protocol';
+import { defaultVisibility, relinkMintResponseSchema, type Visibility } from '@sloppers/protocol';
 import pc from 'picocolors';
 import { builtinAdapters } from './adapters/index.js';
-import { loadConfig, newConfig, saveConfig } from './config.js';
+import { describeTargets, parseShareArgs, renderStatus, selectPairings } from './cli-support.js';
+import {
+  addPairing,
+  type CollectorConfig,
+  loadConfig,
+  type PairingConfig,
+  saveConfig,
+  shadowedBy,
+} from './config.js';
 import { SessionTracker } from './core/tracker.js';
 import { seedTracker } from './core/watcher.js';
 import { startDaemon } from './daemon.js';
@@ -23,17 +32,24 @@ const HELP = `sloppers ${VERSION} — share what your coding agents are doing wi
 
 usage:
   sloppers share <code>     pair this machine (get the code from the office web app)
+     --match '<glob>'         directories this workspace claims, e.g. '~/work/**'
      --foreground             run in this terminal instead of installing auto-start
   sloppers run              run the collector in the foreground
-  sloppers status           show pairing, live sessions, and what is shared
-  sloppers pause            stop sharing (stays paired; office shows you as not sharing)
-  sloppers resume           resume sharing
-  sloppers hide <field>     stop sharing a field: title | project | branch | model | tokens
-  sloppers show <field>     share a field again
-  sloppers relink           sign a fresh browser back in as you (new laptop, cleared storage)
+  sloppers status           show every workspace, what it claims, and what is shared
+  sloppers pause [ws]       stop sharing (stays paired; office shows you as not sharing)
+  sloppers resume [ws]      resume sharing
+  sloppers hide <field> [ws]  stop sharing a field: title | project | branch | model | tokens
+  sloppers show <field> [ws]  share a field again
+  sloppers relink [ws]      sign a fresh browser back in as you (new laptop, cleared storage)
   sloppers uninstall        remove auto-start (config stays; delete ~/.sloppers to forget)
 
+Pair more than once to share different directories with different offices.
+Each session goes to the first workspace whose --match claims its directory;
+[ws] names one by room code (default: all of them). \`sloppers status\` lists
+any session that matches none, since those are shared with nobody.
+
 Only derived status ever leaves this machine — never prompts, code, or files.
+Directory paths stay local too: the office sees a project name, never a path.
 `;
 
 function log(message: string): void {
@@ -45,26 +61,82 @@ function fail(message: string): never {
   process.exit(1);
 }
 
+/**
+ * Which directories the workspace being paired should claim.
+ *
+ * The first pairing on a machine is a catch-all, which is the
+ * single-workspace behaviour every 0.1.1 user already has. A second one has
+ * to say what is its own, because routing is first-match-wins: without a
+ * pattern it would either claim everything (stealing from the workspace
+ * already there) or nothing at all.
+ *
+ * Asked *before* the code is redeemed, so backing out at the prompt does not
+ * burn a one-time pairing code.
+ */
+async function resolveMatch(existing: number, flag: string | undefined): Promise<string[]> {
+  if (existing === 0) return ['**'];
+  const given = flag?.trim();
+  if (given) return [given];
+  if (!process.stdin.isTTY) {
+    fail(
+      "this machine is already paired — pass --match '<glob>' to say which directories belong to the new workspace",
+    );
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = (
+    await rl.question('which directories belong to this workspace? (e.g. ~/work/**) ')
+  ).trim();
+  rl.close();
+  if (!answer) fail("no pattern given — re-run with --match '<glob>'");
+  return [answer];
+}
+
 async function share(args: string[]): Promise<void> {
-  const target = args.find((a) => !a.startsWith('--'));
-  if (!target) fail('usage: sloppers share <code>  (mint one in the office web app)');
-  const foreground = args.includes('--foreground');
+  const { target, foreground, match } = parseShareArgs(args);
+  if (!target) fail("usage: sloppers share <code> [--match '<glob>']  (mint one in the web app)");
+
+  const existing = loadConfig();
+  const before = existing?.pairings ?? [];
+  const patterns = await resolveMatch(before.length, match);
 
   const { code, httpUrl } = parseShareTarget(target);
   const redeemed = await redeemPairingCode(httpUrl, code);
-  saveConfig(
-    newConfig({
-      httpUrl,
-      wsUrl: wsUrlFor(httpUrl),
-      deviceKey: redeemed.deviceKey,
-      memberId: redeemed.memberId,
-      displayName: redeemed.displayName,
-      roomCode: redeemed.roomCode,
-    }),
-  );
+  const pairing: PairingConfig = {
+    server: { httpUrl, wsUrl: wsUrlFor(httpUrl) },
+    deviceKey: redeemed.deviceKey,
+    memberId: redeemed.memberId,
+    displayName: redeemed.displayName,
+    roomCode: redeemed.roomCode,
+    match: patterns,
+    visibility: { ...defaultVisibility },
+    paused: false,
+  };
+  const next: CollectorConfig = existing
+    ? addPairing(existing, pairing)
+    : { version: 2, pairings: [pairing] };
+  saveConfig(next);
   console.log(
     `${pc.green('✓')} paired as ${pc.bold(redeemed.displayName)} in room ${pc.bold(redeemed.roomCode)}`,
   );
+  if (before.length > 0) {
+    console.log(pc.dim(`  claiming ${patterns.join(', ')}`));
+    // First match wins, so a pairing listed above this one that already
+    // claims the same directories leaves it permanently empty. Say so now,
+    // rather than letting them wonder why the new office stays silent.
+    const shadow = shadowedBy(before, patterns);
+    if (shadow) {
+      console.log(
+        pc.yellow(
+          `  heads-up: room ${shadow.roomCode} comes first and already claims ${shadow.match.join(', ')},`,
+        ),
+      );
+      console.log(
+        pc.yellow(
+          `  so nothing will route here until you narrow it (edit "match" in ~/.sloppers/config.json)`,
+        ),
+      );
+    }
+  }
 
   if (!foreground && serviceSupported()) {
     try {
@@ -99,44 +171,44 @@ function runForeground(): void {
   process.on('SIGTERM', shutdown);
 }
 
-// The functions below all act on the config's first pairing. That is the
-// exact single-workspace behavior this CLI has always had (today a config
-// only ever has one pairing — either from a fresh `sloppers share` or from
-// upgrading a v1 file). Multi-workspace CLI targeting (`sloppers pause
-// <workspace>`, prompting for a match pattern on a second `share`, ...) is
-// a later task's job.
+/**
+ * The paired config, or a clean exit explaining there isn't one. Every
+ * command below acts on one or more of its pairings, chosen with `[workspace]`.
+ */
+function paired(): CollectorConfig {
+  const config = loadConfig();
+  if (!config || config.pairings.length === 0) {
+    fail('not paired — run `sloppers share <code>` (mint one in the office web app)');
+  }
+  return config;
+}
+
+/**
+ * The pairings a `[workspace]` argument names, or all of them when it is
+ * absent. An unknown name is an error listing the real ones, never a silent
+ * fallback to "all" — `sloppers pause typo` must not pause everything.
+ */
+function targeted(config: CollectorConfig, target: string | undefined): number[] {
+  const chosen = selectPairings(config.pairings, target);
+  if (chosen.length === 0) {
+    fail(
+      `no workspace called "${target}" — try one of: ${config.pairings.map((p) => p.roomCode).join(', ')}`,
+    );
+  }
+  return chosen;
+}
 
 function status(): void {
   const config = loadConfig();
-  const pairing = config?.pairings[0];
-  if (!pairing) {
+  if (!config || config.pairings.length === 0) {
     console.log('not paired — run `sloppers share <code>` (mint one in the office web app)');
     return;
   }
-  console.log(`server   ${pairing.server.httpUrl}`);
-  console.log(`room     ${pairing.roomCode}`);
-  console.log(`name     ${pairing.displayName}`);
-  console.log(`sharing  ${pairing.paused ? pc.yellow('paused') : pc.green('on')}`);
-  const hidden = (Object.entries(pairing.visibility) as [keyof Visibility, boolean][])
-    .filter(([, v]) => !v)
-    .map(([k]) => k);
-  if (hidden.length > 0) console.log(`hidden   ${hidden.join(', ')}`);
-
   const adapters = builtinAdapters();
   const tracker = new SessionTracker(adapters);
   seedTracker(adapters, tracker);
-  const sessions = tracker.snapshot(Date.now());
-  if (sessions.length === 0) {
-    console.log('\nno live agent sessions found');
-    return;
-  }
-  console.log(`\n${sessions.length} live session(s):`);
-  for (const s of sessions) {
-    const tokens = s.tokens ? ` · ${billedTokens(s.tokens).toLocaleString()} tok` : '';
-    const title = s.title ? ` — ${s.title}` : '';
-    console.log(
-      `  ${pc.bold(s.harness)} ${s.state.padEnd(7)} ${s.project ?? '?'}${title}${tokens}`,
-    );
+  for (const line of renderStatus(config, tracker.routableSnapshot(Date.now()))) {
+    console.log(line);
   }
 }
 
@@ -145,9 +217,18 @@ function status(): void {
  * mint a link that signs any browser back in as this member — no login,
  * no password reset, just open the URL.
  */
-async function relink(): Promise<void> {
-  const config = loadConfig();
-  const pairing = config?.pairings[0];
+async function relink(target: string | undefined): Promise<void> {
+  const config = paired();
+  // One link signs a browser in as one member in one office, so this is the
+  // one command that cannot default to "all". With a single workspace that
+  // is unchanged; with several, name the one you mean.
+  const chosen = targeted(config, target);
+  if (chosen.length > 1) {
+    fail(
+      `several workspaces are paired — say which: ${config.pairings.map((p) => p.roomCode).join(', ')}`,
+    );
+  }
+  const pairing = config.pairings[chosen[0] ?? 0];
   if (!pairing) fail('not paired yet — run `sloppers share <code>` first');
   const res = await fetch(`${pairing.server.httpUrl}/api/relink`, {
     method: 'POST',
@@ -177,33 +258,47 @@ async function relink(): Promise<void> {
   }
 }
 
-function setPaused(paused: boolean): void {
-  const config = loadConfig();
-  const pairing = config?.pairings[0];
-  if (!config || !pairing) fail('not paired yet');
+/** Rewrite just the chosen pairings, leaving the rest of the list untouched. */
+function updatePairings(
+  config: CollectorConfig,
+  chosen: number[],
+  edit: (pairing: PairingConfig) => PairingConfig,
+): void {
   saveConfig({
     ...config,
-    pairings: [{ ...pairing, paused }, ...config.pairings.slice(1)],
+    pairings: config.pairings.map((pairing, index) =>
+      chosen.includes(index) ? edit(pairing) : pairing,
+    ),
   });
-  console.log(paused ? 'sharing paused' : 'sharing resumed');
 }
 
-function setVisibility(field: string | undefined, value: boolean): void {
-  const config = loadConfig();
-  const pairing = config?.pairings[0];
-  if (!config || !pairing) fail('not paired yet');
-  const fields = Object.keys(pairing.visibility) as (keyof Visibility)[];
+function setPaused(paused: boolean, target: string | undefined): void {
+  const config = paired();
+  const chosen = targeted(config, target);
+  updatePairings(config, chosen, (pairing) => ({ ...pairing, paused }));
+  console.log(
+    `${paused ? 'sharing paused' : 'sharing resumed'} for ${describeTargets(config.pairings, chosen)}`,
+  );
+}
+
+function setVisibility(
+  field: string | undefined,
+  value: boolean,
+  target: string | undefined,
+): void {
+  const config = paired();
+  const chosen = targeted(config, target);
+  const fields = Object.keys(config.pairings[0]?.visibility ?? {}) as (keyof Visibility)[];
   if (!field || !fields.includes(field as keyof Visibility)) {
     fail(`expected one of: ${fields.join(', ')}`);
   }
-  saveConfig({
-    ...config,
-    pairings: [
-      { ...pairing, visibility: { ...pairing.visibility, [field]: value } },
-      ...config.pairings.slice(1),
-    ],
-  });
-  console.log(`${field} is now ${value ? 'shared' : 'hidden'}`);
+  updatePairings(config, chosen, (pairing) => ({
+    ...pairing,
+    visibility: { ...pairing.visibility, [field]: value },
+  }));
+  console.log(
+    `${field} is now ${value ? 'shared' : 'hidden'} for ${describeTargets(config.pairings, chosen)}`,
+  );
 }
 
 async function main(): Promise<void> {
@@ -219,19 +314,19 @@ async function main(): Promise<void> {
       status();
       break;
     case 'pause':
-      setPaused(true);
+      setPaused(true, args[0]);
       break;
     case 'resume':
-      setPaused(false);
+      setPaused(false, args[0]);
       break;
     case 'hide':
-      setVisibility(args[0], false);
+      setVisibility(args[0], false, args[1]);
       break;
     case 'show':
-      setVisibility(args[0], true);
+      setVisibility(args[0], true, args[1]);
       break;
     case 'relink':
-      await relink();
+      await relink(args[0]);
       break;
     case 'uninstall':
       await uninstallService();

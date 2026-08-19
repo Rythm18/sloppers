@@ -1,8 +1,23 @@
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { CollectorSnapshot, SessionSnapshot } from '@sloppers/protocol';
 import { defaultVisibility, encodeMinutes } from '@sloppers/protocol';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocketServer, type WebSocket as WSSocket } from 'ws';
-import { buildDirtySnapshot, MinuteDirtyTracker } from './daemon.js';
+import type { PairingConfig } from './config.js';
+import { saveConfig } from './config.js';
+import type { RoutableSession } from './core/types.js';
+import {
+  buildDirtySnapshot,
+  buildPairingSnapshot,
+  type Daemon,
+  MinuteDirtyTracker,
+  routeSessions,
+  standDownDecision,
+  startDaemon,
+  unroutedSessions,
+} from './daemon.js';
 import { CollectorClient, type CollectorSocket } from './net/client.js';
 
 const DAY = '2026-08-19';
@@ -18,6 +33,299 @@ function session(overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {
     ...overrides,
   };
 }
+
+/** A complete pairing, for the tests that need more of one than `match`. */
+function workspace(match: string[], overrides: Partial<PairingConfig> = {}): PairingConfig {
+  return {
+    server: { httpUrl: 'https://office.example', wsUrl: 'ws://office.example' },
+    deviceKey: 'k'.repeat(32),
+    memberId: 'm1',
+    displayName: 'tester',
+    roomCode: 'the-lab',
+    match,
+    visibility: { ...defaultVisibility },
+    paused: false,
+    ...overrides,
+  };
+}
+
+function routable(snapshot: SessionSnapshot, cwd: string | undefined): RoutableSession {
+  return { snapshot, cwd };
+}
+
+const pairing = (match: string[]) => ({ match }) as never;
+
+describe('routeSessions', () => {
+  it('sends each session to the first pairing that matches its cwd', () => {
+    const work = pairing(['/work/**']);
+    const home = pairing(['**']);
+    const sessions = [
+      { id: 's1', cwd: '/work/api' },
+      { id: 's2', cwd: '/home/blog' },
+    ] as never[];
+    const routed = routeSessions(sessions, [work, home]);
+    expect(routed.get(work)?.map((s) => s.id)).toEqual(['s1']);
+    expect(routed.get(home)?.map((s) => s.id)).toEqual(['s2']);
+  });
+
+  it('reports a session matching nothing to nobody', () => {
+    const work = pairing(['/work/**']);
+    const routed = routeSessions([{ id: 's1', cwd: '/elsewhere' }] as never[], [work]);
+    expect(routed.get(work)).toEqual([]);
+  });
+
+  it('keeps a pairing that claims nothing in the map, as an empty list', () => {
+    // A pairing with no sessions still has to be *sent* an empty snapshot —
+    // otherwise its office keeps showing whatever it last saw. So it must
+    // appear in the routing table, not be omitted from it.
+    const work = pairing(['/work/**']);
+    const idle = pairing(['/never/**']);
+    const routed = routeSessions([{ id: 's1', cwd: '/work/api' }] as never[], [work, idle]);
+    expect(routed.has(idle)).toBe(true);
+    expect(routed.get(idle)).toEqual([]);
+  });
+
+  it('follows the configured order, not pattern specificity: the earlier pairing wins', () => {
+    // Both patterns match; nothing about `/work/**` being narrower earns it
+    // the session. Swapping the two swaps the winner, and that is the whole
+    // rule — first match wins, in the order the config lists them.
+    const broad = pairing(['**']);
+    const narrow = pairing(['/work/**']);
+    const sessions = [{ id: 's1', cwd: '/work/api' }] as never[];
+
+    expect(
+      routeSessions(sessions, [broad, narrow])
+        .get(broad)
+        ?.map((s) => s.id),
+    ).toEqual(['s1']);
+    expect(routeSessions(sessions, [broad, narrow]).get(narrow)).toEqual([]);
+
+    expect(
+      routeSessions(sessions, [narrow, broad])
+        .get(narrow)
+        ?.map((s) => s.id),
+    ).toEqual(['s1']);
+    expect(routeSessions(sessions, [narrow, broad]).get(broad)).toEqual([]);
+  });
+
+  it('routes a session whose cwd is unknown only to a catch-all pairing', () => {
+    // A harness that never wrote a cwd still produced real spend, and under
+    // 0.1.1 (one catch-all pairing) it was shared. That must not change.
+    const catchAll = pairing(['**']);
+    const scoped = pairing(['/work/**']);
+    const sessions = [{ id: 's1' }] as never[];
+    expect(
+      routeSessions(sessions, [catchAll])
+        .get(catchAll)
+        ?.map((s) => s.id),
+    ).toEqual(['s1']);
+    expect(routeSessions(sessions, [scoped]).get(scoped)).toEqual([]);
+  });
+
+  it('preserves the order sessions arrived in within each pairing', () => {
+    const home = pairing(['**']);
+    const sessions = [
+      { id: 's1', cwd: '/a' },
+      { id: 's2', cwd: '/b' },
+      { id: 's3', cwd: '/c' },
+    ] as never[];
+    expect(
+      routeSessions(sessions, [home])
+        .get(home)
+        ?.map((s) => s.id),
+    ).toEqual(['s1', 's2', 's3']);
+  });
+});
+
+describe('unroutedSessions', () => {
+  it('lists the sessions no pairing claims, so a bad pattern is discoverable', () => {
+    // A session that matches nothing goes nowhere, which is correct — but it
+    // also means its spend is silently invisible. `sloppers status` shows
+    // these so someone whose tokens stopped counting can see why.
+    const work = pairing(['/work/**']);
+    const sessions = [
+      { id: 's1', cwd: '/work/api' },
+      { id: 's2', cwd: '/personal/blog' },
+    ] as never[];
+    expect(unroutedSessions(sessions, [work]).map((s) => s.id)).toEqual(['s2']);
+  });
+
+  it('is empty when some pairing is a catch-all', () => {
+    const sessions = [{ id: 's1', cwd: '/anywhere' }] as never[];
+    expect(unroutedSessions(sessions, [pairing(['/work/**']), pairing(['**'])])).toEqual([]);
+  });
+});
+
+describe('buildPairingSnapshot', () => {
+  it('never lets a cwd reach the wire — it is a local routing input only', () => {
+    // Privacy, not tidiness: a full path leaks directory structure and very
+    // often a person's name. `SessionSnapshot` carries `project` (a basename)
+    // deliberately, and the cwd rides *outside* the snapshot so nothing that
+    // builds an outgoing message can reach it by accident.
+    const cwd = '/Users/ridham/work/acme-secret-client';
+    const sessions = [routable(session({ project: 'acme-secret-client' }), cwd)];
+    const { snapshot } = buildPairingSnapshot(
+      workspace(['**']),
+      sessions,
+      new MinuteDirtyTracker(),
+      { idleSeconds: 3 },
+    );
+    const wire = JSON.stringify(snapshot);
+    expect(wire).not.toContain('cwd');
+    expect(wire).not.toContain(cwd);
+    expect(wire).not.toContain('/Users/ridham');
+    // The basename still goes out — that is the field the office renders.
+    expect(snapshot.sessions[0]?.project).toBe('acme-secret-client');
+  });
+
+  it('sends nothing at all for a paused pairing, not even machine telemetry', () => {
+    const minutes = new MinuteDirtyTracker();
+    const s = session({ activeMinutes: [{ day: DAY, minutes: encodeMinutes([1]) }] });
+    const { snapshot, included } = buildPairingSnapshot(
+      workspace(['**'], { paused: true }),
+      [routable(s, '/work/api')],
+      minutes,
+      { idleSeconds: 3 },
+    );
+    expect(snapshot.sessions).toEqual([]);
+    expect(snapshot.machine).toEqual({});
+    expect(included.size).toBe(0);
+  });
+
+  it('pausing one pairing does not stop another from sharing', () => {
+    const minutes = new MinuteDirtyTracker();
+    const s = session();
+    const { snapshot } = buildPairingSnapshot(
+      workspace(['**']),
+      [routable(s, '/work/api')],
+      minutes,
+      {
+        idleSeconds: 3,
+      },
+    );
+    expect(snapshot.sessions).toHaveLength(1);
+    expect(snapshot.machine).toEqual({ idleSeconds: 3 });
+  });
+
+  it('gives a session its whole minute history when it moves to another workspace', () => {
+    // THE hazard of one-client-per-pairing. Dirty flags are per (session,
+    // day) and clear once a snapshot is confirmed sent. Share a single
+    // tracker across pairings and the first pairing's send marks the day
+    // clean for everybody — so when the same session later routes somewhere
+    // else (a narrowed pattern, a removed pairing, a reordered list, an
+    // agent that cd'd out of the matched tree), the new workspace is never
+    // told about that day at all. Minute bitmaps have no catch-up on the
+    // server: an unreported day is simply absent, permanently.
+    const from = workspace(['/work/**']);
+    const to = workspace(['**']);
+    const fromMinutes = new MinuteDirtyTracker();
+    const toMinutes = new MinuteDirtyTracker();
+    const s = session({ activeMinutes: [{ day: DAY, minutes: encodeMinutes([1, 2]) }] });
+
+    const first = buildPairingSnapshot(from, [routable(s, '/work/api')], fromMinutes, {});
+    expect(first.snapshot.sessions[0]?.activeMinutes).toEqual(s.activeMinutes);
+    fromMinutes.confirmSent(first.included);
+
+    // The session now routes to the other workspace, with nothing new to
+    // report — same bitmap, same day.
+    const second = buildPairingSnapshot(to, [routable(s, '/personal/blog')], toMinutes, {});
+    expect(second.snapshot.sessions[0]?.activeMinutes).toEqual(s.activeMinutes);
+  });
+
+  it('a reconnect on one pairing does not disturb the other pairing’s bookkeeping', () => {
+    // `markAllDirty` is the reconnect backstop, and a reconnect is a fact
+    // about one connection. With a shared tracker it would re-mark every
+    // other pairing's sessions too, so a client that never dropped resends
+    // its whole minute history on the next heartbeat.
+    const aMinutes = new MinuteDirtyTracker();
+    const bMinutes = new MinuteDirtyTracker();
+    const a = session({ id: 'a', activeMinutes: [{ day: DAY, minutes: encodeMinutes([1]) }] });
+    const b = session({ id: 'b', activeMinutes: [{ day: DAY, minutes: encodeMinutes([9]) }] });
+    const workA = workspace(['/work/**']);
+    const workB = workspace(['**']);
+
+    aMinutes.confirmSent(
+      buildPairingSnapshot(workA, [routable(a, '/work/api')], aMinutes, {}).included,
+    );
+    bMinutes.confirmSent(
+      buildPairingSnapshot(workB, [routable(b, '/personal/blog')], bMinutes, {}).included,
+    );
+
+    // Only A's socket dropped and came back.
+    aMinutes.markAllDirty();
+
+    const resent = buildPairingSnapshot(workA, [routable(a, '/work/api')], aMinutes, {});
+    expect(resent.snapshot.sessions[0]?.activeMinutes).toEqual(a.activeMinutes);
+    const untouched = buildPairingSnapshot(workB, [routable(b, '/personal/blog')], bMinutes, {});
+    expect(untouched.snapshot.sessions[0]?.activeMinutes).toBeUndefined();
+  });
+
+  it('delivers the same day’s minutes to two workspaces at once, one session each', () => {
+    const aMinutes = new MinuteDirtyTracker();
+    const bMinutes = new MinuteDirtyTracker();
+    const a = session({ id: 'a', activeMinutes: [{ day: DAY, minutes: encodeMinutes([1]) }] });
+    const b = session({ id: 'b', activeMinutes: [{ day: DAY, minutes: encodeMinutes([9]) }] });
+
+    const first = buildPairingSnapshot(
+      workspace(['/work/**']),
+      [routable(a, '/work/api')],
+      aMinutes,
+      {},
+    );
+    aMinutes.confirmSent(first.included);
+    const second = buildPairingSnapshot(
+      workspace(['**']),
+      [routable(b, '/personal/blog')],
+      bMinutes,
+      {},
+    );
+    bMinutes.confirmSent(second.included);
+
+    expect(first.snapshot.sessions[0]?.activeMinutes).toEqual(a.activeMinutes);
+    expect(second.snapshot.sessions[0]?.activeMinutes).toEqual(b.activeMinutes);
+  });
+
+  it('applies each pairing’s own visibility settings', () => {
+    const s = session({
+      title: 'secret',
+      tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    });
+    const open = buildPairingSnapshot(
+      workspace(['**']),
+      [routable(s, '/work/api')],
+      new MinuteDirtyTracker(),
+      {},
+    );
+    const shy = buildPairingSnapshot(
+      workspace(['**'], { visibility: { ...defaultVisibility, title: false } }),
+      [routable(s, '/work/api')],
+      new MinuteDirtyTracker(),
+      {},
+    );
+    expect(open.snapshot.sessions[0]?.title).toBe('secret');
+    expect(shy.snapshot.sessions[0]?.title).toBeUndefined();
+  });
+});
+
+describe('standDownDecision', () => {
+  it('keeps the daemon up while any client is still serving a workspace', () => {
+    expect(standDownDecision(['unknown-device', undefined])).toBeNull();
+    expect(standDownDecision([undefined, undefined])).toBeNull();
+    expect(standDownDecision([])).toBeNull();
+  });
+
+  it('stands down clean only when every client was superseded', () => {
+    // superseded means another machine took over: exit clean so the service
+    // does NOT restart us. A rejected device key means re-pairing is needed:
+    // exit non-zero so launchd/systemd bring us back. If the two disagree,
+    // the restartable answer wins — coming back and finding the config fixed
+    // is recoverable, staying down is not.
+    expect(standDownDecision(['superseded'])).toBe('superseded');
+    expect(standDownDecision(['superseded', 'superseded'])).toBe('superseded');
+    expect(standDownDecision(['superseded', 'unknown-device'])).toBe('unknown-device');
+    expect(standDownDecision(['unknown-device'])).toBe('unknown-device');
+  });
+});
 
 describe('MinuteDirtyTracker', () => {
   it('marks a day dirty the first time it is observed', () => {
@@ -201,9 +509,17 @@ describe('buildDirtySnapshot', () => {
 class FakeCollectorServer {
   readonly wss: WebSocketServer;
   readonly port: number;
+  /** Every snapshot ever received, in arrival order. */
+  readonly received: CollectorSnapshot[] = [];
+  /** How many collectors have said hello here — one per pairing, not per daemon. */
+  connections = 0;
   private sockets: WSSocket[] = [];
   private queue: CollectorSnapshot[] = [];
   private waiters: ((m: CollectorSnapshot) => void)[] = [];
+  private matchers: {
+    predicate: (m: CollectorSnapshot) => boolean;
+    resolve: (m: CollectorSnapshot) => void;
+  }[] = [];
 
   constructor() {
     this.wss = new WebSocketServer({ port: 0 });
@@ -212,6 +528,7 @@ class FakeCollectorServer {
       ws.on('message', (data) => {
         const msg = JSON.parse(String(data));
         if (msg.type === 'hello') {
+          this.connections += 1;
           ws.send(
             JSON.stringify({
               type: 'hello-ok',
@@ -222,6 +539,12 @@ class FakeCollectorServer {
           );
           return;
         }
+        this.received.push(msg);
+        for (const matcher of [...this.matchers]) {
+          if (!matcher.predicate(msg)) continue;
+          this.matchers = this.matchers.filter((m) => m !== matcher);
+          matcher.resolve(msg);
+        }
         const waiter = this.waiters.shift();
         if (waiter) waiter(msg);
         else this.queue.push(msg);
@@ -230,6 +553,28 @@ class FakeCollectorServer {
     const addr = this.wss.address();
     if (typeof addr !== 'object' || addr === null) throw new Error('server has no port');
     this.port = addr.port;
+  }
+
+  /** The first snapshot — already received or yet to arrive — matching `predicate`. */
+  async waitFor(
+    predicate: (m: CollectorSnapshot) => boolean,
+    timeoutMs = 15_000,
+  ): Promise<CollectorSnapshot> {
+    const already = this.received.find(predicate);
+    if (already) return already;
+    return new Promise<CollectorSnapshot>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('timed out waiting for a matching snapshot')),
+        timeoutMs,
+      );
+      this.matchers.push({
+        predicate,
+        resolve: (m) => {
+          clearTimeout(timer);
+          resolve(m);
+        },
+      });
+    });
   }
 
   async nextSnapshot(timeoutMs = 4000): Promise<CollectorSnapshot> {
@@ -420,6 +765,161 @@ describe('a failed write does not clear the dirty flag', () => {
     expect(third.sessions[0]?.activeMinutes).toBeUndefined();
 
     client.stop();
+  });
+});
+
+/**
+ * A synthetic Claude Code transcript under `home`, with one assistant turn
+ * carrying usage — enough to produce a session with tokens and one active
+ * minute. Returns the file path so a test can append to it.
+ */
+function writeClaudeSession(home: string, id: string, cwd: string): string {
+  const dir = join(home, '.claude', 'projects', `-${id}`);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${id}.jsonl`);
+  const at = new Date(Date.now() - 60_000).toISOString();
+  const lines = [
+    {
+      sessionId: id,
+      cwd,
+      isSidechain: false,
+      timestamp: at,
+      type: 'user',
+      message: { content: 'go' },
+    },
+    {
+      sessionId: id,
+      cwd,
+      isSidechain: false,
+      timestamp: at,
+      type: 'assistant',
+      requestId: `${id}-req-1`,
+      message: {
+        model: 'claude-fable-5',
+        content: [{ type: 'text', text: 'ok' }],
+        usage: { input_tokens: 100, output_tokens: 10 },
+      },
+    },
+  ];
+  writeFileSync(file, `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`);
+  return file;
+}
+
+/**
+ * A `user` entry carrying a different cwd: it re-routes the session without
+ * touching its minute bitmap (minutes are recorded only for assistant turns
+ * with usage), which is exactly the case a shared dirty tracker loses.
+ */
+function appendCwdChange(file: string, id: string, cwd: string): void {
+  appendFileSync(
+    file,
+    `${JSON.stringify({
+      sessionId: id,
+      cwd,
+      isSidechain: false,
+      timestamp: new Date().toISOString(),
+      type: 'user',
+      message: { content: 'moved' },
+    })}\n`,
+  );
+}
+
+function pairingFor(port: number, match: string[], key: string): PairingConfig {
+  return workspace(match, {
+    server: { httpUrl: `http://127.0.0.1:${port}`, wsUrl: `ws://127.0.0.1:${port}` },
+    deviceKey: key.repeat(32).slice(0, 32),
+    roomCode: `room-${key}`,
+    displayName: `name-${key}`,
+  });
+}
+
+describe('startDaemon runs one client per pairing', () => {
+  let daemon: Daemon | null = null;
+  const servers: FakeCollectorServer[] = [];
+
+  afterEach(async () => {
+    await daemon?.stop();
+    daemon = null;
+    for (const s of servers.splice(0)) s.close();
+  });
+
+  it('routes each session by its directory, keeps cwd off the wire, and tracks dirty minutes per pairing', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-daemon-'));
+    const work = new FakeCollectorServer();
+    const personal = new FakeCollectorServer();
+    servers.push(work, personal);
+
+    const workDir = join(home, 'work', 'api');
+    const personalDir = join(home, 'personal', 'blog');
+    const file = writeClaudeSession(home, 'moving-session', workDir);
+
+    saveConfig(
+      {
+        version: 2,
+        pairings: [
+          pairingFor(work.port, [join(home, 'work', '**')], 'a'),
+          pairingFor(personal.port, ['**'], 'b'),
+        ],
+      },
+      home,
+    );
+
+    daemon = startDaemon({ collectorVersion: 'test', home, log: () => {} });
+
+    // First match wins: `~/work/**` comes first, so the work office gets it
+    // and the catch-all office is told it has nothing.
+    const claimed = await work.waitFor((m) => m.sessions.length === 1);
+    expect(claimed.sessions[0]?.project).toBe('api');
+    expect(claimed.sessions[0]?.activeMinutes?.length).toBe(1);
+    await personal.waitFor((m) => m.sessions.length === 0);
+
+    // One client per pairing — two sockets, not one shared connection.
+    expect(work.connections).toBe(1);
+    expect(personal.connections).toBe(1);
+
+    // Settle the dirty bookkeeping before the interesting part. Both clients
+    // have now said hello, so both reconnect backstops (`markAllDirty`) have
+    // already fired; this second send is the one that leaves the day
+    // confirmed-clean for the work office with nothing left to re-mark it.
+    // Without this step the outcome below would turn on which hello-ok
+    // happened to land last, which is exactly the sort of ordering luck that
+    // hides the bug rather than catching it.
+    const settled = work.received.length;
+    appendCwdChange(file, 'moving-session', workDir);
+    await work.waitFor((m) => m.sessions.length === 1 && work.received.indexOf(m) >= settled);
+
+    // Now the agent cd's out of the matched tree, and the session belongs to
+    // the catch-all office instead. Its minutes did not change — a `user`
+    // entry records none — so a *shared* dirty tracker calls that day clean
+    // and the catch-all office is never told about it at all. Minute bitmaps
+    // have no server-side catch-up: a day it never receives is simply absent
+    // from it, permanently. Per-pairing trackers are what make this arrive.
+    const seenByWork = work.received.length;
+    appendCwdChange(file, 'moving-session', personalDir);
+    const moved = await personal.waitFor((m) => m.sessions.length === 1);
+    expect(moved.sessions[0]?.project).toBe('blog');
+    expect(moved.sessions[0]?.activeMinutes?.length).toBe(1);
+    // And the work office is told the session left, rather than keeping a
+    // ghost of it on screen forever.
+    await work.waitFor((m) => m.sessions.length === 0 && work.received.indexOf(m) >= seenByWork);
+
+    // Privacy: no absolute path ever reached either office.
+    const wire = JSON.stringify([...work.received, ...personal.received]);
+    expect(wire).not.toContain('cwd');
+    expect(wire).not.toContain(workDir);
+    expect(wire).not.toContain(personalDir);
+    expect(wire).not.toContain(home);
+  }, 30_000);
+
+  it('refuses to start when nothing is paired', () => {
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-daemon-'));
+    expect(() => startDaemon({ collectorVersion: 'test', home, log: () => {} })).toThrow(
+      /Not paired/,
+    );
+    saveConfig({ version: 2, pairings: [] }, home);
+    expect(() => startDaemon({ collectorVersion: 'test', home, log: () => {} })).toThrow(
+      /Not paired/,
+    );
   });
 });
 

@@ -239,3 +239,35 @@ function expandTilde(pattern: string): string {
 export function matchesPairing(pairing: PairingConfig, cwd: string): boolean {
   return pairing.match.some((pattern) => globToRegExp(expandTilde(pattern)).test(cwd));
 }
+
+/**
+ * A concrete directory standing in for everything a `match` glob claims:
+ * the pattern with `~` expanded and truncated at its first wildcard. Used to
+ * ask whether some *other* pairing already claims the same region.
+ *
+ * A catch-all `**` reduces to the empty string, which only another catch-all
+ * matches — exactly the answer wanted, since only a catch-all can shadow a
+ * catch-all.
+ */
+export function samplePathFor(pattern: string): string {
+  const expanded = expandTilde(pattern);
+  const wildcard = expanded.indexOf('*');
+  const head = wildcard < 0 ? expanded : expanded.slice(0, wildcard);
+  return head.replace(/[/\\]+$/, '');
+}
+
+/**
+ * The first of `earlier` that already claims every directory `match` would,
+ * if any. Routing is first-match-wins over an ordered list, so a pairing
+ * listed above a new one — a catch-all `**`, most often — silently starves
+ * it: the new workspace connects, stays connected, and never receives a
+ * single session. That is a confusing failure to discover from the outside,
+ * so `sloppers share` says it out loud at the moment it becomes true.
+ */
+export function shadowedBy(
+  earlier: readonly PairingConfig[],
+  match: readonly string[],
+): PairingConfig | undefined {
+  const samples = match.map(samplePathFor);
+  return earlier.find((pairing) => samples.every((sample) => matchesPairing(pairing, sample)));
+}

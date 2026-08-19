@@ -6,9 +6,16 @@ import type {
   Visibility,
 } from '@sloppers/protocol';
 import { builtinAdapters } from './adapters/index.js';
-import { type CollectorConfig, configDir, loadConfig, type PairingConfig } from './config.js';
+import {
+  type CollectorConfig,
+  configDir,
+  loadConfig,
+  matchesPairing,
+  type PairingConfig,
+} from './config.js';
 import { machineIdleSeconds } from './core/idle.js';
 import { SessionTracker } from './core/tracker.js';
+import type { RoutableSession } from './core/types.js';
 import { applyVisibility } from './core/visibility.js';
 import { type WatchHandle, watchSessions } from './core/watcher.js';
 import { CollectorClient } from './net/client.js';
@@ -147,81 +154,252 @@ export function buildDirtySnapshot(
 }
 
 /**
- * The pairing this daemon acts on. A config always has at least one
- * pairing once paired at all (an upgraded v1 file produces exactly one
- * catch-all pairing), so today's daemon simply runs the first one — this
- * is the single-workspace behavior unchanged from before v2. A later
- * task replaces this with real per-directory routing across every
- * pairing and one `CollectorClient` each.
+ * Which workspace each session belongs to: the first pairing in the list
+ * whose `match` globs contain its `cwd` takes it, and no other pairing sees
+ * it. Every pairing gets an entry, including the ones that claimed nothing —
+ * a workspace with no live sessions still has to be *sent* an empty snapshot
+ * or its office keeps showing whatever it last saw.
+ *
+ * First match wins, in the order the config lists the pairings, and nothing
+ * about a pattern being narrower earns it a session: the ordering is the
+ * whole rule, so a person can reason about it by reading their config top to
+ * bottom. Overlap is expected and fine — a catch-all last is the natural way
+ * to write "everything else goes here" — but a catch-all *first* swallows
+ * everything, which is why `sloppers share` warns about exactly that.
+ *
+ * A session whose cwd is unknown is treated as the empty path, so only a
+ * catch-all `**` claims it. That is deliberately the 0.1.1 behaviour: the
+ * single pairing an upgraded v1 config produces is a catch-all, so a session
+ * whose harness never wrote a cwd keeps being shared exactly as before.
+ *
+ * Generic in the session type because routing only ever reads `cwd`: the
+ * daemon passes `RoutableSession`s, and nothing here can see — let alone
+ * forward — the wire snapshot they carry.
  */
-function firstPairing(config: CollectorConfig): PairingConfig | undefined {
-  return config.pairings[0];
+export function routeSessions<T extends { cwd?: string | undefined }>(
+  sessions: readonly T[],
+  pairings: readonly PairingConfig[],
+): Map<PairingConfig, T[]> {
+  const routed = new Map<PairingConfig, T[]>();
+  for (const pairing of pairings) routed.set(pairing, []);
+  for (const session of sessions) {
+    const winner = pairings.find((pairing) => matchesPairing(pairing, session.cwd ?? ''));
+    if (winner) routed.get(winner)?.push(session);
+  }
+  return routed;
 }
 
 /**
- * The composed collector: adapters → tracker → visibility filter → client,
- * plus timers. Heartbeats double as state refreshers — a session drifts
- * working → waiting → idle purely with time, so the world is re-derived and
- * re-sent even without file events.
+ * The sessions no pairing claims. Going nowhere is the correct answer for a
+ * directory nobody paired, but it also means that session's spend is
+ * silently invisible — nothing on the wire, nothing on any leaderboard, no
+ * error anywhere. `sloppers status` prints these so a misconfigured pattern
+ * is discoverable rather than mysterious.
+ */
+export function unroutedSessions<T extends { cwd?: string | undefined }>(
+  sessions: readonly T[],
+  pairings: readonly PairingConfig[],
+): T[] {
+  return sessions.filter(
+    (session) => !pairings.some((pairing) => matchesPairing(pairing, session.cwd ?? '')),
+  );
+}
+
+/**
+ * One pairing's outgoing snapshot: its own sessions, its own visibility
+ * settings, its own dirty-minute bookkeeping.
+ *
+ * `routed` carries each session's `cwd` alongside its wire snapshot, and
+ * only the `snapshot` half is ever projected — the cwd is a local routing
+ * input, never shared data.
+ */
+export function buildPairingSnapshot(
+  pairing: PairingConfig,
+  routed: readonly RoutableSession[],
+  minutes: MinuteDirtyTracker,
+  machine: CollectorSnapshot['machine'],
+): { snapshot: CollectorSnapshot; included: Map<string, Set<string>> } {
+  // Paused means paused: no sessions AND no machine telemetry — idle
+  // seconds are at-the-keyboard presence data. Per pairing, so pausing one
+  // workspace leaves the others sharing.
+  if (pairing.paused) {
+    return { snapshot: { type: 'snapshot', sessions: [], machine: {} }, included: new Map() };
+  }
+  const { sessions, included } = buildDirtySnapshot(
+    routed.map((session) => session.snapshot),
+    pairing.visibility,
+    minutes,
+  );
+  return { snapshot: { type: 'snapshot', sessions, machine: { ...machine } }, included };
+}
+
+/** Why one pairing's client gave up; see `standDownDecision`. */
+export type StandDownReason = 'unknown-device' | 'superseded';
+
+/**
+ * Whether the whole daemon should stand down, given why each pairing's
+ * client stopped (`undefined` for one still serving).
+ *
+ * Both signals are per-connection — one office revoking a device key, or one
+ * office handing this member to another machine, says nothing about the
+ * others — so the daemon only exits once every workspace it has is gone. For
+ * the single-pairing user that is exactly the previous behaviour: the one
+ * client reports, the daemon stands down.
+ *
+ * When the reasons disagree, the restartable answer wins: `superseded` means
+ * exit clean so the service does NOT restart us, and applying that while
+ * another workspace merely needs re-pairing would leave the daemon down for
+ * good instead of coming back to a fixed config.
+ */
+export function standDownDecision(
+  reasons: readonly (StandDownReason | undefined)[],
+): StandDownReason | null {
+  if (reasons.length === 0) return null;
+  if (reasons.some((reason) => reason === undefined)) return null;
+  return reasons.every((reason) => reason === 'superseded') ? 'superseded' : 'unknown-device';
+}
+
+/** Everything the daemon holds for one pairing — one client, one workspace. */
+interface PairingRuntime {
+  pairing: PairingConfig;
+  client: CollectorClient;
+  /**
+   * Per pairing, never shared. Dirty flags clear when a snapshot is confirmed
+   * sent, so one shared tracker would let the first pairing's send mark a day
+   * clean for every other pairing — and minute bitmaps have no catch-up on
+   * the server, so a day another workspace never received is simply absent
+   * from it, permanently.
+   */
+  minutes: MinuteDirtyTracker;
+  standDown?: StandDownReason;
+}
+
+/**
+ * The composed collector: adapters → tracker → routing → visibility filter →
+ * one client per pairing, plus timers. Heartbeats double as state refreshers
+ * — a session drifts working → waiting → idle purely with time, so the world
+ * is re-derived and re-sent even without file events.
+ *
+ * The session tracker is shared (one machine, one set of transcripts);
+ * everything downstream of routing is per pairing.
  */
 export function startDaemon(opts: {
   collectorVersion: string;
   home?: string;
   log: (message: string) => void;
-  /** Device key rejected; the daemon has stopped and needs re-pairing. */
+  /** Every workspace's device key was rejected; the daemon needs re-pairing. */
   onUnknownDevice?: () => void;
-  /** Another machine took over this member; the daemon has stopped. */
+  /** Another machine took over every workspace; the daemon has stopped. */
   onSuperseded?: () => void;
 }): Daemon {
   const initialConfig = loadConfig(opts.home);
-  const initialPairing = initialConfig && firstPairing(initialConfig);
-  if (!initialPairing) {
+  if (!initialConfig || initialConfig.pairings.length === 0) {
     throw new Error('Not paired yet — run `sloppers share <code>` first.');
   }
-  let pairing = initialPairing;
 
   const adapters = builtinAdapters(opts.home);
   const tracker = new SessionTracker(adapters);
-  const minuteTracker = new MinuteDirtyTracker();
-  const clientOptions: ConstructorParameters<typeof CollectorClient>[0] = {
-    wsUrl: pairing.server.wsUrl,
-    deviceKey: pairing.deviceKey,
-    collectorVersion: opts.collectorVersion,
-    log: opts.log,
-    // A reconnect means the server's state is no longer something we can
-    // trust our local "already sent" bookkeeping about — resend everything.
-    onReady: () => minuteTracker.markAllDirty(),
-  };
-  if (opts.onUnknownDevice) clientOptions.onUnknownDevice = opts.onUnknownDevice;
-  if (opts.onSuperseded) clientOptions.onSuperseded = opts.onSuperseded;
-  const client = new CollectorClient(clientOptions);
 
   let idleSeconds: number | undefined;
+  /** One runtime per pairing, in config order — routing reads that order. */
+  let runtimes: PairingRuntime[] = [];
 
-  const buildSnapshot = (
-    current: PairingConfig,
-  ): { snapshot: CollectorSnapshot; included: Map<string, Set<string>> } => {
-    // Paused means paused: no sessions AND no machine telemetry — idle
-    // seconds are at-the-keyboard presence data.
-    if (current.paused) {
-      return { snapshot: { type: 'snapshot', sessions: [], machine: {} }, included: new Map() };
+  const standDown = () => {
+    const decision = standDownDecision(runtimes.map((runtime) => runtime.standDown));
+    if (decision === 'superseded') opts.onSuperseded?.();
+    else if (decision === 'unknown-device') opts.onUnknownDevice?.();
+  };
+
+  const createRuntime = (pairing: PairingConfig): PairingRuntime => {
+    const minutes = new MinuteDirtyTracker();
+    const runtime: PairingRuntime = {
+      pairing,
+      minutes,
+      client: new CollectorClient({
+        wsUrl: pairing.server.wsUrl,
+        deviceKey: pairing.deviceKey,
+        collectorVersion: opts.collectorVersion,
+        log: opts.log,
+        // A reconnect means this server's state is no longer something we can
+        // trust our local "already sent" bookkeeping about — resend
+        // everything we know, to this workspace only.
+        onReady: () => minutes.markAllDirty(),
+        onUnknownDevice: () => {
+          runtime.standDown = 'unknown-device';
+          standDown();
+        },
+        onSuperseded: () => {
+          runtime.standDown = 'superseded';
+          standDown();
+        },
+      }),
+    };
+    return runtime;
+  };
+
+  /**
+   * Bring the running clients in line with `config`: keep (and re-point) the
+   * ones still listed, start clients for pairings that appeared, stop the
+   * ones that went away. A pairing is recognised across reloads by its device
+   * key and server, so a `sloppers pause` or a visibility edit re-points the
+   * existing client — and, crucially, keeps its dirty-minute bookkeeping —
+   * rather than reconnecting and resending everything.
+   */
+  const reconcile = (config: CollectorConfig): void => {
+    const spare = [...runtimes];
+    const next: PairingRuntime[] = [];
+    for (const pairing of config.pairings) {
+      const held = spare.findIndex(
+        (runtime) =>
+          runtime.pairing.deviceKey === pairing.deviceKey &&
+          runtime.pairing.server.wsUrl === pairing.server.wsUrl,
+      );
+      if (held >= 0) {
+        const [reused] = spare.splice(held, 1);
+        if (reused) {
+          reused.pairing = pairing;
+          next.push(reused);
+          continue;
+        }
+      }
+      const created = createRuntime(pairing);
+      next.push(created);
+      created.client.start();
     }
-    const machine: CollectorSnapshot['machine'] = {};
-    if (idleSeconds !== undefined) machine.idleSeconds = idleSeconds;
-    const raw = tracker.snapshot(Date.now());
-    const { sessions, included } = buildDirtySnapshot(raw, current.visibility, minuteTracker);
-    minuteTracker.prune(new Set(raw.map((s) => s.id)));
-    return { snapshot: { type: 'snapshot', sessions, machine }, included };
+    for (const dropped of spare) dropped.client.stop();
+    runtimes = next;
   };
 
   const send = () => {
-    const { snapshot, included } = buildSnapshot(pairing);
-    // Dirty flags clear only once this exact payload is actually flushed to
-    // the wire — not here at build time. A snapshot built while offline (or
-    // one that gets superseded before it flushes) must leave its minutes
-    // dirty, or a failed send loses that day for good: activeMinutes has no
-    // catch-up rule on the server, so an unreported day is just absent.
-    client.sendSnapshot(snapshot, () => minuteTracker.confirmSent(included));
+    // The cwd is read here, before projection, and goes no further than the
+    // routing decision: what each client is handed is the wire snapshot only.
+    const routable = tracker.routableSnapshot(Date.now());
+    const routed = routeSessions(
+      routable,
+      runtimes.map((runtime) => runtime.pairing),
+    );
+    const machine: CollectorSnapshot['machine'] = {};
+    if (idleSeconds !== undefined) machine.idleSeconds = idleSeconds;
+    // Pruned against every live session, not just this workspace's: a session
+    // that merely moved to another pairing is still live, and forgetting it
+    // here would resend its whole history if it ever came back.
+    const live = new Set(routable.map((session) => session.snapshot.id));
+    for (const runtime of runtimes) {
+      const mine = routed.get(runtime.pairing) ?? [];
+      const { snapshot, included } = buildPairingSnapshot(
+        runtime.pairing,
+        mine,
+        runtime.minutes,
+        machine,
+      );
+      runtime.minutes.prune(live);
+      // Dirty flags clear only once this exact payload is actually flushed to
+      // the wire — not here at build time. A snapshot built while offline (or
+      // one that gets superseded before it flushes) must leave its minutes
+      // dirty, or a failed send loses that day for good: activeMinutes has no
+      // catch-up rule on the server, so an unreported day is just absent.
+      runtime.client.sendSnapshot(snapshot, () => runtime.minutes.confirmSent(included));
+    }
   };
 
   let debounce: NodeJS.Timeout | null = null;
@@ -245,23 +423,24 @@ export function startDaemon(opts: {
     idleSeconds = s;
   });
 
-  // Pick up `sloppers pause` / visibility edits without a restart.
+  // Pick up `sloppers pause` / visibility edits, and whole workspaces added
+  // or removed by `sloppers share`, without a restart.
   let configWatcher: NodeFsWatcher | null = null;
   try {
     configWatcher = watchFs(configDir(opts.home), (_event, filename) => {
       if (filename !== 'config.json') return;
       const next = loadConfig(opts.home);
-      const nextPairing = next && firstPairing(next);
-      if (nextPairing) {
-        pairing = nextPairing;
-        send();
-      }
+      // Deleted or unparseable: keep running with the config we have rather
+      // than tearing every workspace down over a half-written file.
+      if (!next) return;
+      reconcile(next);
+      send();
     });
   } catch {
     // Config dir vanished; daemon keeps running with the loaded config.
   }
 
-  client.start();
+  reconcile(initialConfig);
   send();
 
   return {
@@ -271,7 +450,7 @@ export function startDaemon(opts: {
       clearInterval(idlePoll);
       configWatcher?.close();
       await watcher.close();
-      client.stop();
+      for (const runtime of runtimes) runtime.client.stop();
     },
   };
 }

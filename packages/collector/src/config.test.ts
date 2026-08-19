@@ -2,7 +2,15 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { addPairing, loadConfig, matchesPairing, newConfig, saveConfig } from './config.js';
+import {
+  addPairing,
+  loadConfig,
+  matchesPairing,
+  newConfig,
+  samplePathFor,
+  saveConfig,
+  shadowedBy,
+} from './config.js';
 
 describe('collector config', () => {
   it('round-trips through disk', () => {
@@ -189,5 +197,33 @@ describe('collector config', () => {
     const cwd = `${homedir()}/work/api`;
     expect(matchesPairing(broad, cwd)).toBe(true);
     expect(matchesPairing(narrow, cwd)).toBe(true);
+  });
+});
+
+describe('shadowing', () => {
+  it('reduces a pattern to the directory it stands for', () => {
+    expect(samplePathFor('~/work/**')).toBe(`${homedir()}/work`);
+    expect(samplePathFor('/srv/apps/**')).toBe('/srv/apps');
+    expect(samplePathFor('/srv/*/api')).toBe('/srv');
+    expect(samplePathFor('/srv/apps')).toBe('/srv/apps');
+    // Only a catch-all can shadow a catch-all.
+    expect(samplePathFor('**')).toBe('');
+  });
+
+  it('spots an earlier pairing that already claims everything a new one would', () => {
+    // Routing is first-match-wins, so a catch-all above a new workspace
+    // starves it: it connects, stays connected, and never gets a session.
+    const catchAll = { match: ['**'], roomCode: 'first' } as never;
+    expect(shadowedBy([catchAll], ['~/work/**'])).toBe(catchAll);
+    expect(shadowedBy([catchAll], ['**'])).toBe(catchAll);
+  });
+
+  it('does not cry shadow when the earlier pairings claim somewhere else', () => {
+    const scoped = { match: ['~/personal/**'] } as never;
+    expect(shadowedBy([scoped], ['~/work/**'])).toBeUndefined();
+    expect(shadowedBy([], ['~/work/**'])).toBeUndefined();
+    // A catch-all added *after* a scoped pairing is the normal, healthy
+    // "everything else goes here" shape.
+    expect(shadowedBy([scoped], ['**'])).toBeUndefined();
   });
 });

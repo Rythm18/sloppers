@@ -3,7 +3,7 @@ import type { MinuteReport, SessionSnapshot, TokenTotals, UsageBucket } from '@s
 import { emptyTokens, encodeMinutes } from '@sloppers/protocol';
 import { deriveSessionState, EXPIRE_MS } from './state.js';
 import { newCursor, readAppended } from './tailer.js';
-import type { HarnessAdapter, SessionAccumulator, TailCursor } from './types.js';
+import type { HarnessAdapter, RoutableSession, SessionAccumulator, TailCursor } from './types.js';
 
 interface Entry {
   adapter: HarnessAdapter;
@@ -99,7 +99,19 @@ export class SessionTracker {
 
   /** Project the live sessions into wire snapshots, newest first. */
   snapshot(now: number): SessionSnapshot[] {
-    const out: SessionSnapshot[] = [];
+    return this.routableSnapshot(now).map((s) => s.snapshot);
+  }
+
+  /**
+   * The same projection, each snapshot paired with the accumulator's `cwd`.
+   *
+   * The cwd is read here, *before* projection, because it is exactly what the
+   * projection throws away: the wire carries `project`, the basename, and
+   * never the path. Routing a session to a workspace needs the whole path, so
+   * the daemon takes this view and hands only the `snapshot` half onward.
+   */
+  routableSnapshot(now: number): RoutableSession[] {
+    const out: RoutableSession[] = [];
     for (const group of this.groups()) {
       // Expiry is group-wide and checked before the display filters. Group-wide
       // because a parent transcript is not appended to while a subagent runs —
@@ -145,9 +157,9 @@ export class SessionTracker {
       if (buckets.length > 0) snapshot.usage = buckets;
       const minutes = mergeMinutes(group.accs);
       if (minutes.length > 0) snapshot.activeMinutes = minutes;
-      out.push(snapshot);
+      out.push({ snapshot, cwd: acc.cwd });
     }
-    out.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+    out.sort((a, b) => b.snapshot.lastActivityAt - a.snapshot.lastActivityAt);
     return out.slice(0, 64);
   }
 
