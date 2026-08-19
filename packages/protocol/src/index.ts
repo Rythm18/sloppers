@@ -10,5 +10,7 @@ export const PROTOCOL_VERSION = 1;
 
 export * from './collector.js';
 export * from './core.js';
+export * from './pricing.js';
+export * from './usage.js';
 export * from './web.js';
 export * from './workspace.js';

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { minuteReportSchema, usageBucketSchema } from './usage.js';
 
 /**
  * Identifies which agent harness a session belongs to. Open set: built-in
@@ -64,6 +65,14 @@ export const sessionSnapshotSchema = z.object({
   branch: z.string().min(1).max(120).optional(),
   model: z.string().min(1).max(120).optional(),
   tokens: tokenTotalsSchema.optional(),
+  /**
+   * Cumulative usage bucketed by day and model, superseding the flat
+   * `tokens` total for collectors new enough to report it. Optional so a
+   * pre-0.2 collector (which only ever sends `tokens`) keeps working.
+   */
+  usage: z.array(usageBucketSchema).max(30).optional(),
+  /** Per-day activity bitmaps for this session. Same compatibility note. */
+  activeMinutes: z.array(minuteReportSchema).max(7).optional(),
   startedAt: z.number().int().positive(),
   lastActivityAt: z.number().int().positive(),
 });
@@ -120,6 +129,10 @@ export const dailyStatsSchema = z.object({
   tokens: tokenTotalsSchema,
   sessionsRun: count,
   activeMinutes: count,
+  /** Today's totals split out per model, for the per-model leaderboard view. */
+  byModel: z.record(z.string(), tokenTotalsSchema).optional(),
+  /** Null when any contributing model has no known price; see `estimateCostUsd`. */
+  estimatedCostUsd: z.number().nullable().optional(),
 });
 export type DailyStats = z.infer<typeof dailyStatsSchema>;
 
