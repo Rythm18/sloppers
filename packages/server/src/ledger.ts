@@ -24,7 +24,7 @@ import type { Db } from './db/index.js';
  * collector restart adds exactly nothing and work is credited to the day it
  * was done rather than the day it was seen.
  *
- * A 0.1.1 collector — still the published one — reports only the flat,
+ * A 0.1.x collector — anyone who has not upgraded — reports only the flat,
  * session-cumulative `tokens`. That is synthesized into a single
  * `(today, 'unknown')` bucket, and because the total spans days its watermark
  * is read forward across the day boundary rather than keyed to one day.
@@ -445,9 +445,9 @@ export class TokenLedger {
     // flat path banks under `unknown`, the bucketed path under real model
     // names, and neither watermark can see the other — so a collector upgrade
     // mid-session restates the same cumulative under a key with no watermark
-    // and banks it all over again. 0.1.1 is the published version, so this
-    // happens to every user who upgrades, for whatever sessions are live at
-    // that moment. Downgrading does the same in reverse.
+    // and banks it all over again. Every user crossing the 0.1.x -> 0.2 line
+    // hits this, for whatever sessions are live at that moment. Downgrading
+    // does the same in reverse.
     //
     // Re-base instead of banking: seed the new attribution at its reported
     // values, exactly as a `legacy_sessions` row does. The spend was already
