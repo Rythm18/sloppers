@@ -549,14 +549,26 @@ describe('TokenLedger', () => {
       }
       // A fresh shape decision each heartbeat: upgrades, downgrades, flapping.
       const shapes = walk.map(() => rand(2) === 0);
-      const model = models[rand(models.length)] ?? 'claude-opus-5';
+      const first = models[rand(models.length)] ?? 'claude-opus-5';
+      // Sometimes split the cumulative across two models. A single-model walk
+      // cannot expose a sentinel collision — the collision only inflates when
+      // the retired slice covers one bucket while the report totals several —
+      // and an earlier version of this test used one model and missed exactly
+      // that. The split ratio is fixed per trial, so each bucket stays
+      // monotone and the invariant below still holds.
+      const second = rand(2) === 0 ? null : (models[rand(models.length)] ?? 'gpt-5');
+      const bucketsFor = (total: number): UsageBucket[] => {
+        if (second === null || second === first) return [bucket(D19, first, total)];
+        const half = Math.floor(total / 2);
+        return [bucket(D19, first, half), bucket(D19, second, total - half)];
+      };
 
       const dbRun = openDb(':memory:');
       const led = new TokenLedger(dbRun);
       walk.forEach((total, i) => {
         led.ingest(
           'm1',
-          [shapes[i] ? realistic('s1', [bucket(D19, model, total)]) : legacy('s1', tokens(total))],
+          [shapes[i] ? realistic('s1', bucketsFor(total)) : legacy('s1', tokens(total))],
           TODAY_19 + i * 1000,
         );
       });
