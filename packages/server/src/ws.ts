@@ -8,8 +8,9 @@ import {
 } from '@sloppers/protocol';
 import { type WebSocket, WebSocketServer } from 'ws';
 import type { Db } from './db/index.js';
+import { type AdminResult, handleAdminOp } from './workspace/admin.js';
 import type { Room, WebClient } from './workspace/live.js';
-import type { WorkspaceManager } from './workspace/manager.js';
+import type { MemberRecord, WorkspaceManager } from './workspace/manager.js';
 
 const MAX_PAYLOAD = 256 * 1024;
 const HEARTBEAT_MS = 30_000;
@@ -183,6 +184,15 @@ function sendCollector(ws: WebSocket, message: ServerToCollector): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
 }
 
+/**
+ * A refused admin op is a normal answer, not a crash — the browser needs a
+ * code it can branch on. Only `forbidden` has a wire code of its own; the
+ * rest are the client asking for something that isn't there.
+ */
+function refusalCode(result: Extract<AdminResult, { ok: false }>): 'forbidden' | 'bad-message' {
+  return result.code === 'forbidden' ? 'forbidden' : 'bad-message';
+}
+
 function handleWeb(
   ws: WebSocket,
   ip: string,
@@ -190,6 +200,8 @@ function handleWeb(
 ): void {
   let room: Room | null = null;
   let client: WebClient | null = null;
+  /** Who this socket joined as. Roles on it go stale; `handleAdminOp` re-reads. */
+  let actor: MemberRecord | null = null;
 
   ws.on('message', (data) => {
     let raw: unknown;
@@ -224,6 +236,7 @@ function handleWeb(
         }
         rooms.touchMember(member.id);
         room.memberJoined(member);
+        actor = member;
         client = { ws, memberId: member.id, present: true };
         const world = room.addWebClient(client);
         if (world) sendWeb(ws, world);
@@ -274,6 +287,7 @@ function handleWeb(
         return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'this office is full' });
       }
       room.memberJoined(created);
+      actor = created;
       client = { ws, memberId: created.id, present: true };
       const world = room.addWebClient(client);
       if (world) sendWeb(ws, { ...world, you: { ...world.you, memberSecret: created.secret } });
@@ -285,6 +299,11 @@ function handleWeb(
       room.updatePosition(client.memberId, msg.position);
     } else if (msg.type === 'activity') {
       room.setWebPresent(client, msg.present);
+    } else if (msg.type === 'admin' && actor) {
+      const result = handleAdminOp({ manager: deps.rooms, room, actor }, msg.op);
+      if (!result.ok) {
+        sendWeb(ws, { type: 'error', code: refusalCode(result), message: result.message });
+      }
     }
   });
 

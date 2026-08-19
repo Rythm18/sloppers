@@ -152,6 +152,7 @@ export class WorkspaceManager {
       parseSettings(row.settings),
       this.db,
       this.ledger,
+      this,
     );
     this.rooms.set(row.id, room);
     this.byInvite.set(row.invite_code, row.id);

@@ -8,17 +8,31 @@ import {
   type PresenceState,
   type ServerToWeb,
   type SessionSnapshot,
+  type WebRemoved,
   type WebWorld,
   type WorkspaceSettings,
 } from '@sloppers/protocol';
 import type { WebSocket } from 'ws';
 import type { Db } from '../db/index.js';
+import { can } from '../domain/permissions.js';
+import { relinkToken } from '../ids.js';
 import type { TokenLedger } from '../ledger.js';
 import { derivePresence } from '../presence.js';
+import { type Knock, KnockRegistry } from './knocks.js';
+import type { MemberRecord, WorkspaceManager } from './manager.js';
 
 const LEADERBOARD_DEBOUNCE_MS = 2000;
 /** Open floor near the centre of the default 512×352 office map. */
 const SPAWN = { x: 256, y: 240 };
+/** Long enough to walk to the other device, short enough to be worth stealing. */
+const DEVICE_LINK_TTL_MS = 10 * 60 * 1000;
+
+/** Why a seat emptied, told to the person who lost it before their socket goes. */
+type RemovalReason = WebRemoved['reason'];
+
+function send(ws: WebSocket, message: ServerToWeb): void {
+  if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
+}
 
 export interface WebClient {
   ws: WebSocket;
@@ -66,6 +80,8 @@ interface MemberRow {
 export class Room {
   private members = new Map<string, MemberRuntime>();
   private leaderboardTimer: NodeJS.Timeout | null = null;
+  /** Everyone waiting at the door right now. Empty unless joinMode is knock. */
+  readonly knocks = new KnockRegistry();
 
   constructor(
     readonly id: string,
@@ -74,6 +90,7 @@ export class Room {
     public settings: WorkspaceSettings,
     private db: Db,
     private ledger: TokenLedger,
+    private manager: WorkspaceManager,
   ) {
     // Only active members are part of the live world; kicked and banned rows
     // survive in the database for the roster and for usage attribution.
@@ -204,14 +221,138 @@ export class Room {
     this.broadcast({ type: 'pos', memberId, position }, memberId);
   }
 
-  /** Remove a member entirely (stale cleanup): sockets, runtime, broadcast. */
-  forgetMember(memberId: string): void {
+  /**
+   * Remove a member entirely: sockets, runtime, broadcast. `reason` tells
+   * their browsers what happened before the socket closes under them — the
+   * stale sweep passes none, because nobody is there to be told.
+   */
+  forgetMember(memberId: string, reason?: RemovalReason): void {
     const runtime = this.members.get(memberId);
     if (!runtime) return;
-    for (const client of runtime.webClients) client.ws.close();
+    for (const client of runtime.webClients) {
+      if (reason) send(client.ws, { type: 'removed', reason });
+      client.ws.close();
+    }
     runtime.collector?.ws.close();
     this.members.delete(memberId);
     this.broadcast({ type: 'member-left', memberId });
+  }
+
+  /**
+   * Re-read a member's row and re-announce them. The runtime caches the role
+   * it first saw and `ensureRuntime` keeps that copy, so a promotion is
+   * invisible to everyone — even across a rejoin — until something reads the
+   * row again. This is that something.
+   */
+  refreshMember(memberId: string): void {
+    const runtime = this.members.get(memberId);
+    if (!runtime) return;
+    const row = this.db
+      .prepare(
+        "SELECT id, display_name, avatar, role FROM members WHERE id = ? AND status = 'active'",
+      )
+      .get(memberId) as MemberRow | undefined;
+    if (!row) return;
+    runtime.displayName = row.display_name;
+    runtime.avatar = row.avatar;
+    runtime.role = row.role;
+    this.broadcastMember(memberId);
+  }
+
+  /**
+   * Let a waiting knocker in: mint their member, hand their socket the world,
+   * and treat it as an ordinary browser from here on.
+   *
+   * The name is only checked now, not when they knocked — someone else may
+   * have taken it while they waited, or the office may have filled up. Either
+   * refusal leaves them at the door with an error they can act on, and
+   * returns null so the caller can keep them in the queue.
+   */
+  admitKnock(knock: Knock): MemberRecord | null {
+    const created = this.manager.createMember(this.id, knock.displayName, knock.avatar);
+    if (created === 'name-taken') {
+      send(knock.ws, {
+        type: 'error',
+        code: 'name-taken',
+        message: `someone here is already called ${knock.displayName}`,
+      });
+      return null;
+    }
+    if (created === 'room-full') {
+      send(knock.ws, { type: 'error', code: 'bad-join', message: 'this office is full' });
+      return null;
+    }
+    this.memberJoined(created);
+    const client: WebClient = { ws: knock.ws, memberId: created.id, present: true };
+    const world = this.addWebClient(client);
+    if (world) send(knock.ws, { ...world, you: { ...world.you, memberSecret: created.secret } });
+    // The join handler put this socket down as a knocker and moved on, so
+    // nothing else would ever take the client back out of the world.
+    knock.ws.once('close', () => this.removeWebClient(client));
+    return created;
+  }
+
+  /** Turn a knocker away. Nothing was written, so nothing is undone. */
+  denyKnock(knock: Knock): void {
+    send(knock.ws, {
+      type: 'error',
+      code: 'forbidden',
+      message: 'nobody let you in this time',
+    });
+    knock.ws.close();
+  }
+
+  /** The waiting queue, to the people allowed to answer it. */
+  broadcastKnocks(): void {
+    const knocks = this.knocks.list();
+    for (const runtime of this.members.values()) {
+      if (can(runtime.role, 'knock.decide')) this.sendTo(runtime.id, { type: 'knocks', knocks });
+    }
+  }
+
+  /** The full membership list, to one moderator who asked for it. */
+  sendRoster(memberId: string): void {
+    this.sendTo(memberId, { type: 'roster', members: this.manager.roster(this.id) });
+  }
+
+  /** The roster changed; push it to everyone entitled to see it. */
+  broadcastRoster(): void {
+    const admins = [...this.members.values()].filter((runtime) => can(runtime.role, 'member.kick'));
+    if (admins.length === 0) return;
+    const message: ServerToWeb = { type: 'roster', members: this.manager.roster(this.id) };
+    for (const admin of admins) this.sendTo(admin.id, message);
+  }
+
+  /** Name, invite code, or settings changed — everyone inside should know. */
+  broadcastWorkspace(): void {
+    this.broadcast({
+      type: 'workspace',
+      roomCode: this.code,
+      roomName: this.name,
+      settings: this.settings,
+    });
+  }
+
+  /**
+   * Mint a one-shot link that signs another browser in as this member: a
+   * phone, a second laptop, a cleared localStorage. Relative on purpose —
+   * the server has no dependable notion of its own public URL, and the page
+   * asking already knows the origin it is talking to.
+   */
+  sendDeviceLink(memberId: string): void {
+    if (!this.members.has(memberId)) return;
+    const now = Date.now();
+    this.db.prepare('DELETE FROM relink_tokens WHERE expires_at < ?').run(now);
+    const token = relinkToken();
+    const expiresAt = now + DEVICE_LINK_TTL_MS;
+    this.db
+      .prepare('INSERT INTO relink_tokens (token, member_id, expires_at) VALUES (?, ?, ?)')
+      .run(token, memberId, expiresAt);
+    this.sendTo(memberId, {
+      type: 'device-link',
+      url: `/?room=${encodeURIComponent(this.code)}#relink=${token}`,
+      expiresAt,
+    });
   }
 
   /** Recompute time-driven presence (timeouts, idle drift) for everyone. */
@@ -285,6 +426,16 @@ export class Room {
       this.leaderboardTimer = null;
       this.broadcast({ type: 'leaderboard', rows: this.leaderboardRows(Date.now()) });
     }, LEADERBOARD_DEBOUNCE_MS);
+  }
+
+  /** One member's own browsers, wherever they have the office open. */
+  private sendTo(memberId: string, message: ServerToWeb): void {
+    const runtime = this.members.get(memberId);
+    if (!runtime) return;
+    const data = JSON.stringify(message);
+    for (const client of runtime.webClients) {
+      if (client.ws.readyState === client.ws.OPEN) client.ws.send(data);
+    }
   }
 
   broadcast(message: ServerToWeb, exceptMemberId?: string): void {

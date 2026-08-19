@@ -231,6 +231,24 @@ describe('server integration', () => {
     expect(pos.type === 'pos' && pos.position.x).toBe(320);
   });
 
+  it('carries an admin op over the socket, and refuses one from a plain member', async () => {
+    const { client: owner } = await join('ridham');
+    const { client: sam, world: samWorld } = await join('sam');
+
+    owner.send({ type: 'admin', op: { kind: 'rename', name: 'the annex' } });
+    const renamed = await sam.next((m) => m.type === 'workspace');
+    expect(renamed.type === 'workspace' && renamed.roomName).toBe('the annex');
+
+    sam.send({ type: 'admin', op: { kind: 'rename', name: 'sams place' } });
+    const refused = await sam.next((m) => m.type === 'error');
+    expect(refused.type === 'error' && refused.code).toBe('forbidden');
+
+    // Being removed is told, not just done: the browser needs to explain it.
+    owner.send({ type: 'admin', op: { kind: 'kick', memberId: samWorld.you.memberId } });
+    const removed = await sam.next((m) => m.type === 'removed');
+    expect(removed.type === 'removed' && removed.reason).toBe('kicked');
+  });
+
   it('pair → redeem → collector snapshot → browser sees sessions and leaderboard', async () => {
     const { client, world } = await join('ridham');
     const base = `http://127.0.0.1:${server.port}`;
