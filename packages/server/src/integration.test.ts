@@ -64,6 +64,18 @@ class WebClientHarness {
   close(): void {
     this.ws.close();
   }
+
+  /** Resolves once the server hangs up on this socket. */
+  async waitClosed(timeoutMs = 5000): Promise<void> {
+    if (this.ws.readyState === this.ws.CLOSED) return;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('socket never closed')), timeoutMs);
+      this.ws.once('close', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
 }
 
 describe('server integration', () => {
@@ -453,6 +465,31 @@ describe('server integration', () => {
     expect(queued.type === 'knocks' && queued.knocks).toHaveLength(1);
 
     visitor.close();
+    const emptied = await owner.next((m) => m.type === 'knocks');
+    expect(emptied.type === 'knocks' && emptied.knocks).toHaveLength(0);
+  });
+
+  it('closes a socket that floods while knocking, and clears its knock too', async () => {
+    const { client: owner, world } = await join('ridham');
+    await setJoinMode(owner, 'knock');
+    const visitor = await arrive(world.roomCode, 'sam');
+    await visitor.next((m) => m.type === 'knocking');
+
+    const queued = await owner.next((m) => m.type === 'knocks');
+    expect(queued.type === 'knocks' && queued.knocks).toHaveLength(1);
+
+    // Nothing this socket sends is acted on while it waits at the door — but
+    // the rate limiter still meters it, because that is exactly where an
+    // unauthenticated flood would come from. `move`'s burst is 40; two
+    // refusals close together (well within the ten-second abuse window)
+    // trip the close.
+    for (let i = 0; i < 42; i++) {
+      visitor.send({ type: 'move', position: { x: i, y: 0, dir: 'up', moving: true } });
+    }
+
+    // The server hung up on it, server-initiated — not the tab closing its
+    // own connection — and that close still has to drain the knock queue.
+    await visitor.waitClosed();
     const emptied = await owner.next((m) => m.type === 'knocks');
     expect(emptied.type === 'knocks' && emptied.knocks).toHaveLength(0);
   });

@@ -9,6 +9,7 @@ import {
 import { type WebSocket, WebSocketServer } from 'ws';
 import type { Db } from './db/index.js';
 import { randomAvatar } from './ids.js';
+import { createMessageLimiter } from './rate-limit.js';
 import { type AdminResult, handleAdminOp } from './workspace/admin.js';
 import type { Room, WebClient } from './workspace/live.js';
 import type { MemberRecord, WorkspaceManager } from './workspace/manager.js';
@@ -209,6 +210,13 @@ function handleWeb(
    * move them, see them, or run an op on their behalf until they are let in.
    */
   let knockingAt: Room | null = null;
+  /**
+   * A socket can be flooded before it is ever a member — while it is still
+   * deciding whether to join, or sitting at the door knocking. Instantiated
+   * once per connection (not shared with any other socket), it governs all
+   * four message kinds, in every one of the three states above.
+   */
+  const messages = createMessageLimiter();
 
   /**
    * Adopt a member onto this socket. The one place a connection becomes a
@@ -243,6 +251,14 @@ function handleWeb(
       return sendWeb(ws, { type: 'error', code: 'bad-message', message: 'unrecognized message' });
     }
     const msg = parsed.data;
+
+    // Ahead of everything else: a flood costs the same whether the socket
+    // has joined, is knocking, or hasn't said anything yet, so the budget is
+    // spent before any of those states are even consulted.
+    if (!messages.allow(msg.type, Date.now())) {
+      if (messages.abusive()) return ws.close();
+      return sendWeb(ws, { type: 'error', code: 'bad-message', message: 'slow down' });
+    }
 
     if (msg.type === 'join') {
       if (client || knockingAt) return; // already inside, or already at the door
