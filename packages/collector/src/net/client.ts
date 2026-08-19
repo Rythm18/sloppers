@@ -17,6 +17,14 @@ export interface CollectorClientOptions {
   onUnknownDevice?: () => void;
   /** Called when another machine paired for this member took over. */
   onSuperseded?: () => void;
+  /**
+   * Called on every accepted `hello-ok`, including reconnects — not just the
+   * first. A reconnect is the collector's only signal that the server may
+   * not have everything it thinks it does (a send that never actually
+   * reached the wire, or a server restart), so callers use this as the
+   * backstop to re-mark state dirty and resend it.
+   */
+  onReady?: () => void;
 }
 
 /**
@@ -31,6 +39,14 @@ export class CollectorClient {
   private attempts = 0;
   private ready = false;
   private pending: CollectorSnapshot | null = null;
+  /**
+   * Fires once `pending` is actually handed to the socket (`ws.send`), never
+   * merely queued. A later `sendSnapshot` call replaces both together, so if
+   * this snapshot is superseded before it flushes its callback is simply
+   * dropped — whatever the newer snapshot carries already covers everything
+   * this one would have confirmed.
+   */
+  private pendingSent: (() => void) | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
 
   constructor(private opts: CollectorClientOptions) {}
@@ -47,8 +63,15 @@ export class CollectorClient {
     this.ws = null;
   }
 
-  sendSnapshot(snapshot: CollectorSnapshot): void {
+  /**
+   * `onSent`, if given, fires once this exact snapshot has actually been
+   * written to the socket — the point at which a caller can safely treat
+   * whatever it carried as delivered. It does not fire for a snapshot that
+   * gets superseded by a later `sendSnapshot` call before it ever flushes.
+   */
+  sendSnapshot(snapshot: CollectorSnapshot, onSent?: () => void): void {
     this.pending = snapshot;
+    this.pendingSent = onSent ?? null;
     this.flush();
   }
 
@@ -57,6 +80,9 @@ export class CollectorClient {
     if (!this.pending) return;
     this.ws.send(JSON.stringify(this.pending));
     this.pending = null;
+    const onSent = this.pendingSent;
+    this.pendingSent = null;
+    onSent?.();
   }
 
   private connect(): void {
@@ -93,6 +119,9 @@ export class CollectorClient {
         this.ready = true;
         this.opts.log(`connected: sharing as ${msg.displayName} in room ${msg.roomCode}`);
         this.flush();
+        // Every accepted hello-ok, not just the first: a reconnect is exactly
+        // when a caller needs to stop trusting its "already sent" bookkeeping.
+        this.opts.onReady?.();
       } else if (msg.type === 'error' && msg.code === 'unknown-device') {
         this.opts.log('server does not recognize this device — run `sloppers share` again');
         this.stop();

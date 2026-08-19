@@ -1,5 +1,10 @@
 import { type FSWatcher as NodeFsWatcher, watch as watchFs } from 'node:fs';
-import type { CollectorSnapshot } from '@sloppers/protocol';
+import type {
+  CollectorSnapshot,
+  MinuteReport,
+  SessionSnapshot,
+  Visibility,
+} from '@sloppers/protocol';
 import { builtinAdapters } from './adapters/index.js';
 import { type CollectorConfig, configDir, loadConfig } from './config.js';
 import { machineIdleSeconds } from './core/idle.js';
@@ -14,6 +19,131 @@ const IDLE_POLL_MS = 15_000;
 
 export interface Daemon {
   stop(): Promise<void>;
+}
+
+/**
+ * Which (session, day) minute bitmaps have changed since they were last
+ * actually handed to a connected client. `usage` is deliberately not tracked
+ * here at all — it always rides along in full (see `buildDirtySnapshot`),
+ * because it is small and its per-bucket idempotence on the server is what
+ * makes restarts and dropped sends safe. `activeMinutes` has no such
+ * idempotent catch-up on the server (an unreported day is simply absent), so
+ * skipping a day is only safe once we know it actually reached the wire.
+ *
+ * Clearing therefore happens on `confirmSent`, called only after a send has
+ * actually been flushed to the socket — never at build time. A snapshot that
+ * is merely *built* (and may never be sent, e.g. the collector is offline)
+ * must not cause its minutes to be forgotten: the next build has to still
+ * consider them dirty. `markAllDirty` is the reconnect backstop: a fresh
+ * `hello-ok` means the server's own state is no longer something we can
+ * trust our local bookkeeping about, so everything we know gets resent.
+ */
+export class MinuteDirtyTracker {
+  private lastSeen = new Map<string, Map<string, string>>();
+  private dirty = new Map<string, Set<string>>();
+
+  /** Record a session's current minute bitmaps, marking any changed day dirty. */
+  observe(sessionId: string, reports: readonly MinuteReport[]): void {
+    let seen = this.lastSeen.get(sessionId);
+    if (!seen) {
+      seen = new Map();
+      this.lastSeen.set(sessionId, seen);
+    }
+    for (const { day, minutes } of reports) {
+      if (seen.get(day) !== minutes) {
+        seen.set(day, minutes);
+        this.markDirty(sessionId, day);
+      }
+    }
+  }
+
+  private markDirty(sessionId: string, day: string): void {
+    let days = this.dirty.get(sessionId);
+    if (!days) {
+      days = new Set();
+      this.dirty.set(sessionId, days);
+    }
+    days.add(day);
+  }
+
+  /** The subset of `reports` whose day is currently dirty for this session. */
+  filterDirty(sessionId: string, reports: readonly MinuteReport[]): MinuteReport[] {
+    const days = this.dirty.get(sessionId);
+    if (!days || days.size === 0) return [];
+    return reports.filter((r) => days.has(r.day));
+  }
+
+  /**
+   * Clear dirty flags for exactly the (session, day) pairs a snapshot
+   * actually carried onto the wire. Call only from a send's flush
+   * confirmation, never at build time — see the class doc.
+   */
+  confirmSent(included: ReadonlyMap<string, ReadonlySet<string>>): void {
+    for (const [sessionId, days] of included) {
+      const set = this.dirty.get(sessionId);
+      if (!set) continue;
+      for (const day of days) set.delete(day);
+      if (set.size === 0) this.dirty.delete(sessionId);
+    }
+  }
+
+  /** Re-mark every day we have ever observed dirty — the reconnect backstop. */
+  markAllDirty(): void {
+    for (const [sessionId, days] of this.lastSeen) {
+      for (const day of days.keys()) this.markDirty(sessionId, day);
+    }
+  }
+
+  /** Drop bookkeeping for sessions no longer live, so it doesn't grow forever. */
+  prune(liveSessionIds: ReadonlySet<string>): void {
+    for (const id of this.lastSeen.keys()) {
+      if (!liveSessionIds.has(id)) this.lastSeen.delete(id);
+    }
+    for (const id of this.dirty.keys()) {
+      if (!liveSessionIds.has(id)) this.dirty.delete(id);
+    }
+  }
+}
+
+/**
+ * Project raw tracker sessions onto the wire shape: dirty-filter each
+ * session's `activeMinutes` down to days that changed since they were last
+ * confirmed sent, then apply the owner's visibility settings. `usage` is
+ * never filtered — it always passes through in full when `vis.tokens` allows
+ * it at all.
+ *
+ * Returns `included`, the exact (session, day) pairs that made it onto the
+ * wire in *this* payload — computed after visibility, since a day withheld
+ * by a hidden `tokens` setting was not actually delivered and must not be
+ * marked clean. The caller must feed this back into `MinuteDirtyTracker.
+ * confirmSent` only once this exact payload is confirmed flushed to a
+ * connected client.
+ */
+export function buildDirtySnapshot(
+  sessions: readonly SessionSnapshot[],
+  vis: Visibility,
+  tracker: MinuteDirtyTracker,
+): { sessions: SessionSnapshot[]; included: Map<string, Set<string>> } {
+  const included = new Map<string, Set<string>>();
+  const out = sessions.map((s) => {
+    let candidate = s;
+    if (s.activeMinutes) {
+      tracker.observe(s.id, s.activeMinutes);
+      const dirty = tracker.filterDirty(s.id, s.activeMinutes);
+      if (dirty.length > 0) {
+        candidate = { ...s, activeMinutes: dirty };
+      } else {
+        const { activeMinutes: _drop, ...rest } = s;
+        candidate = rest;
+      }
+    }
+    const visible = applyVisibility(candidate, vis);
+    if (visible.activeMinutes && visible.activeMinutes.length > 0) {
+      included.set(s.id, new Set(visible.activeMinutes.map((m) => m.day)));
+    }
+    return visible;
+  });
+  return { sessions: out, included };
 }
 
 /**
@@ -38,11 +168,15 @@ export function startDaemon(opts: {
 
   const adapters = builtinAdapters(opts.home);
   const tracker = new SessionTracker(adapters);
+  const minuteTracker = new MinuteDirtyTracker();
   const clientOptions: ConstructorParameters<typeof CollectorClient>[0] = {
     wsUrl: config.server.wsUrl,
     deviceKey: config.deviceKey,
     collectorVersion: opts.collectorVersion,
     log: opts.log,
+    // A reconnect means the server's state is no longer something we can
+    // trust our local "already sent" bookkeeping about — resend everything.
+    onReady: () => minuteTracker.markAllDirty(),
   };
   if (opts.onUnknownDevice) clientOptions.onUnknownDevice = opts.onUnknownDevice;
   if (opts.onSuperseded) clientOptions.onSuperseded = opts.onSuperseded;
@@ -50,22 +184,31 @@ export function startDaemon(opts: {
 
   let idleSeconds: number | undefined;
 
-  const buildSnapshot = (current: CollectorConfig): CollectorSnapshot => {
+  const buildSnapshot = (
+    current: CollectorConfig,
+  ): { snapshot: CollectorSnapshot; included: Map<string, Set<string>> } => {
     // Paused means paused: no sessions AND no machine telemetry — idle
     // seconds are at-the-keyboard presence data.
-    if (current.paused) return { type: 'snapshot', sessions: [], machine: {} };
+    if (current.paused) {
+      return { snapshot: { type: 'snapshot', sessions: [], machine: {} }, included: new Map() };
+    }
     const machine: CollectorSnapshot['machine'] = {};
     if (idleSeconds !== undefined) machine.idleSeconds = idleSeconds;
-    return {
-      type: 'snapshot',
-      sessions: tracker.snapshot(Date.now()).map((s) => applyVisibility(s, current.visibility)),
-      machine,
-    };
+    const raw = tracker.snapshot(Date.now());
+    const { sessions, included } = buildDirtySnapshot(raw, current.visibility, minuteTracker);
+    minuteTracker.prune(new Set(raw.map((s) => s.id)));
+    return { snapshot: { type: 'snapshot', sessions, machine }, included };
   };
 
   const send = () => {
     if (!config) return;
-    client.sendSnapshot(buildSnapshot(config));
+    const { snapshot, included } = buildSnapshot(config);
+    // Dirty flags clear only once this exact payload is actually flushed to
+    // the wire — not here at build time. A snapshot built while offline (or
+    // one that gets superseded before it flushes) must leave its minutes
+    // dirty, or a failed send loses that day for good: activeMinutes has no
+    // catch-up rule on the server, so an unreported day is just absent.
+    client.sendSnapshot(snapshot, () => minuteTracker.confirmSent(included));
   };
 
   let debounce: NodeJS.Timeout | null = null;
