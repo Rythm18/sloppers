@@ -12,6 +12,7 @@ import {
   buildDirtySnapshot,
   buildPairingSnapshot,
   type Daemon,
+  exitCodeFor,
   MinuteDirtyTracker,
   routeSessions,
   routingOrder,
@@ -385,15 +386,32 @@ describe('standDownDecision', () => {
   });
 
   it('stands down clean only when every client was superseded', () => {
-    // superseded means another machine took over: exit clean so the service
-    // does NOT restart us. A rejected device key means re-pairing is needed:
-    // exit non-zero so launchd/systemd bring us back. If the two disagree,
-    // the restartable answer wins — coming back and finding the config fixed
-    // is recoverable, staying down is not.
+    // Both reasons exit clean now (see `exitCodeFor`) — `unknown-device`
+    // winning a mixed disagreement only changes which message is logged
+    // (STAND_DOWN_MESSAGE), not whether the service restarts.
     expect(standDownDecision(['superseded'])).toBe('superseded');
     expect(standDownDecision(['superseded', 'superseded'])).toBe('superseded');
     expect(standDownDecision(['superseded', 'unknown-device'])).toBe('unknown-device');
     expect(standDownDecision(['unknown-device'])).toBe('unknown-device');
+  });
+});
+
+describe('exitCodeFor', () => {
+  it('exits clean for every terminal stand-down reason, so launchd/systemd stop relaunching', () => {
+    // Confirmed terminal: nothing a restart could do fixes any of these
+    // without the user running `sloppers share` again.
+    expect(exitCodeFor('unknown-device')).toBe(0);
+    expect(exitCodeFor('superseded')).toBe(0);
+    expect(exitCodeFor('unpaired')).toBe(0);
+  });
+
+  it('exits non-zero for a genuine failure, so the service actually restarts', () => {
+    // The mutation this guards against: flipping this to 0 would make a
+    // collector that hit a real, possibly-transient error (an unexpected
+    // exception, or `startDaemon` unable to read its config at all) give up
+    // silently and never come back — the same bug this task closes, in the
+    // opposite direction.
+    expect(exitCodeFor('error')).toBe(1);
   });
 });
 

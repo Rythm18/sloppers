@@ -18,7 +18,7 @@ import {
 } from './config.js';
 import { SessionTracker } from './core/tracker.js';
 import { seedTracker } from './core/watcher.js';
-import { routingOrder, startDaemon } from './daemon.js';
+import { exitCodeFor, routingOrder, startDaemon } from './daemon.js';
 import { parseShareTarget, redeemPairingCode, wsUrlFor } from './net/pair.js';
 import { installService, serviceSupported, uninstallService } from './service/install.js';
 
@@ -61,7 +61,12 @@ function log(message: string): void {
 
 function fail(message: string): never {
   console.error(pc.red(message));
-  process.exit(1);
+  // Every non-`run` command lands here for an ordinary usage/network
+  // failure (standard Unix "the command failed" convention); `run` also
+  // lands here when `startDaemon` refuses to start at all (its config could
+  // not be read) — see `exitCodeFor`'s doc for why that specific case is
+  // deliberately treated as retryable rather than terminal.
+  process.exit(exitCodeFor('error'));
 }
 
 /**
@@ -170,11 +175,14 @@ function runForeground(): void {
     // launchd (KeepAlive: SuccessfulExit:false) and systemd (Restart=on-
     // failure) do NOT restart us; the user has to run `sloppers share
     // <code>` again to get back in.
-    onUnknownDevice: () => process.exit(0),
+    onUnknownDevice: () => process.exit(exitCodeFor('unknown-device')),
     // Another machine took over — exit clean so the service does NOT restart.
-    onSuperseded: () => process.exit(0),
+    onSuperseded: () => process.exit(exitCodeFor('superseded')),
   });
   const shutdown = () => {
+    // A deliberate stop signal (`sloppers uninstall`, or the OS itself
+    // stopping/restarting the service) — not a stand-down and not an error,
+    // so it is intentionally not routed through `exitCodeFor`.
     void daemon.stop().then(() => process.exit(0));
   };
   process.on('SIGINT', shutdown);

@@ -281,10 +281,14 @@ export type StandDown = StandDownReason | 'unpaired';
  * For the single-pairing user that is exactly the previous behaviour: the one
  * client reports, the daemon stands down.
  *
- * When the reasons disagree, the restartable answer wins: `superseded` means
- * exit clean so the service does NOT restart us, and applying that while
- * another workspace merely needs re-pairing would leave the daemon down for
- * good instead of coming back to a fixed config.
+ * When the reasons disagree, `unknown-device` wins over `superseded` for the
+ * message it produces (see `STAND_DOWN_MESSAGE`) — not for the exit code:
+ * `exitCodeFor` treats every `StandDown` reason as equally terminal, so
+ * neither one restarts the service. `unknown-device` reaching here at all is
+ * vestigial in today's wiring: a single pairing's own rejection is absorbed
+ * by `dropPairing` before it ever gets this far (see `createRuntime`'s
+ * `onUnknownDevice`), which is what actually closes the restart loop this
+ * reason used to cause back when it lingered here instead of being dropped.
  *
  * An empty list is `unpaired` rather than "carry on". It is not a rejection
  * and not a takeover — the config simply has nothing in it, which is the same
@@ -310,6 +314,35 @@ const STAND_DOWN_MESSAGE: Record<StandDown, string> = {
   superseded: 'no workspace is sharing any more — another machine took over every one',
   unpaired: 'no workspaces left in the config — nothing to share; standing down',
 };
+
+/**
+ * The process exit code for how `sloppers run` ended — the single line
+ * launchd's `KeepAlive: { SuccessfulExit: false }` and systemd's
+ * `Restart=on-failure` (see service/install.ts) actually key off of, so it
+ * is pulled out and tested on its own rather than left implicit in
+ * `cli.ts`'s scattered `process.exit(...)` calls.
+ *
+ * Every `StandDown` reason is confirmed terminal: the server (or the
+ * config itself, for `unpaired`) has positively said there is nothing left
+ * to serve, and nothing a restart could do would change that without the
+ * user running `sloppers share` again — so all three exit clean (0),
+ * telling the service to stop relaunching.
+ *
+ * `'error'` covers everything else that can end a run: an unexpected
+ * exception, including `startDaemon` refusing to start because the config
+ * could not be read at all. That is deliberately NOT folded into the
+ * terminal cases above, even though "genuinely never paired" looks similar
+ * on the surface — `loadConfig` cannot tell a missing or corrupt config
+ * apart from a transient one (a mount not yet ready at boot, a
+ * half-written file caught mid-write), so defaulting to "let the service
+ * retry" is the safer of the two wrong guesses: guessing wrong here costs a
+ * slow, bounded retry loop (systemd's `RestartSec=5`, launchd's own
+ * backoff), not silently giving up forever on a problem that might have
+ * cleared itself up on its own.
+ */
+export function exitCodeFor(outcome: StandDown | 'error'): number {
+  return outcome === 'error' ? 1 : 0;
+}
 
 /** Everything the daemon holds for one pairing — one client, one workspace. */
 interface PairingRuntime {
