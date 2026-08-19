@@ -542,12 +542,16 @@ export class TokenLedger {
 
     // A bucket can leave a session's reported set entirely. The collector's
     // `removeUsage` unwinds a restated request from the bucket it first landed
-    // in and deletes that bucket once it empties, so a Codex session that
-    // files spend under `unknown` until `turn_context` names the model
-    // migrates the whole bucket — and the destination, having no watermark of
-    // its own, banks it a second time. Measured: 26 of 493 local rollouts take
-    // that path, so this is ordinary behaviour, not an edge case. A request
-    // restated after midnight moves between day keys the same way.
+    // in and deletes that bucket once it empties, so a session's reported set
+    // can lose a key entirely — and the destination, having no watermark of its
+    // own, banks it a second time. A request restated after midnight moves
+    // between day keys the same way.
+    //
+    // Only `claude-code.ts` can do this. The Codex adapter never calls
+    // `removeUsage`, so its buckets only grow; its `unknown` bucket is a
+    // separate story and never migrates. Measured across 607 local transcripts
+    // and 46,571 request restatements: 5 change a bucket key. Rare, but it
+    // silently doubles a number people compete over.
     //
     // Only safe on a *complete* report. `tokens` is summed over every bucket
     // before the 30-bucket wire cap, so `tokens` equal to the reported sum is
@@ -634,7 +638,11 @@ export class TokenLedger {
       // tracking, and a day it opens later is genuine backfill, not a replay.
       // `rebasing` is the one case a *known* session seeds — see above.
       const seed = rebasing || migratedUnbanked || (!seen && (alreadyBanked || startedEarlier));
-      const watermark: TokenTotals = row ? totalsOf(row) : seed ? bucketTotals(b) : emptyTokens();
+      // `migratedUnbanked` outranks an existing row. A migration that *merges*
+      // into a surviving bucket leaves that bucket's watermark in place, and
+      // trusting it would re-bank the history the un-banking just withdrew.
+      const watermark: TokenTotals =
+        row && !migratedUnbanked ? totalsOf(row) : seed ? bucketTotals(b) : emptyTokens();
       const delta: TokenTotals = {
         input: Math.max(0, b.input - watermark.input),
         output: Math.max(0, b.output - watermark.output),
@@ -650,7 +658,10 @@ export class TokenLedger {
         b.output < watermark.output ||
         b.cacheRead < watermark.cacheRead ||
         b.cacheWrite < watermark.cacheWrite;
-      if (row !== undefined && !grew && !shrank) continue;
+      // A re-seeded merge target must rewrite its row even when nothing grew:
+      // leaving the old watermark standing would re-bank everything on the
+      // next report.
+      if (row !== undefined && !grew && !shrank && !migratedUnbanked) continue;
       this.q.upsertWatermark.run(
         session.id,
         memberIdValue,

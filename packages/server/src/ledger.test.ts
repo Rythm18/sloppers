@@ -597,9 +597,10 @@ describe('TokenLedger', () => {
   it('does not double-count a bucket that migrated to another model', () => {
     // The collector's `removeUsage` unwinds a restated request from the bucket
     // it first landed in and deletes that bucket when it empties — so a
-    // session's reported set can lose a key entirely. Codex does this
-    // routinely: spend is filed under `unknown` until `turn_context` names the
-    // model, and 26 of 493 local rollouts take that path.
+    // session's reported set can lose a key entirely. Only `claude-code.ts`
+    // does this: the Codex adapter never calls `removeUsage`, so its buckets
+    // only ever grow. Rare but real — across 607 local transcripts and 46,571
+    // restatements, 5 change a bucket key.
     ledger.ingest('m1', [realistic('s1', [bucket(D19, 'unknown', 1000)])], TODAY_19);
     expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1000);
 
@@ -631,6 +632,25 @@ describe('TokenLedger', () => {
 
     ledger.ingest('m1', [realistic('s1', [bucket(D19, 'gpt-5', 1500)])], TODAY_19 + 1000);
     expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(1500);
+  });
+
+  it('keeps seeded history seeded when the migration merges into a live bucket', () => {
+    // The two guards above meet here: a session first seen today but started
+    // earlier is seeded, so none of its history counts — and then one of its
+    // buckets merges into another. The merge target still holds the watermark
+    // it was seeded with, so trusting that row hands back the very history the
+    // seeding declined. A rename must not be a way to launder it.
+    const started = { startedAt: DAY_18 };
+    const seeded = [bucket(D19, 'unknown', 1000), bucket(D19, 'gpt-5', 500)];
+    ledger.ingest('m1', [realistic('s1', seeded, started)], TODAY_19);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(0);
+
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'gpt-5', 1500)], started)], TODAY_19 + 1000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(0);
+
+    // Growth after the merge is still real spend and still counts.
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'gpt-5', 1700)], started)], TODAY_19 + 2000);
+    expect(ledger.todayFor('m1', TODAY_19).tokens.input).toBe(200);
   });
 
   it('leaves another session’s spend alone when one session’s bucket migrates', () => {
