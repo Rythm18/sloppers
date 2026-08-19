@@ -6,7 +6,7 @@ import type {
   Visibility,
 } from '@sloppers/protocol';
 import { builtinAdapters } from './adapters/index.js';
-import { type CollectorConfig, configDir, loadConfig } from './config.js';
+import { type CollectorConfig, configDir, loadConfig, type PairingConfig } from './config.js';
 import { machineIdleSeconds } from './core/idle.js';
 import { SessionTracker } from './core/tracker.js';
 import { applyVisibility } from './core/visibility.js';
@@ -147,6 +147,18 @@ export function buildDirtySnapshot(
 }
 
 /**
+ * The pairing this daemon acts on. A config always has at least one
+ * pairing once paired at all (an upgraded v1 file produces exactly one
+ * catch-all pairing), so today's daemon simply runs the first one — this
+ * is the single-workspace behavior unchanged from before v2. A later
+ * task replaces this with real per-directory routing across every
+ * pairing and one `CollectorClient` each.
+ */
+function firstPairing(config: CollectorConfig): PairingConfig | undefined {
+  return config.pairings[0];
+}
+
+/**
  * The composed collector: adapters → tracker → visibility filter → client,
  * plus timers. Heartbeats double as state refreshers — a session drifts
  * working → waiting → idle purely with time, so the world is re-derived and
@@ -161,17 +173,19 @@ export function startDaemon(opts: {
   /** Another machine took over this member; the daemon has stopped. */
   onSuperseded?: () => void;
 }): Daemon {
-  let config = loadConfig(opts.home);
-  if (!config) {
+  const initialConfig = loadConfig(opts.home);
+  const initialPairing = initialConfig && firstPairing(initialConfig);
+  if (!initialPairing) {
     throw new Error('Not paired yet — run `sloppers share <code>` first.');
   }
+  let pairing = initialPairing;
 
   const adapters = builtinAdapters(opts.home);
   const tracker = new SessionTracker(adapters);
   const minuteTracker = new MinuteDirtyTracker();
   const clientOptions: ConstructorParameters<typeof CollectorClient>[0] = {
-    wsUrl: config.server.wsUrl,
-    deviceKey: config.deviceKey,
+    wsUrl: pairing.server.wsUrl,
+    deviceKey: pairing.deviceKey,
     collectorVersion: opts.collectorVersion,
     log: opts.log,
     // A reconnect means the server's state is no longer something we can
@@ -185,7 +199,7 @@ export function startDaemon(opts: {
   let idleSeconds: number | undefined;
 
   const buildSnapshot = (
-    current: CollectorConfig,
+    current: PairingConfig,
   ): { snapshot: CollectorSnapshot; included: Map<string, Set<string>> } => {
     // Paused means paused: no sessions AND no machine telemetry — idle
     // seconds are at-the-keyboard presence data.
@@ -201,8 +215,7 @@ export function startDaemon(opts: {
   };
 
   const send = () => {
-    if (!config) return;
-    const { snapshot, included } = buildSnapshot(config);
+    const { snapshot, included } = buildSnapshot(pairing);
     // Dirty flags clear only once this exact payload is actually flushed to
     // the wire — not here at build time. A snapshot built while offline (or
     // one that gets superseded before it flushes) must leave its minutes
@@ -238,8 +251,9 @@ export function startDaemon(opts: {
     configWatcher = watchFs(configDir(opts.home), (_event, filename) => {
       if (filename !== 'config.json') return;
       const next = loadConfig(opts.home);
-      if (next) {
-        config = next;
+      const nextPairing = next && firstPairing(next);
+      if (nextPairing) {
+        pairing = nextPairing;
         send();
       }
     });

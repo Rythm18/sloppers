@@ -99,17 +99,25 @@ function runForeground(): void {
   process.on('SIGTERM', shutdown);
 }
 
+// The functions below all act on the config's first pairing. That is the
+// exact single-workspace behavior this CLI has always had (today a config
+// only ever has one pairing — either from a fresh `sloppers share` or from
+// upgrading a v1 file). Multi-workspace CLI targeting (`sloppers pause
+// <workspace>`, prompting for a match pattern on a second `share`, ...) is
+// a later task's job.
+
 function status(): void {
   const config = loadConfig();
-  if (!config) {
+  const pairing = config?.pairings[0];
+  if (!pairing) {
     console.log('not paired — run `sloppers share <code>` (mint one in the office web app)');
     return;
   }
-  console.log(`server   ${config.server.httpUrl}`);
-  console.log(`room     ${config.roomCode}`);
-  console.log(`name     ${config.displayName}`);
-  console.log(`sharing  ${config.paused ? pc.yellow('paused') : pc.green('on')}`);
-  const hidden = (Object.entries(config.visibility) as [keyof Visibility, boolean][])
+  console.log(`server   ${pairing.server.httpUrl}`);
+  console.log(`room     ${pairing.roomCode}`);
+  console.log(`name     ${pairing.displayName}`);
+  console.log(`sharing  ${pairing.paused ? pc.yellow('paused') : pc.green('on')}`);
+  const hidden = (Object.entries(pairing.visibility) as [keyof Visibility, boolean][])
     .filter(([, v]) => !v)
     .map(([k]) => k);
   if (hidden.length > 0) console.log(`hidden   ${hidden.join(', ')}`);
@@ -139,23 +147,24 @@ function status(): void {
  */
 async function relink(): Promise<void> {
   const config = loadConfig();
-  if (!config) fail('not paired yet — run `sloppers share <code>` first');
-  const res = await fetch(`${config.server.httpUrl}/api/relink`, {
+  const pairing = config?.pairings[0];
+  if (!pairing) fail('not paired yet — run `sloppers share <code>` first');
+  const res = await fetch(`${pairing.server.httpUrl}/api/relink`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ deviceKey: config.deviceKey }),
+    body: JSON.stringify({ deviceKey: pairing.deviceKey }),
   }).catch(() => null);
   if (!res?.ok) {
     fail(
       res?.status === 403
         ? 'the server no longer recognizes this device — run `sloppers share` again'
-        : `could not reach ${config.server.httpUrl}`,
+        : `could not reach ${pairing.server.httpUrl}`,
     );
   }
   const minted = relinkMintResponseSchema.parse(await res.json());
   // The token rides in the URL fragment: fragments never reach the server,
   // so it stays out of access logs and Referer headers.
-  const url = `${config.server.httpUrl}/?room=${encodeURIComponent(minted.roomCode)}#relink=${minted.token}`;
+  const url = `${pairing.server.httpUrl}/?room=${encodeURIComponent(minted.roomCode)}#relink=${minted.token}`;
   console.log(`${pc.green('✓')} open this link in the browser you want to sign in:`);
   console.log(`  ${pc.cyan(url)}`);
   console.log(pc.dim('  works once, expires in 10 minutes'));
@@ -170,21 +179,29 @@ async function relink(): Promise<void> {
 
 function setPaused(paused: boolean): void {
   const config = loadConfig();
-  if (!config) fail('not paired yet');
-  saveConfig({ ...config, paused });
+  const pairing = config?.pairings[0];
+  if (!config || !pairing) fail('not paired yet');
+  saveConfig({
+    ...config,
+    pairings: [{ ...pairing, paused }, ...config.pairings.slice(1)],
+  });
   console.log(paused ? 'sharing paused' : 'sharing resumed');
 }
 
 function setVisibility(field: string | undefined, value: boolean): void {
   const config = loadConfig();
-  if (!config) fail('not paired yet');
-  const fields = Object.keys(config.visibility) as (keyof Visibility)[];
+  const pairing = config?.pairings[0];
+  if (!config || !pairing) fail('not paired yet');
+  const fields = Object.keys(pairing.visibility) as (keyof Visibility)[];
   if (!field || !fields.includes(field as keyof Visibility)) {
     fail(`expected one of: ${fields.join(', ')}`);
   }
   saveConfig({
     ...config,
-    visibility: { ...config.visibility, [field]: value },
+    pairings: [
+      { ...pairing, visibility: { ...pairing.visibility, [field]: value } },
+      ...config.pairings.slice(1),
+    ],
   });
   console.log(`${field} is now ${value ? 'shared' : 'hidden'}`);
 }
