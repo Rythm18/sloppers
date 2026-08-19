@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import type { ServerToWeb } from '@sloppers/protocol';
-import { act, cleanup, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '../store.js';
 import { KnockingScreen } from './KnockingScreen.js';
 
@@ -22,14 +22,14 @@ describe('KnockingScreen', () => {
 
   it('names the office it is waiting at', () => {
     apply({ type: 'knocking', answerable: true });
-    render(<KnockingScreen officeName="the lab" />);
+    render(<KnockingScreen officeName="the lab" onGiveUp={() => {}} />);
 
     expect(screen.getByText('the lab')).toBeTruthy();
   });
 
   it('says nobody is around only when the office said so', () => {
     apply({ type: 'knocking', answerable: false });
-    render(<KnockingScreen officeName="the lab" />);
+    render(<KnockingScreen officeName="the lab" onGiveUp={() => {}} />);
 
     expect(screen.getByText(NOBODY)).toBeTruthy();
     expect(screen.queryByText(SOMEBODY)).toBeNull();
@@ -37,7 +37,7 @@ describe('KnockingScreen', () => {
 
   it('says somebody can see you when the office said that instead', () => {
     apply({ type: 'knocking', answerable: true });
-    render(<KnockingScreen officeName="the lab" />);
+    render(<KnockingScreen officeName="the lab" onGiveUp={() => {}} />);
 
     expect(screen.getByText(SOMEBODY)).toBeTruthy();
     expect(screen.queryByText(NOBODY)).toBeNull();
@@ -47,7 +47,7 @@ describe('KnockingScreen', () => {
     // An older server: the field is optional on the wire, and guessing at an
     // empty office in somebody's face is exactly what this must not do.
     apply({ type: 'knocking' });
-    render(<KnockingScreen officeName="the lab" />);
+    render(<KnockingScreen officeName="the lab" onGiveUp={() => {}} />);
 
     expect(screen.queryByText(NOBODY)).toBeNull();
     expect(screen.queryByText(SOMEBODY)).toBeNull();
@@ -56,7 +56,7 @@ describe('KnockingScreen', () => {
 
   it('stops saying nobody is around the moment somebody turns up', () => {
     apply({ type: 'knocking', answerable: false });
-    render(<KnockingScreen officeName="the lab" />);
+    render(<KnockingScreen officeName="the lab" onGiveUp={() => {}} />);
     expect(screen.getByText(NOBODY)).toBeTruthy();
 
     // The office re-sends this, unprompted, when a moderator connects.
@@ -68,8 +68,18 @@ describe('KnockingScreen', () => {
 
   it('falls back to a neutral word when the invite preview never loaded', () => {
     apply({ type: 'knocking', answerable: false });
-    render(<KnockingScreen officeName={null} />);
+    render(<KnockingScreen officeName={null} onGiveUp={() => {}} />);
 
     expect(screen.getByText('the office')).toBeTruthy();
+  });
+
+  it('offers a way to stop waiting — the one screen whose whole premise is waiting', () => {
+    const onGiveUp = vi.fn();
+    apply({ type: 'knocking', answerable: false });
+    render(<KnockingScreen officeName="the lab" onGiveUp={onGiveUp} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Back to sloppers/ }));
+
+    expect(onGiveUp).toHaveBeenCalledTimes(1);
   });
 });

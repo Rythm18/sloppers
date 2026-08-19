@@ -15,6 +15,7 @@ export function ShareModal() {
   const [expiresAt, setExpiresAt] = useState<number>(0);
   const [remaining, setRemaining] = useState<number>(0);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const [failed, setFailed] = useState(false);
 
   const mint = useCallback(async () => {
@@ -60,10 +61,18 @@ export function ShareModal() {
     location.protocol === 'http:' && !bareHost ? `http://${location.host}` : location.host;
   const command = code ? `npx sloppers@latest share ${code}@${shareTarget}` : null;
 
+  // A refused clipboard (permissions policy, insecure origin, a tab that lost
+  // focus mid-click) must not become an unhandled rejection behind a button
+  // that looks like it worked. The command is on screen regardless.
   const copy = async () => {
     if (!command) return;
-    await navigator.clipboard.writeText(command);
-    setCopied(true);
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      setCopyFailed(false);
+    } catch {
+      setCopyFailed(true);
+    }
   };
 
   return (
@@ -98,8 +107,15 @@ export function ShareModal() {
           </div>
         )}
 
+        {copyFailed ? (
+          <p className="join-error">
+            This browser would not let the page reach your clipboard. Select the command above and
+            copy it by hand.
+          </p>
+        ) : null}
+
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <button type="button" className="btn" onClick={copy} disabled={!command}>
+          <button type="button" className="btn" onClick={() => void copy()} disabled={!command}>
             {copied ? 'Copied' : 'Copy command'}
           </button>
           {code && remaining === 0 ? (

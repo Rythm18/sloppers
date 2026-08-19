@@ -17,6 +17,12 @@ import { qrPath } from './qr.js';
 /** Below this, the countdown reads as a warning rather than a fact. */
 const NEARLY_GONE_SECONDS = 60;
 
+/** Whole seconds until the deadline. Goes negative once it is past, which is
+ *  what tells the ticker to stop rather than something anybody is shown. */
+function secondsLeft(expiresAt: number): number {
+  return Math.round((expiresAt - Date.now()) / 1000);
+}
+
 function countdown(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
@@ -35,28 +41,38 @@ export function DeviceLinkModal() {
 
 function DeviceLinkBody({ url, expiresAt }: { url: string; expiresAt: number }) {
   const setDeviceLink = useStore((s) => s.setDeviceLink);
-  const [remaining, setRemaining] = useState(() =>
-    Math.max(0, Math.round((expiresAt - Date.now()) / 1000)),
-  );
+  const [remaining, setRemaining] = useState(() => secondsLeft(expiresAt));
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const scrimRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const close = useCallback(() => setDeviceLink(null), [setDeviceLink]);
 
   useModalManners(scrimRef, dialogRef, close);
 
-  // Counts down to zero and stops there — both because a negative number is
-  // nonsense and because there is nothing left to tick towards.
+  // Stops the moment there is nothing left to tick towards. `<= 0` rather
+  // than `=== 0` because a backgrounded tab has its intervals throttled to
+  // about once a minute, so the exact second the deadline passes is a tick
+  // that may never happen — and a link that was already dead when the modal
+  // opened never had one at all.
   useEffect(() => {
     const tick = () => {
-      const left = Math.max(0, Math.round((expiresAt - Date.now()) / 1000));
+      const left = secondsLeft(expiresAt);
       setRemaining(left);
-      if (left === 0) clearInterval(timer);
+      if (left <= 0) clearInterval(timer);
     };
     const timer = setInterval(tick, 1000);
     tick();
     return () => clearInterval(timer);
   }, [expiresAt]);
+
+  // "Copied" is a receipt, not a new name for the button — it goes back to
+  // offering the thing it offers.
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
 
   const expired = remaining <= 0;
   // The server mints this relative on purpose — it has no dependable notion
@@ -65,9 +81,18 @@ function DeviceLinkBody({ url, expiresAt }: { url: string; expiresAt: number }) 
   const absolute = new URL(url, location.origin).toString();
   const code = expired ? null : qrPath(absolute);
 
+  // A clipboard write can be refused outright — permissions policy, an
+  // insecure origin, a tab that lost focus mid-click. Swallowing that leaves
+  // a button that looks like it worked; throwing it leaves an unhandled
+  // rejection nobody sees. The link is on screen either way, so say so.
   const copy = async () => {
-    await navigator.clipboard.writeText(absolute);
-    setCopied(true);
+    try {
+      await navigator.clipboard.writeText(absolute);
+      setCopied(true);
+      setCopyFailed(false);
+    } catch {
+      setCopyFailed(true);
+    }
   };
 
   return (
@@ -125,8 +150,15 @@ function DeviceLinkBody({ url, expiresAt }: { url: string; expiresAt: number }) 
 
             <code className="link-url">{absolute}</code>
 
+            {copyFailed ? (
+              <p className="join-error">
+                This browser would not let the page reach your clipboard. Select the link above and
+                copy it by hand.
+              </p>
+            ) : null}
+
             <div className="link-actions">
-              <button type="button" className="btn" onClick={copy}>
+              <button type="button" className="btn" onClick={() => void copy()}>
                 {copied ? 'Copied' : 'Copy link'}
               </button>
               <span

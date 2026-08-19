@@ -44,6 +44,7 @@ export function JoinScreen({
   onCreate,
   onJoin,
   onFollowInvite,
+  onGiveUpKnocking,
 }: {
   invitedRoom: string | null;
   resuming: boolean;
@@ -51,6 +52,7 @@ export function JoinScreen({
   onCreate: (roomName: string, displayName: string, avatar: string) => void;
   onJoin: (roomCode: string, displayName: string, avatar: string) => void;
   onFollowInvite: (roomCode: string) => void;
+  onGiveUpKnocking: () => void;
 }) {
   const joinError = useStore((s) => s.joinError);
   const knocking = useStore((s) => s.knocking);
@@ -94,7 +96,12 @@ export function JoinScreen({
   // preview is where the office's name comes from — it is the only thing
   // this browser has been told about a place it is not in yet.
   if (knocking) {
-    return <KnockingScreen officeName={preview.state === 'found' ? preview.name : null} />;
+    return (
+      <KnockingScreen
+        officeName={preview.state === 'found' ? preview.name : null}
+        onGiveUp={onGiveUpKnocking}
+      />
+    );
   }
 
   if (resuming) {

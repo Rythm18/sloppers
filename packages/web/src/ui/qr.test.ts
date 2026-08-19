@@ -41,6 +41,15 @@ function isFinder(cells: boolean[][], top: number, left: number): boolean {
 
 const LINK = 'https://sloppers.example.com/?room=the-lab-k4xp2q#relink=0a1b2c3d4e5f60718293a4b5';
 
+/** Real device links across a few origins, so several QR versions and mask
+ *  patterns are covered rather than whichever one `LINK` happens to pick. */
+const SAMPLES = [
+  LINK,
+  'http://localhost:8791/?room=the-lab-puw7h3#relink=9ebcf465fcacbb69c31c0bcd8305f284b41fd94e74e56833',
+  'https://sloppers.fly.dev/?room=the-annex-9m2v7t#relink=aaaabbbbccccddddeeeeffff00001111',
+  'https://a.example/?room=b#relink=c',
+];
+
 describe('qrPath', () => {
   it('puts a finder pattern in three corners and not the fourth', () => {
     const code = qrPath(LINK);
@@ -53,6 +62,24 @@ describe('qrPath', () => {
     // A fourth eye would make the code unorientable — the missing corner is
     // how a scanner knows which way up it is.
     expect(isFinder(cells, far, far)).toBe(false);
+  });
+
+  it('puts the always-dark module where the spec says, on every code it makes', () => {
+    // Everything else in this file reads the same both ways round: three
+    // finders and a quiet zone are symmetric about the diagonal, so a grid
+    // indexed (col, row) by mistake would sail through them all and then scan
+    // as nothing. This module — row 4·version + 9, column 8, dark in every QR
+    // ever made — is the asymmetry that catches it. Its mirror image is an
+    // ordinary format-info bit that depends on the mask the encoder picked,
+    // so the sample below spans several, and a transposed grid lands on a
+    // light one. Verified by mutation, not by argument.
+    for (const sample of SAMPLES) {
+      const code = qrPath(sample);
+      const cells = grid(code);
+      const modules = code.size - QUIET_ZONE * 2;
+      // version = (modules - 17) / 4, so 4·version + 9 is modules - 8.
+      expect(cells[QUIET_ZONE + modules - 8]?.[QUIET_ZONE + 8]).toBe(true);
+    }
   });
 
   it('leaves the quiet zone the spec asks for on every side', () => {

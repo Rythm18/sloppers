@@ -111,15 +111,24 @@ export function App() {
     [],
   );
 
+  // The one way back to the front page, wherever this browser had got to.
+  // Both edges of the door use it rather than each inventing a way home.
+  const toLanding = useCallback(() => {
+    useStore.getState().reset();
+    history.replaceState(null, '', '/');
+    setUrlRoom(null);
+    setResuming(false);
+    setEntry('landing');
+  }, []);
+
   // Losing a seat lands here rather than in the world. The credentials died
   // with it, so both ways off this card forget them first — otherwise the
   // next visit tries to resume with a member the office no longer has and
   // stalls on "stepping back in…" before failing.
   if (removed) {
     const office = roomCode;
-    const forget = () => {
+    const forgetIdentity = () => {
       if (office) clearIdentity(office);
-      useStore.getState().reset();
     };
     return (
       <div className="app">
@@ -127,15 +136,14 @@ export function App() {
           reason={removed}
           officeName={roomName}
           onJoinAgain={() => {
-            forget();
+            forgetIdentity();
+            useStore.getState().reset();
             history.replaceState(null, '', office ? `?room=${encodeURIComponent(office)}` : '/');
             setUrlRoom(office || null);
           }}
           onLeave={() => {
-            forget();
-            history.replaceState(null, '', '/');
-            setUrlRoom(null);
-            setEntry('landing');
+            forgetIdentity();
+            toLanding();
           }}
         />
       </div>
@@ -179,6 +187,15 @@ export function App() {
               setResuming(true);
               start({ kind: 'resume', roomCode: code });
             }
+          }}
+          onGiveUpKnocking={() => {
+            // Dropping the connection is the withdrawal: the office removes
+            // the knock in its socket close handler and pushes the shortened
+            // queue, so nobody is left holding a place in line for someone
+            // who walked away. Nothing client-side could do that.
+            socketRef.current?.stop();
+            socketRef.current = null;
+            toLanding();
           }}
         />
       </div>

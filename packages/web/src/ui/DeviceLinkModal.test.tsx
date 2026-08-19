@@ -86,7 +86,7 @@ describe('DeviceLinkModal', () => {
     expect(drawn).not.toBe(qrPath(RELATIVE).path);
   });
 
-  it('counts down, and stops at nothing rather than going negative', () => {
+  it('counts down, and shows no clock at all once there is nothing to count', () => {
     render(<DeviceLinkModal />);
     mint(90_000);
     expect(screen.getByText('expires in 1:30')).toBeTruthy();
@@ -94,9 +94,64 @@ describe('DeviceLinkModal', () => {
     act(() => vi.advanceTimersByTime(60_000));
     expect(screen.getByText('expires in 0:30')).toBeTruthy();
 
-    // Well past the deadline: no negatives, and no clock at all any more.
+    // Well past the deadline: no negatives on screen, no clock at all.
     act(() => vi.advanceTimersByTime(120_000));
     expect(screen.queryByText(/expires in/)).toBeNull();
+  });
+
+  it('stops ticking, and stops it even for a link that was dead on arrival', () => {
+    // "Stops counting" is a claim about the timer, not about the text — the
+    // text is gated on `expired` and would look identical either way. A tab
+    // in the background has its intervals throttled to roughly once a minute,
+    // so the tick that lands exactly on zero is one this must not wait for.
+    // A live interval re-arms itself, so it can never leave the queue empty
+    // however far the clock is wound on. Zero here means it really stopped.
+    render(<DeviceLinkModal />);
+    mint(2_000);
+    act(() => vi.advanceTimersByTime(3_000));
+    expect(vi.getTimerCount()).toBe(0);
+
+    cleanup();
+    act(() => useStore.getState().setDeviceLink(null));
+
+    // Minted before the laptop lid closed, opened after: the deadline is
+    // already behind us, and no tick will ever read exactly zero.
+    render(<DeviceLinkModal />);
+    mint(-45_000);
+    expect(screen.getByText(/That link has expired/)).toBeTruthy();
+
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('says so when the browser refuses the clipboard, instead of failing silently', async () => {
+    writeText.mockRejectedValueOnce(new Error('clipboard blocked'));
+    render(<DeviceLinkModal />);
+    mint();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Copy link' }));
+    });
+
+    expect(screen.getByText(/would not let the page reach your clipboard/)).toBeTruthy();
+    // The button never claimed success, and the link is still on screen to
+    // select by hand.
+    expect(screen.getByRole('button', { name: 'Copy link' })).toBeTruthy();
+    expect(screen.getByText(`${location.origin}${RELATIVE}`)).toBeTruthy();
+  });
+
+  it('goes back to offering a copy rather than saying "Copied" forever', async () => {
+    render(<DeviceLinkModal />);
+    mint();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Copy link' }));
+    });
+    expect(screen.getByRole('button', { name: 'Copied' })).toBeTruthy();
+
+    act(() => vi.advanceTimersByTime(2_500));
+
+    expect(screen.getByRole('button', { name: 'Copy link' })).toBeTruthy();
   });
 
   it('takes the dead link and its code off the screen, and says how to get another', () => {

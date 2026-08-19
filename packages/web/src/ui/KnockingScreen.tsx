@@ -19,7 +19,19 @@ function waitingLine(answerable: boolean | null): string {
   return 'This page will let you in the moment somebody answers.';
 }
 
-export function KnockingScreen({ officeName }: { officeName: string | null }) {
+export function KnockingScreen({
+  officeName,
+  onGiveUp,
+}: {
+  officeName: string | null;
+  /**
+   * Stop waiting. Closes the connection, which is what actually takes them
+   * off the door — the office drops the knock in its socket close handler and
+   * pushes the shortened queue, so nobody is left holding an entry for
+   * somebody who walked away.
+   */
+  onGiveUp: () => void;
+}) {
   const answerable = useStore((s) => s.doorAnswerable);
 
   return (
@@ -47,8 +59,12 @@ export function KnockingScreen({ officeName }: { officeName: string | null }) {
         </p>
 
         <p className="settings-note">
-          Keep this tab open. Closing it takes you off the door, and you would have to knock again.
+          Keep this tab open. Leaving takes you off the door, and you would have to knock again.
         </p>
+
+        <button type="button" className="btn btn-quiet knock-leave" onClick={onGiveUp}>
+          ← Back to sloppers
+        </button>
       </div>
     </div>
   );

@@ -289,6 +289,11 @@ button {
   color: var(--parchment);
 }
 
+/* Sizes to its label, not to the card: leaving is available, not the point. */
+.knock-leave {
+  justify-self: start;
+}
+
 /* A section title in the panel idiom, but wearing the alert colour — this
    one is not a heading over some settings, it is what happened. */
 .removed-title {

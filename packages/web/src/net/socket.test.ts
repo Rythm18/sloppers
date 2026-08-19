@@ -132,6 +132,21 @@ describe('OfficeSocket', () => {
     expect(ws.sent).toHaveLength(0);
   });
 
+  it('closes the connection on stop, which is what takes a knocker off the door', () => {
+    // Giving up at the door has no message of its own: the office drops the
+    // knock in its socket close handler and pushes the shortened queue. So
+    // the whole withdrawal rests on `stop()` really closing, and on it not
+    // reconnecting afterwards and rejoining the queue.
+    const ws = startAndOpen();
+
+    socket?.stop();
+
+    expect(ws.readyState).toBe(FakeWebSocket.CLOSED);
+    const opened = FakeWebSocket.instances.length;
+    ws.triggerClose();
+    expect(FakeWebSocket.instances).toHaveLength(opened);
+  });
+
   it('leaves the connection state alone after removal, instead of reopening a reconnect loop', () => {
     const ws = startAndOpen();
 
