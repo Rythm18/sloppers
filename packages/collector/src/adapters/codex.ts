@@ -6,8 +6,11 @@ import { addUsage, markMinute, newAccumulator } from '../core/types.js';
 
 /**
  * Codex CLI writes each session to
- * `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`. Lines are
- * `{timestamp, type, payload}`:
+ * `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`, and moves
+ * retired threads to `~/.codex/archived_sessions/` as a flat directory of the
+ * same files. Both are read: archiving a thread does not retire its
+ * *conversation*, and an archived rollout is very often the root every live
+ * fork replays. Lines are `{timestamp, type, payload}`:
  *
  * - `session_meta`: session id, cwd, git branch — the session's identity.
  * - `turn_context`: per-turn settings; carries the current `model`.
@@ -206,13 +209,17 @@ export function createCodexAdapter(
   home: string = homedir(),
   maxTrackedClaims: number = MAX_TRACKED_CLAIMS,
 ): HarnessAdapter {
-  const root = join(home, '.codex', 'sessions');
+  // Archived first, so a retired root is seeded before the live forks that
+  // replay it and owns its own cumulatives; `seedTracker` takes the roots in
+  // this order. Within each root the walk is sorted, which for Codex is
+  // chronological — the filename carries the creation timestamp.
+  const roots = [join(home, '.codex', 'archived_sessions'), join(home, '.codex', 'sessions')];
 
   /**
    * thread id -> the thread it continues, or undefined for a root. Learned
    * from *every* `session_meta`, including the parent's own metas embedded in
-   * a fork file, which is how a lineage still resolves when the parent's
-   * rollout is archived and never ingested.
+   * a fork file, so a lineage still resolves even when the parent's rollout is
+   * missing from both directories.
    */
   const parentOf = new Map<string, string | undefined>();
   /** Bumped whenever a link is added, so resolutions can be cached per file. */
@@ -237,9 +244,15 @@ export function createCodexAdapter(
    * own link we have never seen. An unseen parent is still a real id off a
    * real transcript, so the lineage keeps it rather than inventing one.
    *
-   * A malformed chain that loops settles on the lowest id in the loop rather
-   * than on wherever the walk happened to start, so every member of the cycle
-   * agrees and the conversation groups instead of splitting.
+   * A malformed chain that loops always terminates, and settles on the lowest
+   * id the walk visited rather than on wherever it happened to start. For a
+   * pure cycle every member visits the same set and so agrees on one id. For a
+   * chain that runs *into* a cycle the set also holds the tail it came from,
+   * so a tail node can settle lower than the loop's own members and the
+   * conversation splits in two. That is a wrong grouping, not a hang or a lost
+   * rollout, and no local rollout has ever produced a loop of either shape
+   * (0 of 720) — the guard exists so malformed input degrades rather than
+   * wedges the fold.
    */
   const lineageRoot = (threadId: string): string => {
     const seen = new Set<string>([threadId]);
@@ -285,9 +298,9 @@ export function createCodexAdapter(
 
   return {
     id: 'codex',
-    roots: () => [root],
+    roots: () => [...roots],
     matches: (filePath) =>
-      filePath.startsWith(root + sep) &&
+      roots.some((r) => filePath.startsWith(r + sep)) &&
       basename(filePath).startsWith('rollout-') &&
       filePath.endsWith('.jsonl'),
     newAccumulator,

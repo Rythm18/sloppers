@@ -51,6 +51,31 @@ describe('codex adapter', () => {
     expect(adapter.matches(`${HOME}/.codex/sessions/2026/08/17/notes.jsonl`)).toBe(false);
   });
 
+  it('reads archived rollouts too, where most lineage roots live', () => {
+    // Codex archives a thread without retiring its conversation: 171 of the
+    // 720 local rollouts sit in `archived_sessions`, and they are *younger*
+    // than the watched ones (median 2.4 days against 5.0). Skipping them left
+    // every live fork replaying a root whose claims did not exist.
+    const archived = `${HOME}/.codex/archived_sessions/rollout-2026-08-14T00-42-10-abc.jsonl`;
+    expect(adapter.matches(archived)).toBe(true);
+    expect(adapter.matches(`${HOME}/.codex/archived_sessions/notes.jsonl`)).toBe(false);
+    expect(adapter.roots()).toContain(`${HOME}/.codex/archived_sessions`);
+    expect(adapter.roots()).toContain(`${HOME}/.codex/sessions`);
+  });
+
+  it('seeds archived rollouts before live ones', () => {
+    // `seedTracker` takes the roots in order, so the retired root claims its
+    // own cumulatives before the forks that replay them arrive.
+    expect(adapter.roots()[0]).toBe(`${HOME}/.codex/archived_sessions`);
+  });
+
+  it('does not let one root swallow paths belonging to the other', () => {
+    // `.codex/sessions` must not prefix-match `.codex/archived_sessions`, nor
+    // either match a sibling directory that merely starts the same way.
+    expect(adapter.matches(`${HOME}/.codex/sessions-backup/rollout-x.jsonl`)).toBe(false);
+    expect(adapter.matches(`${HOME}/.codex/archived_sessions_old/rollout-x.jsonl`)).toBe(false);
+  });
+
   it('reads identity from session_meta and model from turn_context', () => {
     const acc = ingest([
       meta,
