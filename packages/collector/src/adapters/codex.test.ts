@@ -221,3 +221,262 @@ describe('codex adapter', () => {
     expect(acc.usage.size).toBe(0);
   });
 });
+
+/**
+ * Lineage: Codex writes every subagent thread and every fork as its own rollout
+ * file. See the header of codex.ts for what the local corpus says about them.
+ */
+describe('codex lineage', () => {
+  const path = (name: string) => `${HOME}/.codex/sessions/2026/08/17/rollout-${name}.jsonl`;
+
+  /** A `session_meta` line. `id` is the rollout's own thread id. */
+  function metaFor(
+    id: string,
+    extra: {
+      parent_thread_id?: string;
+      forked_from_id?: string;
+      thread_source?: string;
+      cwd?: string;
+    } = {},
+    timestamp = '2026-08-17T10:00:00.000Z',
+  ) {
+    return {
+      timestamp,
+      type: 'session_meta',
+      payload: { id, session_id: extra.parent_thread_id ?? id, cwd: '/home/dev/myapp', ...extra },
+    };
+  }
+
+  const usage = (input: number, output = 0) => ({
+    input_tokens: input,
+    cached_input_tokens: 0,
+    output_tokens: output,
+  });
+
+  /** Fold `lines` into a fresh accumulator for `file` on a shared adapter. */
+  function fold(a: ReturnType<typeof createCodexAdapter>, file: string, lines: object[]) {
+    const acc = a.newAccumulator(file);
+    for (const line of lines) a.ingestLine(JSON.stringify(line), acc);
+    return acc;
+  }
+
+  it('reports a subagent under its lineage root, not its own thread id', () => {
+    const a = createCodexAdapter(HOME);
+    const sub = fold(a, path('sub'), [
+      metaFor('child', { parent_thread_id: 'root', thread_source: 'subagent' }),
+      tokenCount(usage(500)),
+    ]);
+    expect(sub.sessionId).toBe('root');
+    // Its spend is real and disjoint from the parent's, so it still counts.
+    expect(totalUsage(sub)).toMatchObject({ input: 500 });
+  });
+
+  it('marks a subagent rollout usage-only so it never shows as its own session', () => {
+    const a = createCodexAdapter(HOME);
+    const sub = fold(a, path('sub'), [
+      metaFor('child', { parent_thread_id: 'root', thread_source: 'subagent' }),
+    ]);
+    expect(sub.usageOnly).toBe(true);
+
+    const user = fold(a, path('user'), [metaFor('root', { thread_source: 'user' })]);
+    expect(user.usageOnly).toBe(false);
+    expect(user.sessionId).toBe('root');
+  });
+
+  it('prefers forked_from_id over parent_thread_id when both are set', () => {
+    // 192 of the 720 local rollouts carry both; the fork link is the one that
+    // says whose accumulator this rollout continues.
+    const a = createCodexAdapter(HOME);
+    const acc = fold(a, path('fork'), [
+      metaFor('child', {
+        parent_thread_id: 'other',
+        forked_from_id: 'origin',
+        thread_source: 'subagent',
+      }),
+    ]);
+    expect(acc.sessionId).toBe('origin');
+  });
+
+  it('follows a chain to the root, not just one hop', () => {
+    const a = createCodexAdapter(HOME);
+    fold(a, path('mid'), [metaFor('mid', { parent_thread_id: 'root', thread_source: 'subagent' })]);
+    const leaf = fold(a, path('leaf'), [
+      metaFor('leaf', { parent_thread_id: 'mid', thread_source: 'subagent' }),
+    ]);
+    expect(leaf.sessionId).toBe('root');
+  });
+
+  it('re-resolves a lineage when the missing middle link turns up later', () => {
+    // Directory order is not lineage order, so a leaf routinely lands before
+    // the rollout that connects it to its root.
+    const a = createCodexAdapter(HOME);
+    const leaf = fold(a, path('leaf'), [
+      metaFor('leaf', { parent_thread_id: 'mid', thread_source: 'subagent' }),
+      tokenCount(usage(10)),
+    ]);
+    expect(leaf.sessionId).toBe('mid');
+
+    fold(a, path('mid'), [metaFor('mid', { parent_thread_id: 'root', thread_source: 'subagent' })]);
+    // The next line the leaf receives re-resolves it onto the real root.
+    a.ingestLine(JSON.stringify(tokenCount(usage(20))), leaf);
+    expect(leaf.sessionId).toBe('root');
+  });
+
+  it('keeps a lineage whose root rollout is absent under the root id it names', () => {
+    // The parent may have rolled out of the seed window or been archived. The
+    // id is real — it came off the child's own session_meta — so the lineage
+    // keeps it rather than vanishing or inventing one.
+    const a = createCodexAdapter(HOME);
+    const acc = fold(a, path('orphan'), [
+      metaFor('child', { parent_thread_id: 'gone-forever', thread_source: 'subagent' }),
+      tokenCount(usage(700)),
+    ]);
+    expect(acc.sessionId).toBe('gone-forever');
+    expect(acc.usageOnly).toBe(true);
+    // ...and it asks to be displayed anyway, so its spend still reaches the
+    // ledger instead of being held in a group nobody ever reports.
+    expect(acc.displayIfOrphaned).toBe(true);
+    expect(totalUsage(acc)).toMatchObject({ input: 700 });
+  });
+
+  it('does not hang or lose a rollout on a malformed parent cycle', () => {
+    const a = createCodexAdapter(HOME);
+    const one = fold(a, path('one'), [
+      metaFor('alpha', { parent_thread_id: 'beta', thread_source: 'subagent' }),
+      tokenCount(usage(11)),
+    ]);
+    const two = fold(a, path('two'), [
+      metaFor('beta', { parent_thread_id: 'alpha', thread_source: 'subagent' }),
+      tokenCount(usage(22)),
+    ]);
+    // Before the loop closed, beta looked like a perfectly ordinary root.
+    expect(one.sessionId).toBe('beta');
+    // Once both links are known, both members of the cycle settle on the same
+    // id — the lowest in the loop, not wherever the walk started — so a
+    // malformed chain still groups instead of splitting into two half-sessions.
+    expect(two.sessionId).toBe('alpha');
+    a.ingestLine(JSON.stringify(tokenCount(usage(33))), one);
+    expect(one.sessionId).toBe('alpha');
+
+    expect(totalUsage(one)).toMatchObject({ input: 33 });
+    expect(totalUsage(two)).toMatchObject({ input: 22 });
+  });
+
+  it('survives a rollout that names itself as its own parent', () => {
+    const a = createCodexAdapter(HOME);
+    const acc = fold(a, path('self'), [
+      metaFor('self', { parent_thread_id: 'self', thread_source: 'subagent' }),
+      tokenCount(usage(5)),
+    ]);
+    expect(acc.sessionId).toBe('self');
+    expect(totalUsage(acc)).toMatchObject({ input: 5 });
+  });
+
+  it('leaves a plain user rollout with no parent exactly as it was', () => {
+    const a = createCodexAdapter(HOME);
+    const acc = fold(a, path('solo'), [
+      metaFor('solo', { thread_source: 'user' }),
+      tokenCount(usage(1234, 56)),
+    ]);
+    expect(acc.sessionId).toBe('solo');
+    expect(acc.usageOnly).toBe(false);
+    expect(acc.displayIfOrphaned).toBeFalsy();
+    expect(totalUsage(acc)).toMatchObject({ input: 1234, output: 56 });
+  });
+
+  it('keeps the rollout its own identity when a copied session_meta follows', () => {
+    // A fork file embeds the parent's whole transcript, session_meta lines and
+    // all: 38 of the 39 metas in one local fork carry the parent's id. Letting
+    // the last one win is how a fork ended up reporting as its parent.
+    const a = createCodexAdapter(HOME);
+    const acc = fold(a, path('fork'), [
+      metaFor(
+        'fork',
+        { forked_from_id: 'origin', thread_source: 'subagent', cwd: '/home/dev/fork' },
+        '2026-08-17T10:00:00.000Z',
+      ),
+      metaFor('origin', { thread_source: 'user' }, '2026-08-01T00:00:00.000Z'),
+    ]);
+    expect(acc.sessionId).toBe('origin');
+    expect(acc.startedAtMs).toBe(Date.parse('2026-08-17T10:00:00.000Z'));
+    expect(acc.cwd).toBe('/home/dev/fork');
+  });
+
+  it('books a replayed cumulative once for the lineage, not once per rollout', () => {
+    // THE defect. A fork replays its parent's whole token_count history into
+    // its own file — 9681 events verbatim in the worst local case — so summing
+    // the rollouts books the same spend again for every fork.
+    const a = createCodexAdapter(HOME);
+    const shared = [tokenCount(usage(1_000_000)), tokenCount(usage(2_000_000))];
+
+    const origin = fold(a, path('origin'), [
+      metaFor('origin', { thread_source: 'user' }),
+      ...shared,
+    ]);
+    expect(totalUsage(origin)).toMatchObject({ input: 2_000_000 });
+
+    // Two forks of the same point, each replaying the same two events and then
+    // doing a little work of their own.
+    const forkA = fold(a, path('fork-a'), [
+      metaFor('a', { forked_from_id: 'origin', thread_source: 'subagent' }),
+      ...shared,
+      tokenCount(usage(2_100_000)),
+    ]);
+    const forkB = fold(a, path('fork-b'), [
+      metaFor('b', { forked_from_id: 'origin', thread_source: 'subagent' }),
+      ...shared,
+      tokenCount(usage(2_050_000)),
+    ]);
+
+    expect(totalUsage(forkA)).toMatchObject({ input: 100_000 });
+    expect(totalUsage(forkB)).toMatchObject({ input: 50_000 });
+    // 2.15M across the lineage, not the 6.15M summing the rollouts would give.
+    const lineage = [origin, forkA, forkB].reduce((n, acc) => n + (totalUsage(acc)?.input ?? 0), 0);
+    expect(lineage).toBe(2_150_000);
+  });
+
+  it('still counts a subagent whose spend never appears in its parent', () => {
+    // The other half of the verdict: 0 of the 503 non-fork subagent rollouts
+    // share a single cumulative with any ancestor. Their spend is their own and
+    // denying it would trade a 6x over-count for a large under-count.
+    const a = createCodexAdapter(HOME);
+    const parent = fold(a, path('parent'), [
+      metaFor('root', { thread_source: 'user' }),
+      tokenCount(usage(9_000_000)),
+    ]);
+    const sub = fold(a, path('sub'), [
+      metaFor('kid', { parent_thread_id: 'root', thread_source: 'subagent' }),
+      tokenCount(usage(40_000)),
+      tokenCount(usage(120_000)),
+    ]);
+    expect(totalUsage(parent)).toMatchObject({ input: 9_000_000 });
+    expect(totalUsage(sub)).toMatchObject({ input: 120_000 });
+  });
+
+  it('re-reading the same rollout never denies it its own spend', () => {
+    // The tailer replays a truncated file from the top. A claim is held by a
+    // path, so a file always re-owns its own cumulatives.
+    const a = createCodexAdapter(HOME);
+    const lines = [metaFor('solo', { thread_source: 'user' }), tokenCount(usage(4242))];
+    expect(totalUsage(fold(a, path('solo'), lines))).toMatchObject({ input: 4242 });
+    expect(totalUsage(fold(a, path('solo'), lines))).toMatchObject({ input: 4242 });
+  });
+
+  it('bounds the claim index rather than growing it forever', () => {
+    const a = createCodexAdapter(HOME, 2);
+    const first = fold(a, path('one'), [
+      metaFor('one', { thread_source: 'user' }),
+      tokenCount(usage(1)),
+      tokenCount(usage(2)),
+      tokenCount(usage(3)),
+    ]);
+    expect(totalUsage(first)).toMatchObject({ input: 3 });
+    // Eviction can only ever let a claim go, which costs precision on a replay,
+    // never a rollout's own spend.
+    const second = fold(a, path('two'), [
+      metaFor('two', { thread_source: 'user' }),
+      tokenCount(usage(1)),
+    ]);
+    expect(totalUsage(second)).toMatchObject({ input: 1 });
+  });
+});

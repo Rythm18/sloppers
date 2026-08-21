@@ -1,8 +1,20 @@
 import type { PresenceState, SessionSnapshot, TokenTotals } from '@sloppers/protocol';
 import { billedTokens, PRICING } from '@sloppers/protocol';
 
-/** 1234 → "1.2k", 5_400_000 → "5.4M" — leaderboard-friendly. */
+/**
+ * 1234 → "1.2k", 5_400_000 → "5.4M", 2_800_000_000 → "2.8B" —
+ * leaderboard-friendly.
+ *
+ * The tiers run to T because token counts do. A single Codex conversation on
+ * this machine reached 2.4B billed tokens in 26 days and one member's day in
+ * production banked 2.8B cache reads; stopping at M rendered that as
+ * "2228833M", nine characters of noise in a column with room for four. T is
+ * one tier of headroom past anything measured rather than a prediction — the
+ * alternative is discovering the next ceiling the same way, in production.
+ */
 export function formatTokens(n: number): string {
+  if (n >= 1_000_000_000_000) return `${trim(n / 1_000_000_000_000)}T`;
+  if (n >= 1_000_000_000) return `${trim(n / 1_000_000_000)}B`;
   if (n >= 1_000_000) return `${trim(n / 1_000_000)}M`;
   if (n >= 1_000) return `${trim(n / 1_000)}k`;
   return String(n);

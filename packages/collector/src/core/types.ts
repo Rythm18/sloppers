@@ -45,6 +45,20 @@ export interface SessionAccumulator {
    * 37512 requestIds occur in both a sidechain file and a main one).
    */
   usageOnly: boolean;
+  /**
+   * Display this file anyway if nothing else in its session ever turns up.
+   *
+   * A Claude sidechain never needs this: it borrows a live parent transcript's
+   * id, and that parent is a file in the same directory that the same walk
+   * will reach. A Codex rollout names a *thread*, and that thread's own
+   * rollout may have been archived or have fallen outside the seed window —
+   * 171 of the 720 local rollouts live in `archived_sessions`, which nothing
+   * watches. Holding such a lineage in an undisplayed group forever would drop
+   * its spend on the floor, which on the local corpus is 10.4B tokens. So the
+   * lineage elects a stand-in rather than vanishing, and hands the session
+   * straight back the moment the real root is tracked.
+   */
+  displayIfOrphaned?: boolean;
   startedAtMs?: number;
   lastEventKind: LastEventKind;
   /** True once the adapter decides this file is not a reportable session. */

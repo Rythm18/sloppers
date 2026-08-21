@@ -13,9 +13,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * A minimal line format: `<sessionId> <kind> [tokens] [dayOffset]`.
- * `kind` of `sub` marks the file usage-only (a subagent sidechain); `final`
- * ends the turn. `dayOffset` shifts the entry that many whole days from `AT`,
- * which is how a test spans enough days to reach the bucket caps.
+ * `kind` of `sub` marks the file usage-only (a subagent sidechain); `lineage`
+ * marks it usage-only but displayable when nothing else in the lineage is
+ * tracked (a Codex rollout naming an absent root); `final` ends the turn.
+ * `dayOffset` shifts the entry that many whole days from `AT`, which is how a
+ * test spans enough days to reach the bucket caps.
  */
 function fakeAdapter(root: string): HarnessAdapter {
   return {
@@ -28,6 +30,10 @@ function fakeAdapter(root: string): HarnessAdapter {
       if (id) acc.sessionId = id;
       acc.cwd = '/home/dev/proj';
       if (kind === 'sub') acc.usageOnly = true;
+      if (kind === 'lineage') {
+        acc.usageOnly = true;
+        acc.displayIfOrphaned = true;
+      }
       if (kind === 'final') acc.lastEventKind = 'agent-final';
       else acc.lastEventKind = 'other';
       const ms = AT + (dayOffset ? Number(dayOffset) : 0) * DAY_MS;
@@ -260,6 +266,54 @@ describe('SessionTracker grouping', () => {
     const snaps = tracker.snapshot(8000);
     expect(snaps).toHaveLength(1);
     expect(bucketedInput(snaps[0])).toBe(140);
+  });
+
+  it('still reports a lineage whose root rollout is not tracked', () => {
+    // Codex names a parent thread that may have been archived or fallen out of
+    // the seed window. A Claude sidechain in that state stays hidden — its
+    // parent is a live file that will turn up — but a Codex lineage's root may
+    // never turn up at all, and holding its spend forever loses it.
+    const { root, tracker } = setup();
+    const a = join(root, 'b-second.log');
+    const b = join(root, 'a-first.log');
+    writeFileSync(a, 's-gone lineage 40\n');
+    writeFileSync(b, 's-gone lineage 60\n');
+    tracker.ingestFile(a, 5000);
+    tracker.ingestFile(b, 6000);
+
+    const snaps = tracker.snapshot(7000);
+    // One session for the whole lineage, carrying every member's spend.
+    expect(snaps).toHaveLength(1);
+    expect(baseId(snaps[0]?.id)).toBe('s-gone');
+    expect(bucketedInput(snaps[0])).toBe(100);
+  });
+
+  it('hands the lineage back to its root as soon as the root is tracked', () => {
+    const { root, tracker } = setup();
+    const sub = join(root, 'a-sub.log');
+    const main = join(root, 'z-root.log');
+    writeFileSync(sub, 's-late lineage 40\n');
+    tracker.ingestFile(sub, 5000);
+    expect(tracker.snapshot(6000)).toHaveLength(1);
+
+    writeFileSync(main, 's-late work 100\n');
+    tracker.ingestFile(main, 7000);
+    const snaps = tracker.snapshot(8000);
+    expect(snaps).toHaveLength(1);
+    // The root displays even though its path sorts last: a real session always
+    // beats a stand-in.
+    expect(bucketedInput(snaps[0])).toBe(140);
+    expect(snaps[0]?.id).not.toBe(undefined);
+  });
+
+  it('keeps an orphaned Claude sidechain hidden, as before', () => {
+    // The new fallback is opt-in, so nothing changes for a harness that did
+    // not ask for it.
+    const { root, tracker } = setup();
+    const sub = join(root, 'orphan-subagent.log');
+    writeFileSync(sub, 's-orphan sub 40\n');
+    tracker.ingestFile(sub, 5000);
+    expect(tracker.snapshot(6000)).toHaveLength(0);
   });
 
   it('keeps two non-sidechain files that share a session id as two sessions', () => {

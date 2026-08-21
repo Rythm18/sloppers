@@ -167,11 +167,14 @@ export class SessionTracker {
    * Fold the tracked files into the sessions a person would recognise.
    *
    * Only `usageOnly` entries merge into a parent. Two non-`usageOnly` entries
-   * never merge, whatever their session ids — grouping on the id alone is safe
-   * for Claude Code but wrong for Codex, which reassigns `sessionId` on every
-   * `session_meta` and never sets `usageOnly`: 7 ids span more than one of the
-   * 494 local rollout files, one of them 29 files, and merging on the id would
-   * hide 92 real rollouts behind other people's sessions.
+   * never merge, whatever their session ids — grouping on the id alone would
+   * hide one real session behind another, and an adapter that wants two files
+   * folded together says so by marking one of them.
+   *
+   * Both harnesses use that: a Claude sidechain carries its parent's session
+   * id, and a Codex subagent or fork rollout reports its lineage root's thread
+   * id (see `createCodexAdapter`). 695 of the 720 local Codex rollouts are one
+   * or the other, and they collapse into 23 conversations.
    */
   private groups(): Group[] {
     // Which entry a sidechain folds into, per session id. Ties break on the
@@ -180,11 +183,18 @@ export class SessionTracker {
     // by filesystem and shifts as files come and go, while the path ordering
     // is total and identical on every run.
     const parents = new Map<string, Entry>();
+    // Stand-ins for a session whose real file may never be tracked; see
+    // `displayIfOrphaned`. Elected by the same lowest-path rule, and only ever
+    // consulted when `parents` has nothing, so a real file always wins and the
+    // stand-in steps aside the moment one appears.
+    const standIns = new Map<string, Entry>();
     for (const entry of this.entries.values()) {
       const { acc } = entry;
-      if (acc.usageOnly || acc.ignored || !acc.sessionId) continue;
-      const held = parents.get(acc.sessionId);
-      if (!held || acc.filePath < held.acc.filePath) parents.set(acc.sessionId, entry);
+      if (acc.ignored || !acc.sessionId) continue;
+      const into = acc.usageOnly ? (acc.displayIfOrphaned ? standIns : undefined) : parents;
+      if (!into) continue;
+      const held = into.get(acc.sessionId);
+      if (!held || acc.filePath < held.acc.filePath) into.set(acc.sessionId, entry);
     }
 
     // Keyed by the display entry's path, so a sidechain reaching this loop
@@ -201,7 +211,7 @@ export class SessionTracker {
         ? entry
         : acc.ignored || !acc.sessionId
           ? undefined
-          : parents.get(acc.sessionId);
+          : (parents.get(acc.sessionId) ?? standIns.get(acc.sessionId));
       const key = display ? display.acc.filePath : filePath;
       let group = groups.get(key);
       if (!group) {

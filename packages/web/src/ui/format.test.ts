@@ -26,6 +26,30 @@ describe('formatTokens', () => {
     expect(formatTokens(2_000)).toBe('2k');
     expect(formatTokens(3_000_000)).toBe('3M');
   });
+
+  it('abbreviates billions and trillions', () => {
+    // Without a B tier a real Codex day renders as "2228833M", which is nine
+    // characters of noise where the leaderboard has room for four.
+    expect(formatTokens(2_228_833_000_000)).toBe('2.2T');
+    expect(formatTokens(2_800_000_000)).toBe('2.8B');
+    expect(formatTokens(122_584_877_154)).toBe('123B');
+    expect(formatTokens(1_000_000_000)).toBe('1B');
+    expect(formatTokens(19_542_891_244)).toBe('19.5B');
+  });
+
+  it('changes tier exactly at each boundary', () => {
+    expect(formatTokens(999_999_999)).toBe('1000M');
+    expect(formatTokens(1_000_000_000)).toBe('1B');
+    expect(formatTokens(999_999_999_999)).toBe('1000B');
+    expect(formatTokens(1_000_000_000_000)).toBe('1T');
+  });
+
+  it('never renders a huge number as raw digits', () => {
+    // The pixel budget is the point: every tier stays inside six characters.
+    for (const n of [1e3, 1e6, 1e9, 1e12, 4.2e13, 9.9e14]) {
+      expect(formatTokens(n).length).toBeLessThanOrEqual(6);
+    }
+  });
 });
 
 describe('formatCostUsd', () => {

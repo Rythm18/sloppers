@@ -113,9 +113,21 @@ export function watchSessions(opts: {
   };
 }
 
+/**
+ * Every path under `root`, in a fixed order.
+ *
+ * Sorted because `readdirSync` returns whatever the filesystem happened to
+ * hand back, and seeding order is not merely cosmetic: cross-file attribution
+ * (a Claude resume, a Codex fork) gives a copied entry to whichever file
+ * reaches the adapter first. Codex lays its rollouts out as
+ * `YYYY/MM/DD/rollout-<iso>-<id>.jsonl`, so sorting is chronological, and the
+ * original reaches the tracker before anything that replays it. Replaying the
+ * local corpus in this order books 19.5428B tokens against a ground truth of
+ * 19.5429B; in the reverse order the same corpus books 21.1B.
+ */
 function walk(root: string): string[] {
   try {
-    return readdirSync(root, { recursive: true, encoding: 'utf8' });
+    return readdirSync(root, { recursive: true, encoding: 'utf8' }).sort();
   } catch {
     return [];
   }
