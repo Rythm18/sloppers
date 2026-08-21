@@ -67,14 +67,45 @@ export interface SessionAccumulator {
 }
 
 /**
+ * A directory an adapter wants watched, and how far back to reach into it when
+ * catching up at startup.
+ */
+export interface SessionRoot {
+  /** Directory to watch. May not exist on this machine. */
+  path: string;
+  /**
+   * How far back the *startup* catch-up reaches for this root, when that is
+   * further than the caller's own window. Left unset, the caller's window
+   * applies, which is what a root of ordinary session files wants.
+   *
+   * It exists because two different questions are being asked of a transcript
+   * directory. "How much history do we display" is answered by the caller's
+   * seed window and is a product decision. "Which files does an adapter need
+   * in order to attribute spend correctly" is answered by the data, and for a
+   * harness whose sessions reference each other the answer includes files far
+   * older than anything displayed: a Codex fork replays its root's whole token
+   * history, so unless that root is read the fork books the replay as its own
+   * spend. Those files are folded for their side effect on the adapter, not to
+   * be shown — expiry reaps them at the first projection, since by definition
+   * nothing has touched them lately.
+   *
+   * Startup only. The periodic rescan asks a genuinely different question —
+   * "what changed in the last few minutes" — and a root reaching days back on
+   * every rescan would re-read every quiet file in it once expiry had reaped
+   * it, forever.
+   */
+  catchUpWindowMs?: number;
+}
+
+/**
  * Teaches the collector core to read one harness's on-disk session format.
  * Implementations must be pure per-line folds: the core owns file watching,
  * incremental reads, debouncing, and state timing.
  */
 export interface HarnessAdapter {
   id: HarnessId;
-  /** Directories to watch. May not exist on this machine. */
-  roots(): string[];
+  /** Directories to watch, in the order they should be seeded. */
+  roots(): SessionRoot[];
   /** Is this path a session file this adapter understands? */
   matches(filePath: string): boolean;
   newAccumulator(filePath: string): SessionAccumulator;

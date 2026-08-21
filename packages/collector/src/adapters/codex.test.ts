@@ -59,14 +59,35 @@ describe('codex adapter', () => {
     const archived = `${HOME}/.codex/archived_sessions/rollout-2026-08-14T00-42-10-abc.jsonl`;
     expect(adapter.matches(archived)).toBe(true);
     expect(adapter.matches(`${HOME}/.codex/archived_sessions/notes.jsonl`)).toBe(false);
-    expect(adapter.roots()).toContain(`${HOME}/.codex/archived_sessions`);
-    expect(adapter.roots()).toContain(`${HOME}/.codex/sessions`);
+    expect(adapter.roots().map((r) => r.path)).toEqual([
+      `${HOME}/.codex/archived_sessions`,
+      `${HOME}/.codex/sessions`,
+    ]);
   });
 
   it('seeds archived rollouts before live ones', () => {
     // `seedTracker` takes the roots in order, so the retired root claims its
     // own cumulatives before the forks that replay them arrive.
-    expect(adapter.roots()[0]).toBe(`${HOME}/.codex/archived_sessions`);
+    expect(adapter.roots()[0]?.path).toBe(`${HOME}/.codex/archived_sessions`);
+  });
+
+  it('reaches further back into archived than the seed window displays', () => {
+    // Two different questions: how much history to show, and which files are
+    // needed for the numbers to be right. Measured on the local corpus, an
+    // archived ancestor is up to 1.13 days older than the fork replaying it,
+    // so the requirement is the 1-day seed window plus that lag.
+    const [archived, live] = adapter.roots();
+    const DAY = 24 * 60 * 60 * 1000;
+    expect(archived?.catchUpWindowMs).toBeGreaterThanOrEqual(2.13 * DAY);
+    // The live root takes whatever the caller asks for; only archived differs.
+    expect(live?.catchUpWindowMs).toBeUndefined();
+  });
+
+  it('does not let a caller mutate the adapter through the roots it hands out', () => {
+    const first = adapter.roots();
+    const before = first[0]?.catchUpWindowMs;
+    if (first[0]) first[0].catchUpWindowMs = 1;
+    expect(adapter.roots()[0]?.catchUpWindowMs).toBe(before);
   });
 
   it('does not let one root swallow paths belonging to the other', () => {

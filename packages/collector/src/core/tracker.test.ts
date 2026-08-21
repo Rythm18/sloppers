@@ -22,7 +22,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function fakeAdapter(root: string): HarnessAdapter {
   return {
     id: 'fake-harness',
-    roots: () => [root],
+    roots: () => [{ path: root }],
     matches: (p) => p.startsWith(root) && p.endsWith('.log'),
     newAccumulator,
     ingestLine(line, acc) {

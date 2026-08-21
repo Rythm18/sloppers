@@ -176,7 +176,10 @@ export function createClaudeCodeAdapter(
   };
   return {
     id: 'claude-code',
-    roots: () => [root],
+    // No `catchUpWindowMs`: a Claude sidechain's parent is a live file in the
+    // same directory, so the caller's window already covers everything needed
+    // to attribute spend. Only Codex needs to reach further back.
+    roots: () => [{ path: root }],
     matches: (filePath) =>
       filePath.startsWith(root + sep) &&
       filePath.endsWith('.jsonl') &&

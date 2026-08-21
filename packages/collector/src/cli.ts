@@ -224,7 +224,10 @@ function status(): void {
   }
   const adapters = builtinAdapters();
   const tracker = new SessionTracker(adapters);
-  seedTracker(adapters, tracker);
+  // A one-shot read of the world, so it catches up exactly as the daemon does
+  // on start; `status` reporting different totals than the daemon banks would
+  // be worse than it being a little slower.
+  seedTracker(adapters, tracker, undefined, { catchUp: true });
   for (const line of renderStatus(config, tracker.routableSnapshot(Date.now()), configPath())) {
     console.log(line);
   }

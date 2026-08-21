@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { emptyTokens, type TokenTotals } from '@sloppers/protocol';
-import type { HarnessAdapter, SessionAccumulator } from '../core/types.js';
+import type { HarnessAdapter, SessionAccumulator, SessionRoot } from '../core/types.js';
 import { addUsage, markMinute, newAccumulator } from '../core/types.js';
 
 /**
@@ -205,6 +205,37 @@ const MAX_TRACKED_CLAIMS = 250_000;
  */
 const MAX_LINEAGE_HOPS = 128;
 
+/**
+ * How far back the startup catch-up reaches into `archived_sessions`,
+ * deliberately further than the watcher's own seed window.
+ *
+ * The two windows answer different questions. The seed window decides how much
+ * history to *display*, and a day of it is plenty. This one decides which
+ * files must be read for the numbers to be *right*, and that is set by the
+ * data: a fork replays its root's whole token history, so a root left unread
+ * means the fork books the replay as its own spend. Unifying them would look
+ * tidy and silently restore a 1.42x over-count, which is why they are apart.
+ *
+ * Sized from the measurement rather than guessed. Across every local fork with
+ * an archived ancestor, that ancestor's file is at most 1.13 days *older* than
+ * the fork replaying it (median: 0.36 days newer — Codex touches a thread
+ * around the time its forks are worked on). So the requirement is the seed
+ * window plus that lag, about 2.1 days, and the worst case actually present in
+ * the live set is 1.47 days.
+ *
+ * Three days is the smallest whole-day window clear of that bound. Two days
+ * also reaches 1.000x on this corpus, and is what fitting the constant to
+ * today's total would have chosen — but it sits *below* the 2.1-day
+ * requirement and passes only because the current worst case happens to be
+ * 1.47 days. It buys 2.6s of startup folding against 5.4s; the extra 2.8s is
+ * the price of not having fitted a constant to a snapshot.
+ *
+ * Exceeding it degrades rather than breaks: a lineage whose root is older
+ * books its replayed prefix once, an over-count bounded to one prefix per
+ * lineage per restart, which the ledger's watermark then banks once.
+ */
+const ARCHIVED_CATCH_UP_MS = 3 * 24 * 60 * 60 * 1000;
+
 export function createCodexAdapter(
   home: string = homedir(),
   maxTrackedClaims: number = MAX_TRACKED_CLAIMS,
@@ -213,7 +244,10 @@ export function createCodexAdapter(
   // replay it and owns its own cumulatives; `seedTracker` takes the roots in
   // this order. Within each root the walk is sorted, which for Codex is
   // chronological — the filename carries the creation timestamp.
-  const roots = [join(home, '.codex', 'archived_sessions'), join(home, '.codex', 'sessions')];
+  const roots: SessionRoot[] = [
+    { path: join(home, '.codex', 'archived_sessions'), catchUpWindowMs: ARCHIVED_CATCH_UP_MS },
+    { path: join(home, '.codex', 'sessions') },
+  ];
 
   /**
    * thread id -> the thread it continues, or undefined for a root. Learned
@@ -298,9 +332,9 @@ export function createCodexAdapter(
 
   return {
     id: 'codex',
-    roots: () => [...roots],
+    roots: () => roots.map((r) => ({ ...r })),
     matches: (filePath) =>
-      roots.some((r) => filePath.startsWith(r + sep)) &&
+      roots.some((r) => filePath.startsWith(r.path + sep)) &&
       basename(filePath).startsWith('rollout-') &&
       filePath.endsWith('.jsonl'),
     newAccumulator,

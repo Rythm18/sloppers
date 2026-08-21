@@ -29,20 +29,37 @@ export function seedTracker(
   adapters: HarnessAdapter[],
   tracker: SessionTracker,
   seedWindowMs: number = SEED_WINDOW_MS,
+  opts: {
+    /**
+     * This is the one-off catch-up at startup rather than the periodic
+     * rescan, so a root asking to reach further back than `seedWindowMs` gets
+     * to. See `SessionRoot.catchUpWindowMs`.
+     */
+    catchUp?: boolean;
+  } = {},
 ): boolean {
-  const roots = adapters.flatMap((a) => a.roots()).filter((r) => existsSync(r));
-  const cutoff = Date.now() - seedWindowMs;
+  // One basis for every root, so which files are in scope does not drift
+  // across a walk that takes a while.
+  const now = Date.now();
   let seeded = false;
-  for (const root of roots) {
-    for (const relative of walk(root)) {
-      const filePath = join(root, relative);
-      if (!tracker.adapterFor(filePath)) continue;
-      try {
-        const mtimeMs = statSync(filePath).mtimeMs;
-        if (mtimeMs < cutoff) continue;
-        if (tracker.ingestFile(filePath, mtimeMs)) seeded = true;
-      } catch {
-        // Raced a deletion; nothing to do.
+  for (const adapter of adapters) {
+    for (const root of adapter.roots()) {
+      if (!existsSync(root.path)) continue;
+      const windowMs =
+        opts.catchUp && root.catchUpWindowMs !== undefined
+          ? Math.max(seedWindowMs, root.catchUpWindowMs)
+          : seedWindowMs;
+      const cutoff = now - windowMs;
+      for (const relative of walk(root.path)) {
+        const filePath = join(root.path, relative);
+        if (!tracker.adapterFor(filePath)) continue;
+        try {
+          const mtimeMs = statSync(filePath).mtimeMs;
+          if (mtimeMs < cutoff) continue;
+          if (tracker.ingestFile(filePath, mtimeMs)) seeded = true;
+        } catch {
+          // Raced a deletion; nothing to do.
+        }
       }
     }
   }
@@ -60,9 +77,11 @@ export function watchSessions(opts: {
   // Watch every root, including ones that don't exist yet — installing a
   // second harness mid-run should just start working. (Seeding filters for
   // existence itself.)
-  const roots = adapters.flatMap((a) => a.roots());
+  const roots = adapters.flatMap((a) => a.roots()).map((r) => r.path);
 
-  if (seedTracker(adapters, tracker, opts.seedWindowMs)) onChange();
+  // The one-off catch-up, so a root that needs older files for correct
+  // attribution gets them; the rescan below deliberately does not.
+  if (seedTracker(adapters, tracker, opts.seedWindowMs, { catchUp: true })) onChange();
 
   const watcher: FSWatcher = chokidar.watch(roots, {
     ignoreInitial: true,
