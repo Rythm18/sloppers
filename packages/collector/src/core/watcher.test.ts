@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { createCodexAdapter } from '../adapters/codex.js';
 import { SessionTracker } from './tracker.js';
 import type { HarnessAdapter, SessionRoot } from './types.js';
 import { addUsage, newAccumulator } from './types.js';
@@ -113,5 +114,112 @@ describe('seedTracker root windows', () => {
     write(join(live, 'fresh.log'), 0);
     expect(() => seedTracker([adapter], tracker, DAY, { catchUp: true })).not.toThrow();
     expect(tracker.trackedFiles()).toEqual([join(live, 'fresh.log')]);
+  });
+});
+
+/**
+ * The whole Codex path over real directories: an archived root, a live fork
+ * replaying it, seeded the way the daemon seeds. This is the shape the local
+ * corpus could not test — a cold corpus has no live group, so the archived root
+ * is reaped at the first projection and never describes anything.
+ */
+describe('a live Codex lineage rooted in an archived rollout', () => {
+  const ROOT_ID = '019f0000-0000-7000-8000-0000000root';
+  const FORK_ID = '01a00000-0000-7000-8000-0000000fork';
+
+  const meta = (id: string, cwd: string, extra: object, iso: string) =>
+    JSON.stringify({
+      timestamp: iso,
+      type: 'session_meta',
+      payload: { id, cwd, git: { branch: 'main' }, ...extra },
+    });
+
+  const tokenLine = (input: number, iso: string) =>
+    JSON.stringify({
+      timestamp: iso,
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: {
+          total_token_usage: { input_tokens: input, cached_input_tokens: 0, output_tokens: 0 },
+        },
+      },
+    });
+
+  const event = (type: string) => JSON.stringify({ type: 'event_msg', payload: { type } });
+
+  function build() {
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-codex-'));
+    const archived = join(home, '.codex', 'archived_sessions');
+    const liveDir = join(home, '.codex', 'sessions', '2026', '08', '21');
+    mkdirSync(archived, { recursive: true });
+    mkdirSync(liveDir, { recursive: true });
+
+    const old = new Date(Date.now() - 2 * DAY).toISOString();
+    const recent = new Date(Date.now() - 60_000).toISOString();
+
+    // The root: finished two days ago, in the directory it was started in.
+    const rootFile = join(archived, `rollout-2026-08-19T00-00-00-${ROOT_ID}.jsonl`);
+    writeFileSync(
+      rootFile,
+      `${[
+        meta(ROOT_ID, '/work/old-project', { thread_source: 'user' }, old),
+        JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.6-sol' } }),
+        tokenLine(1000, old),
+        event('task_complete'),
+      ].join('\n')}\n`,
+    );
+    const twoDaysAgo = (Date.now() - 2 * DAY) / 1000;
+    utimesSync(rootFile, twoDaysAgo, twoDaysAgo);
+
+    // The fork: replays the root's history, then works on, right now.
+    const forkFile = join(liveDir, `rollout-2026-08-21T00-00-00-${FORK_ID}.jsonl`);
+    writeFileSync(
+      forkFile,
+      `${[
+        meta(
+          FORK_ID,
+          '/work/new-project',
+          { forked_from_id: ROOT_ID, thread_source: 'subagent' },
+          recent,
+        ),
+        JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.6-sol' } }),
+        tokenLine(1000, recent),
+        tokenLine(1500, recent),
+        event('task_started'),
+      ].join('\n')}\n`,
+    );
+
+    const adapter = createCodexAdapter(home);
+    const tracker = new SessionTracker([adapter]);
+    seedTracker([adapter], tracker, DAY, { catchUp: true });
+    return { rootFile, tracker };
+  }
+
+  it('shows one session, described by the fork and identified by the root', () => {
+    const { rootFile, tracker } = build();
+    // Two days old, so only the catch-up window reaches the root at all.
+    expect(tracker.trackedFiles()).toContain(rootFile);
+
+    const snaps = tracker.snapshot(Date.now());
+    expect(snaps).toHaveLength(1);
+    const snap = snaps[0];
+
+    // Identity from the root, so the wire id is stable as forks come and go.
+    expect(snap?.id?.startsWith(ROOT_ID)).toBe(true);
+    // Described by the file actually being written.
+    expect(snap?.state).toBe('working');
+    expect(snap?.project).toBe('new-project');
+    // The replayed 1000 is booked once across the lineage, not twice.
+    expect(snap?.tokens?.input).toBe(1500);
+  });
+
+  it('does not inherit the frozen root’s state or directory', () => {
+    // The regression this guards: the root's last event is `task_complete`, so
+    // taking `state` from it reads `waiting` while the fork is mid-turn.
+    const { tracker } = build();
+    const snap = tracker.snapshot(Date.now())[0];
+    expect(snap?.state).not.toBe('waiting');
+    expect(snap?.project).not.toBe('old-project');
   });
 });

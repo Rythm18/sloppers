@@ -12,12 +12,15 @@ const AT = Date.parse('2026-08-19T05:30:00.000Z');
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * A minimal line format: `<sessionId> <kind> [tokens] [dayOffset]`.
+ * A minimal line format:
+ * `<sessionId> <kind> [tokens] [dayOffset] [project] [startedAtMs]`.
  * `kind` of `sub` marks the file usage-only (a subagent sidechain); `lineage`
  * marks it usage-only but displayable when nothing else in the lineage is
  * tracked (a Codex rollout naming an absent root); `final` ends the turn.
  * `dayOffset` shifts the entry that many whole days from `AT`, which is how a
- * test spans enough days to reach the bucket caps.
+ * test spans enough days to reach the bucket caps. `project` and `startedAtMs`
+ * let one file in a group differ from another, which is how the fields that
+ * describe a session get told apart from the fields that identify it.
  */
 function fakeAdapter(root: string): HarnessAdapter {
   return {
@@ -26,9 +29,11 @@ function fakeAdapter(root: string): HarnessAdapter {
     matches: (p) => p.startsWith(root) && p.endsWith('.log'),
     newAccumulator,
     ingestLine(line, acc) {
-      const [id, kind, tokens, dayOffset] = line.split(' ');
+      const [id, kind, tokens, dayOffset, project, startedAtMs] = line.split(' ');
       if (id) acc.sessionId = id;
-      acc.cwd = '/home/dev/proj';
+      // `-` means this file says nothing about the directory, the way a Claude
+      // sidechain says nothing about the session's title.
+      if (project !== '-') acc.cwd = `/home/dev/${project ?? 'proj'}`;
       if (kind === 'sub') acc.usageOnly = true;
       if (kind === 'lineage') {
         acc.usageOnly = true;
@@ -38,6 +43,8 @@ function fakeAdapter(root: string): HarnessAdapter {
       else acc.lastEventKind = 'other';
       const ms = AT + (dayOffset ? Number(dayOffset) : 0) * DAY_MS;
       markMinute(acc, ms);
+      // A `sub` file runs a different model, the way a Claude subagent does.
+      acc.model = kind === 'sub' ? 'cheap-model' : 'main-model';
       if (tokens) {
         addUsage(acc, ms, 'fake-model', {
           input: Number(tokens),
@@ -46,7 +53,7 @@ function fakeAdapter(root: string): HarnessAdapter {
           cacheWrite: 0,
         });
       }
-      acc.startedAtMs ??= 1000;
+      acc.startedAtMs ??= startedAtMs ? Number(startedAtMs) : 1000;
     },
   };
 }
@@ -314,6 +321,89 @@ describe('SessionTracker grouping', () => {
     writeFileSync(sub, 's-orphan sub 40\n');
     tracker.ingestFile(sub, 5000);
     expect(tracker.snapshot(6000)).toHaveLength(0);
+  });
+
+  it('describes a live lineage from the file being written, not its frozen root', () => {
+    // The case the archived catch-up creates and a cold corpus cannot show.
+    // Expiry is group-wide, so an archived Codex root inside a live lineage is
+    // never reaped — 88 of 104 stay tracked for the daemon's life, and 3 of 11
+    // projected sessions were being described by one. Reading `state` off a
+    // file that stopped changing weeks ago made a conversation somebody is
+    // working in right now report `waiting`.
+    const { root, tracker } = setup();
+    const archivedRoot = join(root, 'a-archived-root.log');
+    const liveFork = join(root, 'z-live-fork.log');
+    // The root is a real session (it displays), the fork is usage-only.
+    writeFileSync(archivedRoot, 's-live final 100 0 oldproject 1000\n');
+    writeFileSync(liveFork, 's-live sub 40 0 newproject 999000\n');
+    tracker.ingestFile(archivedRoot, 1000);
+    tracker.ingestFile(liveFork, AT);
+
+    const snap = tracker.snapshot(AT + 1000)[0];
+    // One session, still identified by the root.
+    expect(baseId(snap?.id)).toBe('s-live');
+    // ...but described by the file that is actually being written.
+    expect(snap?.state).toBe('working');
+    expect(snap?.project).toBe('newproject');
+    // The root's own start, not the live fork's. The ledger seeds rather than
+    // banks when `startedAt` predates today, and that guard is the only thing
+    // stopping a re-keyed session — which every Codex lineage is, once, on
+    // upgrade — from banking its whole history again.
+    expect(snap?.startedAt).toBe(1000);
+    expect(bucketedInput(snap)).toBe(140);
+  });
+
+  it('routes on the same directory it displays', () => {
+    const { root, tracker } = setup();
+    const archivedRoot = join(root, 'a-archived-root.log');
+    const liveFork = join(root, 'z-live-fork.log');
+    writeFileSync(archivedRoot, 's-route final 100 0 oldproject\n');
+    writeFileSync(liveFork, 's-route sub 40 0 newproject\n');
+    tracker.ingestFile(archivedRoot, 1000);
+    tracker.ingestFile(liveFork, AT);
+
+    // A session labelled one project but routed by another would land in a
+    // workspace whose name contradicts the label.
+    const routable = tracker.routableSnapshot(AT + 1000)[0];
+    expect(routable?.cwd).toBe('/home/dev/newproject');
+    expect(routable?.snapshot.project).toBe('newproject');
+  });
+
+  it('falls back to the display entry for anything the live file omits', () => {
+    // A Claude sidechain carries no title of its own; letting it describe the
+    // session must not blank the parent's.
+    const { root, tracker } = setup();
+    const main = join(root, 'a-main.log');
+    const sub = join(root, 'z-sub.log');
+    writeFileSync(main, 's-quiet final 100 0 realproject\n');
+    writeFileSync(sub, 's-quiet sub 40 0 -\n');
+    tracker.ingestFile(main, AT - 1000);
+    tracker.ingestFile(sub, AT);
+
+    const snap = tracker.snapshot(AT + 1000)[0];
+    // The sidechain is the live entry and says nothing about the directory, so
+    // the parent's survives rather than the field disappearing.
+    expect(snap?.project).toBe('realproject');
+    expect(bucketedInput(snap)).toBe(140);
+  });
+
+  it('never relabels a session with its subagent’s model', () => {
+    // A subagent is the most recently written file for most of a long turn.
+    // Sourcing the model from it renames the whole session after whatever
+    // cheap model the subagent used — caught by the e2e smoke test, which saw
+    // a session flip to the subagent's model mid-turn.
+    const { root, tracker } = setup();
+    const main = join(root, 'a-main.log');
+    const sub = join(root, 'z-sub.log');
+    writeFileSync(main, 's-model final 100\n');
+    writeFileSync(sub, 's-model sub 40\n');
+    tracker.ingestFile(main, AT - 1000);
+    tracker.ingestFile(sub, AT);
+
+    const snap = tracker.snapshot(AT + 1000)[0];
+    expect(snap?.model).toBe('main-model');
+    // ...while the situational fields do follow the subagent.
+    expect(snap?.state).toBe('working');
   });
 
   it('keeps two non-sidechain files that share a session id as two sessions', () => {

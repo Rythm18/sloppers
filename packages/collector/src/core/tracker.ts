@@ -24,6 +24,20 @@ interface Group {
    * declared a sessionId yet.
    */
   display: Entry | undefined;
+  /**
+   * The most recently written file in the group, which is the one describing
+   * what is happening *now*.
+   *
+   * Kept apart from `display` because the two answer different questions.
+   * `display` settles identity — the wire id, which must be stable for the
+   * ledger's watermark — so it is chosen by a rule that does not move as work
+   * shifts between files. But a group's mutable fields have to come from a
+   * file that is still being written, and often that is not the same one: a
+   * Codex lineage's root is frequently an archived rollout that stopped
+   * changing weeks ago, and reading `state` off it makes a conversation
+   * somebody is actively working in report `waiting`.
+   */
+  live: Entry | undefined;
   /** Map keys of every file in the group, so expiry can reap them together. */
   paths: string[];
   /** Every accumulator whose spend counts toward the session. */
@@ -134,21 +148,60 @@ export class SessionTracker {
       const { sessionId } = acc;
       if (!sessionId) continue;
 
+      // Two kinds of field, from two different files.
+      //
+      // *Situational* fields — what is happening, and where — come from the
+      // file still being written, because the file that identifies a session
+      // is often not the one changing: a Codex lineage's root is frequently an
+      // archived rollout that froze weeks ago, and reading `state` off it makes
+      // a conversation somebody is working in report `waiting`.
+      //
+      // *Conversation* fields — what this session is — stay with `display`.
+      // `model` belongs here and the distinction is not academic: a Claude
+      // subagent is the most recently written file for most of a long turn, so
+      // sourcing the model from it relabels the whole session with whatever
+      // cheap model the subagent used. Per-model accounting is unaffected
+      // either way — usage buckets carry their own model — so this is purely
+      // the label a person reads, and the conversation's own model is the
+      // honest one.
+      //
+      // Either side falls back to the other, so a field only one file knows
+      // about still reaches the wire.
+      const lacc = (group.live ?? display).acc;
+
       // File mtimes carry fractional milliseconds; the wire wants integers.
       const snapshot: SessionSnapshot = {
         id: wireIdFor(sessionId, acc.filePath),
         harness: display.adapter.id,
-        // Both derived from the group's newest activity, so a session whose
-        // subagent is mid-task reads `working` rather than decaying to
-        // `waiting`/`idle` while the parent file sits untouched.
-        state: deriveSessionState(acc.lastEventKind, quietMs),
+        // Both halves come from the group rather than from one file, so a
+        // session whose subagent is mid-task reads `working` rather than
+        // decaying to `waiting`/`idle` while the parent file sits untouched.
+        state: deriveSessionState(lacc.lastEventKind, quietMs),
+        // Deliberately the display entry's own start — not the live file's,
+        // and not the earliest in the group. This field is not decoration:
+        // `TokenLedger.ingest` seeds instead of banking when `startedAt`
+        // predates today, which is the only thing stopping a session the
+        // server has never seen from banking its whole reported history. Every
+        // Codex lineage is exactly that session once, on upgrade, because its
+        // rollouts used to report under other ids — so a Codex lineage rooted
+        // in a months-old archived rollout *should* report a months-old start,
+        // and dating it from today's fork would bank all of them again.
+        //
+        // The other direction is a real loss too, which is why this is not
+        // simply the group minimum: a session that genuinely began today, but
+        // whose subagent transcript carries an older entry, would be seeded
+        // rather than banked and report zero for work it really did.
         startedAt: Math.round(acc.startedAtMs ?? display.lastActivityMs),
         lastActivityAt: Math.round(group.lastActivityMs),
       };
-      if (acc.title) snapshot.title = acc.title;
-      if (acc.cwd) snapshot.project = basename(acc.cwd);
-      if (acc.branch) snapshot.branch = acc.branch;
-      if (acc.model) snapshot.model = acc.model;
+      const title = acc.title ?? lacc.title;
+      const model = acc.model ?? lacc.model;
+      const cwd = lacc.cwd ?? acc.cwd;
+      const branch = lacc.branch ?? acc.branch;
+      if (title) snapshot.title = title;
+      if (cwd) snapshot.project = basename(cwd);
+      if (branch) snapshot.branch = branch;
+      if (model) snapshot.model = model;
       const { total, buckets } = mergeUsage(group.accs);
       // `tokens` is summed over every bucket *before* the wire cap, because it
       // is the field the server's ledger actually banks. Capping `usage` is a
@@ -157,7 +210,10 @@ export class SessionTracker {
       if (buckets.length > 0) snapshot.usage = buckets;
       const minutes = mergeMinutes(group.accs);
       if (minutes.length > 0) snapshot.activeMinutes = minutes;
-      out.push({ snapshot, cwd: acc.cwd });
+      // The same cwd the snapshot's `project` came from. Routing and the label
+      // a person reads must not be able to disagree about which directory this
+      // session is in.
+      out.push({ snapshot, cwd });
     }
     out.sort((a, b) => b.snapshot.lastActivityAt - a.snapshot.lastActivityAt);
     return out.slice(0, 64);
@@ -215,13 +271,33 @@ export class SessionTracker {
       const key = display ? display.acc.filePath : filePath;
       let group = groups.get(key);
       if (!group) {
-        group = { display, paths: [], accs: [], lastActivityMs: entry.lastActivityMs };
+        group = {
+          display,
+          live: undefined,
+          paths: [],
+          accs: [],
+          lastActivityMs: entry.lastActivityMs,
+        };
         groups.set(key, group);
       }
       group.paths.push(filePath);
       // An `ignored` file is not a reportable session, so its spend counts
-      // toward nothing; it is still held here so expiry can reap it.
-      if (!acc.ignored) group.accs.push(acc);
+      // toward nothing, and it describes nothing; it is still held here so
+      // expiry can reap it.
+      if (!acc.ignored) {
+        group.accs.push(acc);
+        // Newest write wins, breaking ties on the lowest path so two files
+        // touched in the same millisecond do not make the snapshot flicker
+        // between them.
+        const held = group.live;
+        if (
+          !held ||
+          entry.lastActivityMs > held.lastActivityMs ||
+          (entry.lastActivityMs === held.lastActivityMs && acc.filePath < held.acc.filePath)
+        ) {
+          group.live = entry;
+        }
+      }
       group.lastActivityMs = Math.max(group.lastActivityMs, entry.lastActivityMs);
     }
     return [...groups.values()];
