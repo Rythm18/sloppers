@@ -79,28 +79,6 @@ function describeSession(snapshot: SessionSnapshot): string {
 }
 
 /**
- * What `sloppers status` prints: every workspace with the directories it
- * claims and the sessions currently routed to it, then — the part that only
- * exists because routing can silently drop work — the live sessions no
- * workspace matches at all.
- *
- * That last block is the whole reason this is a rendered list rather than a
- * count. A session under no pattern is shared with nobody and reported
- * nowhere; without seeing it here, someone whose tokens stopped counting has
- * no way to find out that a pattern is wrong. Their cwd is printed in full,
- * which is safe (this is the owner's own terminal, and it never reaches a
- * wire) and is exactly the information needed to fix the pattern.
- *
- * `configFilePath` is printed for the same reason: changing what a workspace
- * claims means editing `match` in that file, and there is no command for it.
- * Naming the path makes hand-editing a documented escape hatch instead of
- * something a person has to guess at.
- *
- * `daemon` is the answer to the question the whole command is really asked
- * for — whether anything is actually sharing — and it is not derivable from
- * the config at any price. See `sharingLine`.
- */
-/**
  * What a workspace's `sharing` line may honestly say.
  *
  * `paused` is the config's business and the config knows it for certain. Every
@@ -132,6 +110,28 @@ function daemonLine(daemon: Liveness): string {
   return `collector ${pc.yellow('unknown')} ${pc.dim(`(${daemon.why})`)}`;
 }
 
+/**
+ * What `sloppers status` prints: every workspace with the directories it
+ * claims and the sessions currently routed to it, then — the part that only
+ * exists because routing can silently drop work — the live sessions no
+ * workspace matches at all.
+ *
+ * That last block is the whole reason this is a rendered list rather than a
+ * count. A session under no pattern is shared with nobody and reported
+ * nowhere; without seeing it here, someone whose tokens stopped counting has
+ * no way to find out that a pattern is wrong. Their cwd is printed in full,
+ * which is safe (this is the owner's own terminal, and it never reaches a
+ * wire) and is exactly the information needed to fix the pattern.
+ *
+ * `configFilePath` is printed for the same reason: changing what a workspace
+ * claims means editing `match` in that file, and there is no command for it.
+ * Naming the path makes hand-editing a documented escape hatch instead of
+ * something a person has to guess at.
+ *
+ * `daemon` is the answer to the question the whole command is really asked
+ * for — whether anything is actually sharing — and it is not derivable from
+ * the config at any price. See `sharingLine`.
+ */
 export function renderStatus(
   config: CollectorConfig,
   sessions: readonly RoutableSession[],

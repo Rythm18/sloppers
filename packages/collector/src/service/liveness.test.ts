@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { configDir, pidPath } from '../config.js';
 import {
+  awaitDaemon,
   clearPidfile,
   daemonLiveness,
   type Liveness,
@@ -121,6 +122,46 @@ describe('the daemon’s own pidfile', () => {
     const dunno = async (): Promise<Liveness> => ({ state: 'unknown', why: 'no auto-start here' });
 
     await expect(daemonLiveness(home, dunno)).resolves.toMatchObject({ state: 'unknown' });
+  });
+
+  /**
+   * `sloppers share` installs a service and then says what happened. launchd
+   * returns from `bootstrap` as soon as the job is loaded and spawns it a
+   * moment later, so the answer has to be waited for — but only for a few
+   * seconds, and never at the cost of inventing one.
+   */
+  describe('waiting for a service that was just installed', () => {
+    it('stops the moment the daemon is up', async () => {
+      const home = tempHome();
+      let asked = 0;
+      const comingUp = async (): Promise<Liveness> =>
+        ++asked < 3 ? { state: 'stopped' } : { state: 'running', pid: 7 };
+      const slept: number[] = [];
+
+      await expect(
+        awaitDaemon(
+          5000,
+          home,
+          async (ms) => {
+            slept.push(ms);
+          },
+          comingUp,
+        ),
+      ).resolves.toEqual({ state: 'running', pid: 7 });
+      expect(slept).toHaveLength(2);
+    });
+
+    it('reports what it actually found rather than waiting forever', async () => {
+      // The honest report when a service was installed and the process behind
+      // it never appeared — which is the whole reason `share` stopped simply
+      // announcing that the avatar was live.
+      const home = tempHome();
+      const never = async (): Promise<Liveness> => ({ state: 'stopped' });
+
+      await expect(awaitDaemon(0, home, async () => {}, never)).resolves.toEqual({
+        state: 'stopped',
+      });
+    });
   });
 
   it('clears its own claim on the way out, and only its own', () => {
