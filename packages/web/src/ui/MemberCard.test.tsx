@@ -466,6 +466,7 @@ describe('MemberCard', () => {
 
     const cells = [...document.querySelectorAll('.week-day')];
     expect(cells).toHaveLength(7);
+    expect(document.querySelector('.member-week-title')?.textContent).toBe('Last 7 days');
     // Oldest on the left, today on the right, and only today is lit.
     expect(cells.filter((c) => c.className.includes('week-day-now'))).toHaveLength(1);
     expect(cells[6]?.className).toContain('week-day-now');

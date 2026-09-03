@@ -159,7 +159,9 @@ function WeekStrip({ memberId }: { memberId: string }) {
 
   return (
     <div className="member-week">
-      <h3 className="member-week-title">Last 7 days</h3>
+      {/* Counted from what arrived rather than written out, so the heading
+          cannot outlive the window the office actually serves. */}
+      <h3 className="member-week-title">Last {days.length} days</h3>
       <div className="week-strip">
         {days.map((entry) => {
           const total = processedTokens(entry.stats.tokens);
