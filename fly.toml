@@ -11,6 +11,10 @@ primary_region = "sin"
   DATA_DIR = "/data"
   # Fly's proxy terminates TLS and sets X-Forwarded-* honestly.
   TRUST_PROXY = "1"
+  # Simulated teammates at /?room=demo, so the landing page's "Walk the
+  # demo" has somewhere to go. Auto-stop is connection-based, so the demo's
+  # timers don't keep an empty machine awake.
+  SLOPPERS_DEMO = "1"
 
 [http_service]
   internal_port = 8787
