@@ -168,6 +168,23 @@ describe('renderStatus', () => {
     expect(out).toContain("sloppers share <code> --match '<glob>'");
   });
 
+  it('counts session tokens the way the office does, cache included', () => {
+    // `sloppers status` and the leaderboard describing one session with two
+    // different numbers is a seam somebody spends an evening reconciling. Both
+    // are total tokens processed; on input + output this line would read
+    // "30 tok" for a session that moved a million.
+    const out = show(config(personal), [
+      routable(
+        session({ tokens: { input: 10, output: 20, cacheRead: 1_000_000, cacheWrite: 500 } }),
+        '/work/api',
+      ),
+    ]);
+    // Grouped through `toLocaleString`, so the expectation is computed the
+    // same way rather than hardcoded — this line runs on machines whose locale
+    // groups as 10,00,530.
+    expect(out).toContain(`${(1_000_530).toLocaleString()} tok`);
+  });
+
   it('says nothing about unrouted sessions when every session found a home', () => {
     const out = show(config(personal), [routable(session({ project: 'api' }), '/work/api')]);
     expect(out).not.toContain('match no workspace');

@@ -32,6 +32,49 @@ function row(
   };
 }
 
+/**
+ * Two days in the *shapes* production actually produces, sized so that one
+ * member plainly did more work than the other.
+ *
+ * `CLAUDE_DAY` is a real production row: 1,474 uncached input tokens against
+ * 365M cache reads, a 99.9996% hit rate. `CODEX_DAY` is production's Codex row
+ * divided by 200,000 — a constant, so the thing that matters survives it: the
+ * share of tokens that land in `input + output` is 2.255% for Codex against
+ * 0.279% for Claude Code, an 8.1x asymmetry that is a property of the harness
+ * and not of the person.
+ *
+ * The result is a member who processed 366M tokens ranking *below* one who
+ * processed 75M, because the second one's cache missed more often. That was
+ * the board.
+ */
+const CLAUDE_DAY = { input: 1_474, output: 673_021, cacheRead: 365_482_656, cacheWrite: 0 };
+const CODEX_DAY = { input: 1_151_032, output: 156_530, cacheRead: 73_562_986, cacheWrite: 0 };
+
+function harnessRow(memberId: string, tokens: LeaderboardRow['stats']['tokens']): LeaderboardRow {
+  return {
+    memberId,
+    displayName: memberId,
+    avatar: 'pixel',
+    stats: { tokens, sessionsRun: 1, activeMinutes: 1 },
+  };
+}
+
+/** A member whose collector says they keep their numbers to themselves. */
+function privateRow(memberId: string): LeaderboardRow {
+  return {
+    memberId,
+    displayName: memberId,
+    avatar: 'pixel',
+    stats: {
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      sessionsRun: 0,
+      activeMinutes: 0,
+      estimatedCostUsd: 0,
+      tokensShared: false,
+    },
+  };
+}
+
 function seed(rows: LeaderboardRow[]): void {
   useStore.getState().reset();
   apply({ type: 'leaderboard', rows });
@@ -81,6 +124,25 @@ describe('sortRows', () => {
     const rows = [row('a', 1, 1), row('b', 900, 2)];
     sortRows(rows, 'cost');
     expect(rows.map((r) => r.memberId)).toEqual(['a', 'b']);
+  });
+
+  it('ranks on every token processed, not on the ones that missed cache', () => {
+    // The whole fix, and the mutation that has to fail here: `claude` moved
+    // 366M tokens to `codex`'s 75M, and on input + output — which for Claude
+    // Code is output and nothing else — `claude` ranked second, 674k to 1.3M.
+    const rows = [harnessRow('codex', CODEX_DAY), harnessRow('claude', CLAUDE_DAY)];
+    expect(sortRows(rows, 'tokens').map((r) => r.memberId)).toEqual(['claude', 'codex']);
+    // Spelling out the inversion, so the fixture cannot quietly stop
+    // demonstrating it.
+    const billed = (t: typeof CLAUDE_DAY) => t.input + t.output;
+    expect(billed(CODEX_DAY)).toBeGreaterThan(billed(CLAUDE_DAY));
+  });
+
+  it('breaks a cost tie on processed tokens too', () => {
+    // The cost sort falls back to tokens for unknown and equal costs, so it
+    // has to be ranking by the same quantity the tokens sort does.
+    const rows = [harnessRow('codex', CODEX_DAY), harnessRow('claude', CLAUDE_DAY)];
+    expect(sortRows(rows, 'cost').map((r) => r.memberId)).toEqual(['claude', 'codex']);
   });
 });
 
@@ -154,5 +216,59 @@ describe('Leaderboard', () => {
     render(<Leaderboard />);
     fireEvent.click(screen.getByRole('button', { name: 'sort by estimated cost' }));
     expect(rendered()).toEqual(['b', 'a']);
+  });
+
+  it('shows a Claude Code day at the size the agent actually worked', () => {
+    // 366M processed against 674k billed. The old number rendered "673k" for a
+    // day the models chewed through a third of a billion tokens.
+    seed([harnessRow('claude', CLAUDE_DAY)]);
+    render(<Leaderboard />);
+    expect(screen.getByText('366M')).toBeTruthy();
+  });
+
+  // --------------------------------------------------- privacy as an absence
+
+  it('lists a member who withholds their numbers instead of dropping them', () => {
+    // They used to fall through the "did anything happen" filter into the same
+    // gap as somebody who had not started yet, and `LeaderboardRow` carried
+    // nothing that could have told the two apart.
+    seed([row('busy', 500, 1), privateRow('quiet')]);
+    render(<Leaderboard />);
+    expect(rendered()).toEqual(['busy', 'quiet']);
+  });
+
+  it('gives the withheld row no rank and no number', () => {
+    seed([row('busy', 500, 1), privateRow('quiet')]);
+    render(<Leaderboard />);
+
+    const ranks = [...document.querySelectorAll('.lb-row .rank')].map((n) => n.textContent);
+    expect(ranks).toEqual(['1', '–']);
+    // Never `$0.00`, and never a zero token count: both are claims.
+    expect(screen.queryByText('$0.00')).toBeNull();
+    expect(screen.getByText('private')).toBeTruthy();
+  });
+
+  it('says why on hover, so the absence is discoverable from the board itself', () => {
+    seed([privateRow('quiet')]);
+    render(<Leaderboard />);
+    expect(document.querySelector('.lb-private')?.getAttribute('title')).toMatch(
+      /keeps their numbers to themselves/i,
+    );
+  });
+
+  it('does not call the office quiet when the only member there is private', () => {
+    seed([privateRow('quiet')]);
+    render(<Leaderboard />);
+    expect(screen.queryByText(/suspiciously quiet/i)).toBeNull();
+  });
+
+  it('keeps the withheld row zeroes out of the ranking and the meter', () => {
+    // Their zeroes must not enter the meter's maximum or the ordering.
+    seed([privateRow('quiet'), row('busy', 500, 1)]);
+    render(<Leaderboard />);
+    const bars = [...document.querySelectorAll('.lb-meter > i')].map(
+      (n) => (n as HTMLElement).style.width,
+    );
+    expect(bars).toEqual(['100%']);
   });
 });

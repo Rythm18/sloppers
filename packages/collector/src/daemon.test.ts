@@ -243,6 +243,52 @@ describe('buildPairingSnapshot', () => {
     expect(snapshot.sessions[0]?.project).toBe('acme-secret-client');
   });
 
+  it('states that this pairing shares its numbers', () => {
+    const { snapshot } = buildPairingSnapshot(
+      workspace(['**']),
+      [routable(session(), '/work/api')],
+      new MinuteDirtyTracker(),
+      {},
+    );
+    expect(snapshot.sharesTokens).toBe(true);
+  });
+
+  it('states a refusal, which the stripped sessions cannot say for themselves', () => {
+    // With `tokens` off, `applyVisibility` removes `tokens`, `usage` and
+    // `activeMinutes` — leaving a session byte-identical to one that simply
+    // has not produced a token yet. The office rendered the difference as
+    // `0 tok / 0 sessions / est. $0.00`. Nothing in the payload can carry it;
+    // the envelope has to.
+    const vis = { ...defaultVisibility, tokens: false };
+    const s = session({
+      tokens: { input: 5, output: 6, cacheRead: 7, cacheWrite: 8 },
+      activeMinutes: [{ day: DAY, minutes: encodeMinutes([1, 2]) }],
+    });
+    const { snapshot } = buildPairingSnapshot(
+      workspace(['**'], { visibility: vis }),
+      [routable(s, '/work/api')],
+      new MinuteDirtyTracker(),
+      {},
+    );
+    expect(snapshot.sharesTokens).toBe(false);
+    expect(snapshot.sessions[0]?.tokens).toBeUndefined();
+    expect(snapshot.sessions[0]?.activeMinutes).toBeUndefined();
+  });
+
+  it('keeps saying it while paused, because the card is still on screen', () => {
+    // A pause empties the payload; it does not change the owner's settings.
+    // Dropping the flag here would make un-pausing the only way to stop
+    // reading as an affirmative zero.
+    const { snapshot } = buildPairingSnapshot(
+      workspace(['**'], { paused: true, visibility: { ...defaultVisibility, tokens: false } }),
+      [routable(session(), '/work/api')],
+      new MinuteDirtyTracker(),
+      {},
+    );
+    expect(snapshot.sessions).toEqual([]);
+    expect(snapshot.sharesTokens).toBe(false);
+  });
+
   it('sends nothing at all for a paused pairing, not even machine telemetry', () => {
     const minutes = new MinuteDirtyTracker();
     const s = session({ activeMinutes: [{ day: DAY, minutes: encodeMinutes([1]) }] });

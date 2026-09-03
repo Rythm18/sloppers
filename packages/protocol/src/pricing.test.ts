@@ -188,6 +188,22 @@ describe('pricing', () => {
     expect(unpriced).toEqual([]);
   });
 
+  it('prices gpt-5.5, which was the one genuine gap in the table', () => {
+    // A real, published OpenAI model, on none of the deliberately-omitted
+    // lists, simply missing. It nulled two Codex days on the local corpus, and
+    // a nulled day sorts below every priced one however much it burned.
+    expect(estimateCostUsd('gpt-5.5', only('input', M))).toBe(5);
+    expect(estimateCostUsd('gpt-5.5', only('output', M))).toBe(30);
+    expect(estimateCostUsd('gpt-5.5', only('cacheRead', M))).toBe(0.5);
+  });
+
+  it('quotes gpt-5.6-sol at the rate OpenAI publishes now, not the August one', () => {
+    // 47.9% of the office's Codex tokens run through this row, so a stale rate
+    // here is the single largest error the cost column can carry.
+    expect(estimateCostUsd('gpt-5.6-sol', only('input', M))).toBe(4);
+    expect(estimateCostUsd('gpt-5.6-sol', only('output', M))).toBe(20);
+  });
+
   // ----------------------------------------------- the shapes a day arrives in
 
   it('prices a day of one model', () => {

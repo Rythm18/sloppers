@@ -15,7 +15,7 @@ const apply = (msg: ServerToWeb) => act(() => useStore.getState().applyServer(ms
 
 const tok = (input: number) => ({ input, output: 0, cacheRead: 0, cacheWrite: 0 });
 
-function member(today: DailyStats): MemberView {
+function member(today: DailyStats, sessions: MemberView['sessions'] = []): MemberView {
   return {
     id: 'me',
     displayName: 'ridham',
@@ -23,23 +23,39 @@ function member(today: DailyStats): MemberView {
     role: 'owner',
     presence: 'active',
     position: { x: 0, y: 0, dir: 'down', moving: false },
-    sessions: [],
+    sessions,
     today,
     sharing: true,
   };
 }
 
-function seed(today: DailyStats): void {
+function seed(today: DailyStats, sessions: MemberView['sessions'] = []): void {
   useStore.getState().reset();
   apply({
     type: 'world',
     you: { memberId: 'me' },
     roomCode: 'the-lab-k4xp2q',
     roomName: 'the lab',
-    members: [member(today)],
+    members: [member(today, sessions)],
     leaderboard: [],
   });
   act(() => useStore.getState().setFocused('me'));
+}
+
+/** One live session, as a withholding member's collector still reports it. */
+const LIVE_SESSION: MemberView['sessions'] = [
+  {
+    id: 'sess-1',
+    harness: 'codex',
+    state: 'working',
+    startedAt: Date.now() - 60_000,
+    lastActivityAt: Date.now(),
+  },
+];
+
+/** The today line, as its visible text. */
+function todayLine(): string {
+  return document.querySelector('.member-today')?.textContent ?? '';
 }
 
 /** The per-model list, as [model, tokens, cost] triples. */
@@ -152,5 +168,151 @@ describe('MemberCard', () => {
     render(<MemberCard />);
 
     expect(document.querySelector('.member-today .cost')?.textContent).toBe('est.$0.00');
+  });
+
+  // ------------------------------------------------ the board's own headline
+
+  it('leads with every token processed, cache reads included', () => {
+    // A real Claude Code day: 1,474 uncached input against 365M cache reads.
+    // Input + output rendered this as "674k" — output alone, in effect.
+    seed({
+      tokens: { input: 1_474, output: 673_021, cacheRead: 365_482_656, cacheWrite: 0 },
+      sessionsRun: 3,
+      activeMinutes: 40,
+    });
+    render(<MemberCard />);
+    expect(todayLine()).toContain('366M');
+  });
+
+  it('keeps a model whose whole day was cache reads in the breakdown', () => {
+    // On input + output this row vanished while still contributing its entire
+    // cost to the total below it — and, when unpriced, nulling that total with
+    // nothing on screen to name the culprit.
+    seed({
+      tokens: { input: 0, output: 0, cacheRead: 2_000_000, cacheWrite: 0 },
+      sessionsRun: 1,
+      activeMinutes: 5,
+      byModel: {
+        'claude-opus-5': { input: 0, output: 0, cacheRead: 2_000_000, cacheWrite: 0 },
+      },
+      estimatedCostUsd: 1,
+    });
+    render(<MemberCard />);
+    expect(modelRows()).toEqual([['claude-opus-5', '2M', 'est.$1.00']]);
+  });
+
+  // -------------------------------------------------- privacy as an absence
+
+  it('says a withholding member keeps their numbers, never that they are zero', () => {
+    // What the tables hold for them, exactly: no rows, so `todayFor` returns
+    // zeroes and a cost of 0 rather than null. Printed beside their own live
+    // sessions, that read as a claim of having done nothing all day.
+    seed(
+      {
+        tokens: tok(0),
+        sessionsRun: 0,
+        activeMinutes: 0,
+        estimatedCostUsd: 0,
+        tokensShared: false,
+      },
+      LIVE_SESSION,
+    );
+    render(<MemberCard />);
+
+    expect(todayLine()).toContain('Keeps their numbers to themselves');
+    expect(todayLine()).not.toContain('$0.00');
+    expect(todayLine()).not.toContain('0 tok');
+    expect(todayLine()).not.toContain('0 sessions');
+    // Their live sessions are still listed — that part they do share.
+    expect(document.querySelectorAll('.session-row')).toHaveLength(1);
+  });
+
+  it('explains the withheld state on hover', () => {
+    seed({ tokens: tok(0), sessionsRun: 0, activeMinutes: 0, tokensShared: false });
+    render(<MemberCard />);
+    expect(document.querySelector('.member-today')?.getAttribute('title')).toMatch(
+      /not zero: unsaid/i,
+    );
+  });
+
+  it('hides the per-model breakdown from a member who turned sharing off midday', () => {
+    // Rows banked before they switched it off are real, and showing them under
+    // a line that says they share nothing would make that line untrue.
+    seed({
+      tokens: tok(1_000_000),
+      sessionsRun: 2,
+      activeMinutes: 30,
+      byModel: { 'claude-opus-5': tok(1_000_000) },
+      estimatedCostUsd: 5,
+      tokensShared: false,
+    });
+    render(<MemberCard />);
+    expect(screen.queryByText('Today by model')).toBeNull();
+  });
+
+  it('still shows the numbers when the collector says nothing about sharing', () => {
+    // 0.1.x cannot state it. Absence is not a refusal.
+    seed({ tokens: tok(1_000), sessionsRun: 1, activeMinutes: 5, estimatedCostUsd: 1 });
+    render(<MemberCard />);
+    expect(todayLine()).toContain('1k');
+    expect(todayLine()).not.toContain('Keeps their numbers');
+  });
+
+  // ------------------------------------- two definitions sharing one column
+
+  it('calls them conversations only when the collector grouped them', () => {
+    seed({ tokens: tok(1_000), sessionsRun: 10, activeMinutes: 40, precision: 'measured' });
+    render(<MemberCard />);
+    expect(todayLine()).toContain('10 conversations');
+    expect(todayLine()).not.toContain('≈');
+  });
+
+  it('keeps the older word, and explains it, when the count is per transcript file', () => {
+    // The production day this is drawn from read 373 "sessions" against 139
+    // real conversations. Calling those conversations would be a 2.7x lie;
+    // calling them sessions is at least what was counted.
+    seed({ tokens: tok(1_000), sessionsRun: 373, activeMinutes: 40, precision: 'coarse' });
+    render(<MemberCard />);
+    expect(todayLine()).toContain('373 sessions');
+    const cell = [...document.querySelectorAll('.member-today span[title]')].find((n) =>
+      n.textContent?.includes('373'),
+    );
+    expect(cell?.getAttribute('title')).toMatch(/per transcript file/i);
+  });
+
+  it('hedges coarse active minutes and explains what they measure', () => {
+    // 1,315 minutes is 21.9 hours. The server marks a minute whenever a
+    // session reads `working`, and a session stays `working` for ten minutes
+    // after its last output — so this is an agent lifespan, not a workday.
+    seed({ tokens: tok(1_000), sessionsRun: 1, activeMinutes: 1315, precision: 'coarse' });
+    render(<MemberCard />);
+    expect(todayLine()).toContain('≈1315 active min');
+    const cell = [...document.querySelectorAll('.member-today span[title]')].find((n) =>
+      n.textContent?.includes('active min'),
+    );
+    expect(cell?.getAttribute('title')).toMatch(/approximate/i);
+  });
+
+  it('does not hedge minutes a collector actually measured', () => {
+    seed({ tokens: tok(1_000), sessionsRun: 1, activeMinutes: 42, precision: 'measured' });
+    render(<MemberCard />);
+    expect(todayLine()).toContain('42 active min');
+    expect(todayLine()).not.toContain('≈');
+  });
+
+  it('hedges a day it cannot classify, rather than claiming it was measured', () => {
+    // No usage rows means no verdict. `≈` is the humble direction, and the one
+    // that cannot overstate.
+    seed({ tokens: tok(0), sessionsRun: 0, activeMinutes: 9 });
+    render(<MemberCard />);
+    expect(todayLine()).toContain('≈9 active min');
+  });
+
+  it('renders a day with nothing in it without inventing anything', () => {
+    seed({ tokens: tok(0), sessionsRun: 0, activeMinutes: 0, estimatedCostUsd: 0 });
+    render(<MemberCard />);
+    expect(todayLine()).toContain('0 tok');
+    expect(todayLine()).toContain('0 sessions');
+    expect(todayLine()).toContain('est.$0.00');
   });
 });

@@ -1,13 +1,31 @@
+import type { DailyStats } from '@sloppers/protocol';
 import { describe, expect, it } from 'vitest';
 import {
+  activeMinutes,
+  burned,
   COST_UNKNOWN,
   COST_UNKNOWN_TITLE,
   costTitle,
   countdown,
   formatCostUsd,
   formatTokens,
+  MINUTES_COARSE_TITLE,
+  SESSIONS_COARSE_TITLE,
   sessionLine,
+  sessionsLabel,
+  TOKENS_PRIVATE,
+  TOKENS_PRIVATE_LINE,
 } from './format.js';
+
+/** A day with only the fields under test set. */
+function day(over: Partial<DailyStats> = {}): DailyStats {
+  return {
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    sessionsRun: 0,
+    activeMinutes: 0,
+    ...over,
+  };
+}
 
 describe('countdown', () => {
   it('reads as a clock rather than a number to divide', () => {
@@ -130,6 +148,78 @@ describe('cost wording', () => {
     // The three things it must not be mistaken for.
     expect(title).toMatch(/subscription/i);
     expect(title).toMatch(/discount/i);
+  });
+});
+
+describe('burned', () => {
+  it('counts all four token classes, not the two that were billed', () => {
+    // A Claude Code day: 1,474 uncached input against 365M cache reads. On
+    // input + output this reads "674k" — output alone, for the same work.
+    const claudeDay = { input: 1_474, output: 673_021, cacheRead: 365_482_656, cacheWrite: 0 };
+    expect(burned(claudeDay)).toBe('366M');
+  });
+
+  it('counts a pure cache-read day as work, because it was', () => {
+    expect(burned({ input: 0, output: 0, cacheRead: 2_400_000_000, cacheWrite: 0 })).toBe('2.4B');
+  });
+
+  it('still says nothing for a day with nothing in it', () => {
+    expect(burned({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })).toBe('0');
+  });
+});
+
+describe('privacy wording', () => {
+  it('reads as a state, never as a quantity', () => {
+    // The failure it replaces was `$0.00` and `0 tok` — numbers nobody
+    // asserted, standing in for a person who declined to.
+    expect(TOKENS_PRIVATE).not.toMatch(/\d/);
+    expect(TOKENS_PRIVATE).not.toBe(formatCostUsd(0));
+    expect(TOKENS_PRIVATE_LINE).toMatch(/keeps their numbers to themselves/i);
+  });
+});
+
+describe('sessionsLabel', () => {
+  it('says conversations only when the collector grouped them into conversations', () => {
+    expect(sessionsLabel(day({ precision: 'measured' }), 4)).toBe('conversations');
+    expect(sessionsLabel(day({ precision: 'measured' }), 1)).toBe('conversation');
+  });
+
+  it('keeps the older word for a per-file count, which is what it is', () => {
+    // 599 transcript files for 139 conversations on the local corpus. Calling
+    // that "conversations" would be a 4.3x claim we cannot make.
+    expect(sessionsLabel(day({ precision: 'coarse' }), 373)).toBe('sessions');
+    expect(sessionsLabel(day({ precision: 'coarse' }), 1)).toBe('session');
+  });
+
+  it('does not upgrade the word on a day it cannot classify', () => {
+    expect(sessionsLabel(day(), 2)).toBe('sessions');
+  });
+
+  it('explains what a per-file count actually counted', () => {
+    expect(SESSIONS_COARSE_TITLE).toMatch(/per transcript file/i);
+    expect(SESSIONS_COARSE_TITLE).toMatch(/fork|resume|subagent/i);
+  });
+});
+
+describe('activeMinutes', () => {
+  it('hedges the coarse server mark', () => {
+    expect(activeMinutes(day({ precision: 'coarse' })).prefix).toBe('≈');
+  });
+
+  it('does not hedge minutes the collector measured', () => {
+    expect(activeMinutes(day({ precision: 'measured' })).prefix).toBe('');
+  });
+
+  it('hedges an unclassifiable day rather than claiming precision', () => {
+    // Absent means we cannot tell. Understating confidence is the only
+    // direction that cannot mislead.
+    expect(activeMinutes(day()).prefix).toBe('≈');
+  });
+
+  it('says what the coarse number is actually measuring', () => {
+    expect(MINUTES_COARSE_TITLE).toMatch(/approximate/i);
+    expect(MINUTES_COARSE_TITLE).toMatch(/ten minutes/i);
+    expect(MINUTES_COARSE_TITLE).toMatch(/keyboard/i);
   });
 });
 

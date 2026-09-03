@@ -945,6 +945,73 @@ describe('TokenLedger', () => {
     expect(ledger.todayFor('m1', TODAY_19).estimatedCostUsd).toBe(0);
   });
 
+  // -------------------------------------------------------------- precision
+
+  /**
+   * Whether the server can tell its own two definitions apart after the fact.
+   *
+   * It can, and the mechanism is the watermark's `model` column: the flat
+   * pre-0.2 path keys every row under the empty-string sentinel, which
+   * `usageBucketSchema` (`model: min(1)`) makes unforgeable over the wire. So
+   * a day's rows carry the version that wrote them, and `sessionsRun` and
+   * `activeMinutes` can say which of their two meanings they hold — without
+   * any wire change, and without the ledger recording anything new.
+   */
+
+  it('calls a day from a 0.2 collector measured', () => {
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'claude-opus-5', 100)])], TODAY_19);
+    expect(ledger.todayFor('m1', TODAY_19).precision).toBe('measured');
+  });
+
+  it('calls a day from a 0.1.x collector coarse', () => {
+    // Everything in production is this shape today: 1,545 of 1,545 watermarks
+    // carry the flat sentinel. Its session count is per transcript file and its
+    // minutes are the server's ten-minute-tail mark.
+    ledger.ingest('m1', [legacy('s1', tokens(100, 10))], TODAY_19);
+    expect(ledger.todayFor('m1', TODAY_19).precision).toBe('coarse');
+  });
+
+  it('calls an upgrade day coarse, because it genuinely contains coarse data', () => {
+    // Both numbers are unions over the day — the coarse minute marks are
+    // already OR-ed into the same bitmap, the per-file ids already in the same
+    // distinct count — so the inflated half cannot be separated back out.
+    ledger.ingest('m1', [legacy('s1', tokens(100))], TODAY_19);
+    ledger.ingest('m1', [bucketed('s2', [bucket(D19, 'claude-opus-5', 50)])], TODAY_19);
+    const stats = ledger.todayFor('m1', TODAY_19);
+    expect(stats.sessionsRun).toBe(2);
+    expect(stats.precision).toBe('coarse');
+  });
+
+  it('says nothing about a day with nothing in it', () => {
+    // Zero everything. There is no question to answer, and answering it anyway
+    // would put a confident label on an empty table.
+    const stats = ledger.todayFor('m1', TODAY_19);
+    expect(stats).toMatchObject({ sessionsRun: 0, activeMinutes: 0, precision: undefined });
+  });
+
+  it('says nothing about a member who shares no numbers at all', () => {
+    // `applyVisibility` strips tokens, usage and minutes together, so a
+    // withholding member writes no watermark rows and there is nothing to
+    // classify. `tokensShared` is the field that speaks for them; this one
+    // must not invent a verdict from their silence.
+    const hidden: SessionSnapshot = {
+      ...baseSession,
+      id: 'hidden',
+      state: 'working',
+    };
+    ledger.ingest('m1', [hidden], TODAY_19);
+    expect(ledger.todayFor('m1', TODAY_19).precision).toBeUndefined();
+  });
+
+  it('still calls a rebased session coarse on the day its flat rows cover', () => {
+    // Retired rows stay in the count on purpose — the session did run — and
+    // they are exactly the rows that hold the sentinel. A member mid-upgrade
+    // must not have their history relabelled as precise by the upgrade itself.
+    ledger.ingest('m1', [legacy('s1', tokens(100))], TODAY_19);
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'claude-opus-5', 100)])], TODAY_19);
+    expect(ledger.todayFor('m1', TODAY_19).precision).toBe('coarse');
+  });
+
   // ---------------------------------------------------------------- hygiene
 
   it('keeps members separate', () => {

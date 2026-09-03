@@ -912,6 +912,139 @@ describe('server integration', () => {
   });
 
   /**
+   * A member who turned token sharing off, with sessions running.
+   *
+   * `applyVisibility` drops `tokens`, `usage` and `activeMinutes` in the
+   * collector, so nothing reaches the ledger and every number the server holds
+   * for them is zero — a truthful zero about an empty table and a false one
+   * about a person. Their card listed their live sessions and, underneath,
+   * claimed `0 tok / 0 sessions / est. $0.00`; the board dropped them into the
+   * same gap as somebody who had not started yet.
+   *
+   * The only thing that can tell those apart is the snapshot envelope, because
+   * a brand-new session that has not produced a token yet is byte-identical to
+   * a withheld one. This is the whole path: collector states it, ledger stays
+   * out of it, both the member view and the leaderboard row carry it.
+   */
+  it('carries a refusal to share numbers through to the card and the board', async () => {
+    const { client, world } = await join('ridham');
+    const base = `http://127.0.0.1:${server.port}`;
+
+    const mint = await fetch(`${base}/api/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        memberId: world.you.memberId,
+        memberSecret: world.you.memberSecret,
+      }),
+    });
+    const { pairingCode } = (await mint.json()) as { pairingCode: string };
+    const redeem = await fetch(`${base}/api/pair/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pairingCode }),
+    });
+    const paired = (await redeem.json()) as PairRedeemResponse;
+
+    const collector = new WebSocket(`ws://127.0.0.1:${server.port}/ws/collector`);
+    await new Promise<void>((resolve) => collector.on('open', () => resolve()));
+    collector.send(
+      JSON.stringify({ type: 'hello', deviceKey: paired.deviceKey, collectorVersion: '0.2.0' }),
+    );
+    await new Promise<void>((resolve) => collector.once('message', () => resolve()));
+
+    collector.send(
+      JSON.stringify({
+        type: 'snapshot',
+        // A live session with every token field stripped — exactly what
+        // `applyVisibility` emits when `visibility.tokens` is off.
+        sessions: [
+          {
+            id: 'sess-quiet',
+            harness: 'codex',
+            state: 'working',
+            startedAt: Date.now() - 60_000,
+            lastActivityAt: Date.now(),
+          },
+        ],
+        machine: {},
+        sharesTokens: false,
+      }),
+    );
+
+    const presence = await client.next((m) => m.type === 'presence');
+    if (presence.type !== 'presence') throw new Error('unreachable');
+    expect(presence.sessions).toHaveLength(1);
+    expect(presence.today.tokensShared).toBe(false);
+    // The zeroes are still there and still true about the tables. What has
+    // changed is that they are no longer the only thing on the wire.
+    expect(presence.today.sessionsRun).toBe(0);
+
+    const leaderboard = await client.next((m) => m.type === 'leaderboard', 8000);
+    if (leaderboard.type !== 'leaderboard') throw new Error('unreachable');
+    expect(leaderboard.rows[0]?.stats.tokensShared).toBe(false);
+
+    collector.close();
+  });
+
+  it('reads silence from a 0.1.x collector as sharing, never as withholding', async () => {
+    // The published collector cannot say either way. Treating absence as a
+    // refusal would relabel every member who has not upgraded — which today is
+    // all of them.
+    const { client, world } = await join('ridham');
+    const base = `http://127.0.0.1:${server.port}`;
+
+    const mint = await fetch(`${base}/api/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        memberId: world.you.memberId,
+        memberSecret: world.you.memberSecret,
+      }),
+    });
+    const { pairingCode } = (await mint.json()) as { pairingCode: string };
+    const redeem = await fetch(`${base}/api/pair/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pairingCode }),
+    });
+    const paired = (await redeem.json()) as PairRedeemResponse;
+
+    const collector = new WebSocket(`ws://127.0.0.1:${server.port}/ws/collector`);
+    await new Promise<void>((resolve) => collector.on('open', () => resolve()));
+    collector.send(
+      JSON.stringify({ type: 'hello', deviceKey: paired.deviceKey, collectorVersion: '0.1.1' }),
+    );
+    await new Promise<void>((resolve) => collector.once('message', () => resolve()));
+
+    collector.send(
+      JSON.stringify({
+        type: 'snapshot',
+        sessions: [
+          {
+            id: 'sess-old',
+            harness: 'claude-code',
+            state: 'working',
+            tokens: { input: 10, output: 20, cacheRead: 3000, cacheWrite: 40 },
+            startedAt: Date.now() - 60_000,
+            lastActivityAt: Date.now(),
+          },
+        ],
+        machine: {},
+      }),
+    );
+
+    const presence = await client.next((m) => m.type === 'presence');
+    if (presence.type !== 'presence') throw new Error('unreachable');
+    expect(presence.today.tokensShared).toBeUndefined();
+    // And its day is coarse: flat watermarks, so per-file sessions and the
+    // server's own minute marks.
+    expect(presence.today.precision).toBe('coarse');
+
+    collector.close();
+  });
+
+  /**
    * The seam behind "the share dialog has no success state". `sharing` rides
    * on the member view and on nothing else — a `presence` message carries
    * presence, sessions and today's totals, none of which need have changed
