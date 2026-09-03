@@ -3,12 +3,24 @@ import { z } from 'zod';
 const count = z.number().int().nonnegative();
 
 /**
+ * A local calendar day, `YYYY-MM-DD` — the one key every stored fact about
+ * usage is filed under, on the wire and in the tables alike.
+ *
+ * One definition rather than the regex written out at each site, because the
+ * history messages added a third and a fourth place that has to agree with
+ * `dayOf`'s output exactly. Deliberately shape-only: it does not reject
+ * `2026-13-45`, and nothing downstream needs it to — an impossible date simply
+ * matches no row.
+ */
+export const daySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+/**
  * Usage as the harness reported it, bucketed by the day and model the work
  * actually happened on. Cumulative *per bucket*: re-sending is a no-op, so
  * restarts and reconnects cost nothing and can never inflate a total.
  */
 export const usageBucketSchema = z.object({
-  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  day: daySchema,
   model: z.string().min(1).max(120),
   input: count,
   output: count,
@@ -29,7 +41,7 @@ export type UsageBucket = z.infer<typeof usageBucketSchema>;
  * JSON, etc — which would otherwise decode to silent, meaningless junk.
  */
 export const minuteReportSchema = z.object({
-  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  day: daySchema,
   minutes: z
     .string()
     .max(300)
@@ -48,8 +60,44 @@ export type MinuteReport = z.infer<typeof minuteReportSchema>;
  */
 export function dayOf(ms: number): string {
   const d = new Date(ms);
-  const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function pad(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+/** Whole days, in milliseconds — the step `recentDays` walks backwards by. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The `count` calendar days ending at `endDay`, newest first.
+ *
+ * The stored day keys are each collector's own local days, and history reads
+ * them back under exactly the labels they were written with — so this is
+ * string arithmetic on a calendar, not a conversion between clocks. Nothing
+ * here knows or needs a timezone.
+ *
+ * Stepped in UTC on purpose. `endDay` was cut from somebody's *local* calendar
+ * by `dayOf`, so re-hydrating it into a local `Date` and subtracting a day
+ * would run the subtraction through that machine's DST rules: an autumn
+ * transition repeats a date and a spring one skips it, which would put the same
+ * label in a week strip twice or leave a hole where a day was worked. UTC has
+ * no transitions, so every step is exactly one calendar day.
+ *
+ * A malformed `endDay` yields an empty list rather than a run of `NaN-NaN-NaN`
+ * labels. Callers pass `dayOf`'s own output, so that is a guard and not a path.
+ */
+export function recentDays(endDay: string, count: number): string[] {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(endDay);
+  if (!match || count <= 0) return [];
+  const end = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const days: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const d = new Date(end - i * DAY_MS);
+    days.push(`${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`);
+  }
+  return days;
 }
 
 /** Minute-of-day index (0-1439) in local time, for the activity bitmap. */

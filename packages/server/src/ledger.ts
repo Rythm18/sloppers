@@ -7,7 +7,9 @@ import {
   emptyTokens,
   estimateCostFloorUsd,
   estimateCostUsd,
+  MAX_HISTORY_DAYS,
   MINUTES_PER_DAY,
+  recentDays,
   type SessionSnapshot,
   type StatsPrecision,
   type TokenTotals,
@@ -341,6 +343,103 @@ function prepare(db: Db) {
       FROM usage_watermarks
       WHERE member_id = ? AND day = ?
     `),
+
+    // ------------------------------------------------------------- history
+    //
+    // The three reads above, widened from one day to a range and grouped by
+    // day. Deliberately three range scans rather than N calls to the per-day
+    // three: a week of one member's history costs the same number of queries
+    // as a single day of it, and the same number as one board refresh already
+    // costs for that member. Nothing here filters or aggregates differently
+    // from its per-day twin — the `HAVING`, the sentinel comparisons and the
+    // `DISTINCT` are the same clauses, so a day read through history and the
+    // same day read through `dayFor` cannot disagree.
+    //
+    // Both bounds are inclusive and both are day *strings*: `YYYY-MM-DD` sorts
+    // lexicographically in calendar order for every date this schema admits,
+    // which is what lets a BETWEEN mean what it says without a date type.
+    rangeByModel: db.prepare(`
+      SELECT day, model,
+             SUM(input) AS input, SUM(output) AS output,
+             SUM(cache_read) AS cache_read, SUM(cache_write) AS cache_write
+      FROM daily_usage
+      WHERE member_id = ? AND day >= ? AND day <= ?
+      GROUP BY day, model
+      HAVING SUM(input) > 0 OR SUM(output) > 0
+          OR SUM(cache_read) > 0 OR SUM(cache_write) > 0
+    `),
+    rangeSessions: db.prepare(`
+      SELECT day, COUNT(DISTINCT session_id) AS n,
+             SUM(CASE WHEN model = ? THEN 1 ELSE 0 END) AS flat,
+             SUM(CASE WHEN model <> ? THEN 1 ELSE 0 END) AS bucketed
+      FROM usage_watermarks
+      WHERE member_id = ? AND day >= ? AND day <= ?
+      GROUP BY day
+    `),
+    rangeBitmaps: db.prepare(`
+      SELECT day, minutes FROM daily_activity
+      WHERE member_id = ? AND day >= ? AND day <= ?
+    `),
+  };
+}
+
+/** How many sessions ran on a day, and under which accounting. */
+interface DaySessions {
+  n: number;
+  flat: number | null;
+  bucketed: number | null;
+}
+
+/**
+ * A day with no watermark rows at all. The per-day query is an unGROUPed
+ * aggregate, so SQLite hands it back this row for an empty day; the ranged one
+ * groups, so an empty day is simply absent and the caller substitutes this.
+ * Both then reach `precisionOf(0, 0)`, which is `undefined` — the honest answer
+ * for a day with nothing in it to judge.
+ */
+const NO_SESSIONS: DaySessions = { n: 0, flat: 0, bucketed: 0 };
+
+/**
+ * One day's rows, as `DailyStats`.
+ *
+ * The whole of what a day *means* lives here and only here, so that every way
+ * of asking for a day — today's board, one day of history, a week of it —
+ * prices it, floors it and hedges it identically. Lifted verbatim out of
+ * `todayFor`, which now supplies the same three arguments it used to fetch
+ * inline.
+ */
+function composeDay(
+  rows: ({ model: string } & UsageRow)[],
+  sessions: DaySessions,
+  activeMinutes: number,
+): DailyStats {
+  let tokens = emptyTokens();
+  const byModel: Record<string, TokenTotals> = {};
+  // A day nobody worked costs nothing, which is a complete answer; one
+  // unpriced model in a day that *was* worked makes the bill unknowable,
+  // and a partial sum would read as a complete, smaller one.
+  let estimatedCostUsd: number | null = 0;
+  for (const row of rows) {
+    const totals = totalsOf(row);
+    byModel[row.model] = totals;
+    tokens = addTokens(tokens, totals);
+    const cost = estimateCostUsd(row.model, totals);
+    estimatedCostUsd = cost === null || estimatedCostUsd === null ? null : estimatedCostUsd + cost;
+  }
+  // The same day priced as far as it can be. Computed from the breakdown
+  // just built rather than folded into the loop above, so the null contract
+  // on `estimatedCostUsd` keeps its own arithmetic and the floor keeps its
+  // one implementation, in `@sloppers/protocol`, where every consumer of
+  // this field reads the rule from.
+  const floor = estimateCostFloorUsd(byModel);
+  return {
+    tokens,
+    sessionsRun: sessions.n,
+    activeMinutes,
+    byModel,
+    estimatedCostUsd,
+    estimatedCostFloorUsd: floor.usd,
+    precision: precisionOf(sessions.flat ?? 0, sessions.bucketed ?? 0),
   };
 }
 
@@ -754,34 +853,22 @@ export class TokenLedger {
   /** Always a full-length buffer, whatever the stored blob's length. */
   private minuteBitmap(memberIdValue: string, day: string): Buffer {
     const row = this.q.readBitmap.get(memberIdValue, day) as { minutes: Buffer } | undefined;
-    const bitmap = Buffer.alloc(MINUTE_BITMAP_BYTES);
-    if (row) Buffer.from(row.minutes).copy(bitmap, 0, 0, MINUTE_BITMAP_BYTES);
-    return bitmap;
+    return fullBitmap(row?.minutes);
   }
 
   todayFor(memberIdValue: string, now: number): DailyStats {
-    const day = dayOf(now);
+    return this.dayFor(memberIdValue, dayOf(now));
+  }
+
+  /**
+   * One member's one day, keyed by the day string the work was filed under.
+   *
+   * `todayFor` is this with the server's own day supplied. Split out so that
+   * asking for a past day is the same read as asking for the present one,
+   * rather than a second implementation that could drift from it.
+   */
+  dayFor(memberIdValue: string, day: string): DailyStats {
     const rows = this.q.dayByModel.all(memberIdValue, day) as ({ model: string } & UsageRow)[];
-    let tokens = emptyTokens();
-    const byModel: Record<string, TokenTotals> = {};
-    // A day nobody worked costs nothing, which is a complete answer; one
-    // unpriced model in a day that *was* worked makes the bill unknowable,
-    // and a partial sum would read as a complete, smaller one.
-    let estimatedCostUsd: number | null = 0;
-    for (const row of rows) {
-      const totals = totalsOf(row);
-      byModel[row.model] = totals;
-      tokens = addTokens(tokens, totals);
-      const cost = estimateCostUsd(row.model, totals);
-      estimatedCostUsd =
-        cost === null || estimatedCostUsd === null ? null : estimatedCostUsd + cost;
-    }
-    // The same day priced as far as it can be. Computed from the breakdown
-    // just built rather than folded into the loop above, so the null contract
-    // on `estimatedCostUsd` keeps its own arithmetic and the floor keeps its
-    // one implementation, in `@sloppers/protocol`, where every consumer of
-    // this field reads the rule from.
-    const floor = estimateCostFloorUsd(byModel);
     // Sessions that worked this day, derived from the watermark rows filed
     // under it rather than counted, so it cannot drift from the usage.
     // Retired rows are included deliberately: a session whose attribution was
@@ -792,17 +879,87 @@ export class TokenLedger {
       FLAT_WATERMARK_MODEL,
       memberIdValue,
       day,
-    ) as { n: number; flat: number | null; bucketed: number | null };
-    return {
-      tokens,
-      sessionsRun: sessions.n,
-      activeMinutes: countMinutes(this.minuteBitmap(memberIdValue, day)),
-      byModel,
-      estimatedCostUsd,
-      estimatedCostFloorUsd: floor.usd,
-      precision: precisionOf(sessions.flat ?? 0, sessions.bucketed ?? 0),
-    };
+    ) as DaySessions;
+    return composeDay(rows, sessions, countMinutes(this.minuteBitmap(memberIdValue, day)));
   }
+
+  /**
+   * One member's last `days` days ending at `endDay`, newest first.
+   *
+   * Every requested day is present, including the ones with nothing in them:
+   * a day off is a real value in a rhythm, and a strip that silently omitted it
+   * would put Tuesday's bar where Wednesday's belongs. Days before this member
+   * — or this office — existed come back as zeroes for the same reason, and
+   * nothing here pretends to know which kind of zero it is handing back.
+   *
+   * Three queries, whatever `days` is. Reading a week by calling `dayFor` seven
+   * times would be twenty-one, and — because `usage_watermarks` carries no
+   * index on `member_id` — seven full scans of it rather than one.
+   *
+   * `days` is clamped rather than trusted. The wire schema caps it too, but the
+   * table this reads is the one that grows forever, and the cap that matters is
+   * the one standing next to the query.
+   */
+  recentFor(
+    memberIdValue: string,
+    endDay: string,
+    days: number,
+  ): { day: string; stats: DailyStats }[] {
+    const wanted = recentDays(endDay, Math.min(Math.max(Math.trunc(days), 0), MAX_HISTORY_DAYS));
+    if (wanted.length === 0) return [];
+    // `recentDays` returns newest first, so the last entry is the oldest bound.
+    const newest = wanted[0] as string;
+    const oldest = wanted[wanted.length - 1] as string;
+
+    const usage = new Map<string, ({ model: string } & UsageRow)[]>();
+    for (const row of this.q.rangeByModel.all(memberIdValue, oldest, newest) as ({
+      day: string;
+      model: string;
+    } & UsageRow)[]) {
+      const list = usage.get(row.day);
+      if (list) list.push(row);
+      else usage.set(row.day, [row]);
+    }
+
+    const sessions = new Map<string, DaySessions>();
+    for (const row of this.q.rangeSessions.all(
+      FLAT_WATERMARK_MODEL,
+      FLAT_WATERMARK_MODEL,
+      memberIdValue,
+      oldest,
+      newest,
+    ) as ({ day: string } & DaySessions)[]) {
+      sessions.set(row.day, row);
+    }
+
+    const minutes = new Map<string, number>();
+    for (const row of this.q.rangeBitmaps.all(memberIdValue, oldest, newest) as {
+      day: string;
+      minutes: Buffer;
+    }[]) {
+      minutes.set(row.day, countMinutes(fullBitmap(row.minutes)));
+    }
+
+    return wanted.map((day) => ({
+      day,
+      stats: composeDay(
+        usage.get(day) ?? [],
+        sessions.get(day) ?? NO_SESSIONS,
+        minutes.get(day) ?? 0,
+      ),
+    }));
+  }
+}
+
+/**
+ * A stored minute blob as a full 1440-bit bitmap, whatever length it was
+ * written at — short blobs are zero-padded, long ones truncated, and a missing
+ * row reads as a day with no minutes.
+ */
+function fullBitmap(stored: Buffer | undefined): Buffer {
+  const bitmap = Buffer.alloc(MINUTE_BITMAP_BYTES);
+  if (stored) Buffer.from(stored).copy(bitmap, 0, 0, MINUTE_BITMAP_BYTES);
+  return bitmap;
 }
 
 /**

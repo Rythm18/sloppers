@@ -440,6 +440,27 @@ function handleWeb(
       room.updatePosition(client.memberId, msg.position);
     } else if (msg.type === 'activity') {
       room.setWebPresent(client, msg.present);
+    } else if (msg.type === 'history') {
+      // Answered to the asking socket alone. The other tabs this member has
+      // open did not click anything, and history is the one thing on this wire
+      // that is a reply rather than an announcement.
+      //
+      // Bounded by construction — three queries per member, for a day count the
+      // schema and the ledger both cap — but it is still the widest *read* a
+      // browser can ask for, and a read can fail whole the same way a write
+      // can: a busy database, a blob that will not load. Same boundary the
+      // admin and join paths carry, for the same reason: this process is every
+      // office on the server.
+      try {
+        sendWeb(ws, room.history(msg.days, Date.now()));
+      } catch (error) {
+        console.error(`history for member ${client.memberId} failed:`, error);
+        sendWeb(ws, {
+          type: 'error',
+          code: 'server-error',
+          message: 'could not read the office history',
+        });
+      }
     } else if (msg.type === 'admin' && actor) {
       // The widest-reaching web message that writes to the database — not the
       // only one, which is why the join branch above carries a boundary of its

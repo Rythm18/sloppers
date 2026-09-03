@@ -2,13 +2,16 @@ import {
   type CollectorSnapshot,
   type DailyStats,
   type LeaderboardRow,
+  MAX_HISTORY_DAYS,
   type MemberRole,
   type MemberView,
   type Position,
   type PresenceState,
   processedTokens,
+  recentDays,
   type ServerToWeb,
   type SessionSnapshot,
+  type WebHistoryResult,
   type WebRemoved,
   type WebWorld,
   type WorkspaceSettings,
@@ -17,12 +20,17 @@ import type { WebSocket } from 'ws';
 import type { Db } from '../db/index.js';
 import { can } from '../domain/permissions.js';
 import { relinkToken } from '../ids.js';
-import type { TokenLedger } from '../ledger.js';
+// A value import, not a type-only one: `TokenLedger.dayOf` is the server's one
+// answer to "which day is it here", and `history` below has to serve the same
+// day the live board is serving.
+import { TokenLedger } from '../ledger.js';
 import { derivePresence } from '../presence.js';
 import { type Knock, KnockRegistry, knockIsLive } from './knocks.js';
 import type { MemberRecord, WorkspaceManager } from './manager.js';
 
 const LEADERBOARD_DEBOUNCE_MS = 2000;
+/** A week, when a browser does not say. Long enough to read as a rhythm. */
+const DEFAULT_HISTORY_DAYS = 7;
 /** Open floor near the centre of the default 512×352 office map. */
 const SPAWN = { x: 256, y: 240 };
 /** Long enough to walk to the other device, short enough to be worth stealing. */
@@ -501,6 +509,53 @@ export class Room {
       expiresAt,
     });
     return true;
+  }
+
+  /**
+   * The office's recent days, as one answer to one browser that asked.
+   *
+   * Anchored on the same clock the live board calls "today" — `TokenLedger`'s
+   * own `dayOf`, at the server. A browser cannot name the day, and that is the
+   * point: the board's day switch puts "Today" and "Yesterday" side by side,
+   * and two definitions of today inside one panel is a bug nobody would ever
+   * be able to see. What each day *label* then means per member is their own
+   * collector's local day, unconverted, which is the honest reading — the date
+   * they did the work, on their calendar.
+   *
+   * Withholding governs from the present tense. A member whose collector says
+   * `visibility.tokens` is off gets an empty `days` and `tokensShared: false`,
+   * and their stored days are not read at all — the office does not show a
+   * person's past after they have asked it to stop showing their numbers.
+   *
+   * Costs three queries per member in the office, whatever the day count: see
+   * `TokenLedger.recentFor`. An eight-person office is 24 reads for a week.
+   */
+  history(requestedDays: number | undefined, now: number): WebHistoryResult {
+    const endDay = TokenLedger.dayOf(now);
+    const wanted = Math.min(Math.max(requestedDays ?? DEFAULT_HISTORY_DAYS, 1), MAX_HISTORY_DAYS);
+    // Served from the same helper the ledger reads with, so the labels and the
+    // rows under them cannot come apart.
+    const days = recentDays(endDay, wanted);
+    return {
+      type: 'history',
+      days,
+      members: [...this.members.values()].map((runtime) =>
+        runtime.sharesTokens
+          ? {
+              memberId: runtime.id,
+              displayName: runtime.displayName,
+              avatar: runtime.avatar,
+              days: this.ledger.recentFor(runtime.id, endDay, days.length),
+            }
+          : {
+              memberId: runtime.id,
+              displayName: runtime.displayName,
+              avatar: runtime.avatar,
+              days: [],
+              tokensShared: false,
+            },
+      ),
+    };
   }
 
   /** Recompute time-driven presence (timeouts, idle drift) for everyone. */

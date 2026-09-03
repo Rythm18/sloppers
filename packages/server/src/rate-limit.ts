@@ -40,7 +40,7 @@ export class TokenBucket {
 }
 
 /** The complete client-to-server message union — see `webToServerSchema`. */
-export type MessageKind = 'join' | 'move' | 'activity' | 'admin';
+export type MessageKind = 'join' | 'move' | 'activity' | 'admin' | 'history';
 
 /**
  * Budgets per kind. `move` is generous — it is the tick-rate stream driving
@@ -48,12 +48,22 @@ export type MessageKind = 'join' | 'move' | 'activity' | 'admin';
  * deliberately tight per-minute rates with just enough burst to cover a
  * legitimate flurry (a moderator working through a queue; a knocker who gets
  * refused once and retries under a new name).
+ *
+ * `history` is the one read a browser can ask for, and the most expensive
+ * message on this wire: it scans a week of `daily_usage`, `usage_watermarks`
+ * and `daily_activity` for every member of the office at once. It is also the
+ * rarest a person can honestly generate — one client caches the answer for the
+ * life of the connection, so a session that opens the board, flips to
+ * yesterday, and reads three teammates' weeks spends exactly one. Five in a
+ * burst covers a reconnect and a few deliberate refreshes; six a minute
+ * sustained is far past anyone clicking, and far short of a loop.
  */
 const BUDGETS: Record<MessageKind, { ratePerSecond: number; burst: number }> = {
   move: { ratePerSecond: 20, burst: 40 },
   activity: { ratePerSecond: 1, burst: 10 },
   admin: { ratePerSecond: 10 / 60, burst: 15 },
   join: { ratePerSecond: 1 / 60, burst: 5 },
+  history: { ratePerSecond: 6 / 60, burst: 5 },
 };
 
 /** How close two full-bucket drains have to land to count as abuse. */
@@ -78,6 +88,7 @@ export function createMessageLimiter(): MessageLimiter {
     activity: new TokenBucket(BUDGETS.activity.ratePerSecond, BUDGETS.activity.burst),
     admin: new TokenBucket(BUDGETS.admin.ratePerSecond, BUDGETS.admin.burst),
     join: new TokenBucket(BUDGETS.join.ratePerSecond, BUDGETS.join.burst),
+    history: new TokenBucket(BUDGETS.history.ratePerSecond, BUDGETS.history.burst),
   };
 
   // The recorded history `abusive()` answers from: the two most recent
