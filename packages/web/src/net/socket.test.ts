@@ -106,6 +106,17 @@ const INVITED: JoinIntent = {
   avatar: 'pixel',
 };
 
+/** The code an office moves to when its owner rotates the invite. */
+const ROTATED = 'the-lab-9zzz1r';
+
+/** The office's own state, which is what a rotation arrives as. */
+const workspaceAt = (roomCode: string) => ({
+  type: 'workspace' as const,
+  roomCode,
+  roomName: 'the lab',
+  settings: { joinMode: 'link' as const, publicLeaderboard: false },
+});
+
 describe('OfficeSocket', () => {
   let socket: OfficeSocket | null = null;
 
@@ -318,6 +329,25 @@ describe('OfficeSocket', () => {
       expect(useStore.getState().joinError).toBe('nobody let you in this time');
     });
 
+    it('reconnects into the office it is in, not the code it arrived on', () => {
+      // The intent has to follow the rotation as well as the storage key: it
+      // is what a reconnect loads credentials by, and pointing it at the old
+      // code after the identity moved is "No identity for this office here"
+      // on the next wifi blip.
+      const first = start(CREATE);
+      first.triggerMessage(WORLD);
+      first.triggerMessage(workspaceAt(ROTATED));
+
+      const second = dropAndReconnect(first);
+
+      expect(joinSentOn(second)).toEqual({
+        type: 'join',
+        memberId: 'm1',
+        memberSecret: 's3cret',
+      });
+      expect(useStore.getState().joinError).toBeNull();
+    });
+
     it('keeps the connection when the office refuses something from inside', () => {
       // A refused admin op is an answer, not a door slamming: ending the
       // attempt on every error would drop somebody out of the office for
@@ -331,6 +361,107 @@ describe('OfficeSocket', () => {
       expect(useStore.getState().adminError).toBe('they outrank you');
       const second = dropAndReconnect(first);
       expect(joinSentOn(second)).toMatchObject({ memberId: 'm1' });
+    });
+  });
+
+  /**
+   * Credentials are filed under the office's invite code, because that is the
+   * only name a browser has for an office. An owner can change it — and used
+   * to change it out from under everybody, leaving each browser's identity in
+   * a drawer nothing opened again: the address bar moved to the new code, the
+   * next reload found nothing under it, and the office offered a member their
+   * own name and refused it as taken. Anyone without a paired collector had
+   * no way back to their seat or their history.
+   */
+  describe('when the office rotates its invite', () => {
+    /** The credentials a browser holds for an office it is already in. */
+    const IDENTITY = { memberId: 'm1', memberSecret: 's3cret' };
+
+    it('re-files the identity under the new code as the change arrives', () => {
+      const ws = start(CREATE);
+      ws.triggerMessage(WORLD);
+      expect(loadIdentity('the-lab-k4xp2q')).toEqual(IDENTITY);
+
+      ws.triggerMessage(workspaceAt(ROTATED));
+
+      expect(loadIdentity(ROTATED)).toEqual(IDENTITY);
+      // Moved, not copied: a second copy under a dead code is a credential
+      // going stale somewhere nobody is looking.
+      expect(loadIdentity('the-lab-k4xp2q')).toBeNull();
+    });
+
+    it('lets the reload that follows step straight back in', () => {
+      const ws = start(CREATE);
+      ws.triggerMessage(WORLD);
+      ws.triggerMessage(workspaceAt(ROTATED));
+      socket?.stop();
+
+      // A fresh tab, on the corrected URL — which is where `App` sends it the
+      // moment the store hears the new code.
+      const reopened = start({ kind: 'resume', roomCode: ROTATED });
+
+      expect(joinSentOn(reopened)).toEqual({ type: 'join', ...IDENTITY });
+      expect(useStore.getState().joinError).toBeNull();
+    });
+
+    it('re-files an offline member the moment their old link lets them back in', () => {
+      // They were away when it rotated, so nobody told them anything. Their
+      // credentials are still under the old code and their link still points
+      // at it — and that is enough, because the office was never identified
+      // by the code: `memberId` and `memberSecret` name it by themselves.
+      storageData.set('sloppers:identity:the-lab-k4xp2q', JSON.stringify(IDENTITY));
+
+      const ws = start({ kind: 'resume', roomCode: 'the-lab-k4xp2q' });
+      expect(joinSentOn(ws)).toEqual({ type: 'join', ...IDENTITY });
+
+      // Resuming mints nothing, so the world carries no secret — the code it
+      // carries is the only news in it, and this is the one moment the
+      // browser can act on it before the address bar is corrected under them.
+      ws.triggerMessage({ ...WORLD, you: { memberId: 'm1' }, roomCode: ROTATED });
+
+      expect(loadIdentity(ROTATED)).toEqual(IDENTITY);
+      expect(loadIdentity('the-lab-k4xp2q')).toBeNull();
+    });
+  });
+
+  /**
+   * A knock is answered twice: once by the moderator who says yes, and once
+   * by the office, which only checks the name at that second moment — someone
+   * else may have taken it while they stood there. The refusal used to arrive
+   * on a socket the office then dropped, behind a "Waiting…" screen that
+   * cleared only on a `world` that was never coming.
+   */
+  it('sends a knocker refused on the way in back to the form, ready to try again', () => {
+    vi.useFakeTimers();
+    const first = start(INVITED);
+    first.triggerMessage({ type: 'knocking', answerable: true });
+    expect(useStore.getState().knocking).toBe(true);
+
+    first.triggerMessage({
+      type: 'error',
+      code: 'name-taken',
+      message: 'someone here is already called ridham',
+    });
+
+    const state = useStore.getState();
+    expect(state.knocking).toBe(false);
+    expect(state.phase).toBe('join');
+    expect(state.connection).toBe('idle');
+    expect(state.joinError).toBe('someone here is already called ridham');
+
+    // And the attempt is over: reconnecting would stand them back in a queue
+    // under the one name the office has just told them it cannot give them.
+    const opened = FakeWebSocket.instances.length;
+    first.triggerClose();
+    vi.advanceTimersByTime(60_000);
+    expect(FakeWebSocket.instances).toHaveLength(opened);
+
+    // Another name is theirs to offer, on a connection of its own.
+    const retry = start({ ...INVITED, displayName: 'ridham the second' });
+
+    expect(joinSentOn(retry)).toMatchObject({
+      roomCode: 'the-lab-k4xp2q',
+      displayName: 'ridham the second',
     });
   });
 });

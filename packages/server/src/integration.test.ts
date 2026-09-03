@@ -959,6 +959,52 @@ describe('server integration', () => {
     collector.close();
   });
 
+  /**
+   * The other half of that seam, and the half that was missing. `sharing` went
+   * up when a collector attached and never came back down — it meant "has ever
+   * paired". So the HUD read "Sharing on" over a member card reading "no live
+   * agent sessions right now": two sentences, each true on its own, telling one
+   * lie together, for as long as the devices row survived.
+   *
+   * The office knows exactly when that machine goes; this is it saying so.
+   */
+  it('stops saying a member is sharing the moment their collector goes', async () => {
+    const { client, world } = await join('ridham');
+    const base = `http://127.0.0.1:${server.port}`;
+
+    const mint = await fetch(`${base}/api/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        memberId: world.you.memberId,
+        memberSecret: world.you.memberSecret,
+      }),
+    });
+    const { pairingCode } = (await mint.json()) as { pairingCode: string };
+    const redeem = await fetch(`${base}/api/pair/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pairingCode }),
+    });
+    const paired = (await redeem.json()) as PairRedeemResponse;
+
+    const collector = new WebSocket(`ws://127.0.0.1:${server.port}/ws/collector`);
+    await new Promise<void>((resolve) => collector.on('open', () => resolve()));
+    collector.send(
+      JSON.stringify({ type: 'hello', deviceKey: paired.deviceKey, collectorVersion: '0.1.0' }),
+    );
+    await client.next((m) => m.type === 'member' && m.member.sharing);
+
+    // The laptop shuts, the daemon stops, the heartbeat reaps a half-open
+    // socket — from in here they are all the same event.
+    collector.close();
+
+    const dropped = await client.next((m) => m.type === 'member' && !m.member.sharing);
+    if (dropped.type !== 'member') throw new Error('unreachable');
+    expect(dropped.member.id).toBe(world.you.memberId);
+    expect(dropped.member.sharing).toBe(false);
+  });
+
   it('answers a snapshot it could not record instead of taking the server down', async () => {
     const { client: owner, world } = await join('ridham');
     const base = `http://127.0.0.1:${server.port}`;

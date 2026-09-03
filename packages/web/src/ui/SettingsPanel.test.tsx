@@ -328,6 +328,25 @@ describe('SettingsPanel', () => {
       expect(document.activeElement).toBe(button('Yes, rotate'));
     });
 
+    it('is honest about who this actually costs, which is not the people inside', () => {
+      // It used to warn about links alone, while quietly orphaning every
+      // browser identity in the office. Now nothing but the links dies — and
+      // the warning names the people who are away, because they are the ones
+      // the owner has to go and tell.
+      seed({ role: 'owner' });
+      render(<SettingsPanel />);
+
+      const note = screen.getByText(/Rotating makes a brand new link/);
+      expect(note.textContent).toMatch(/Nobody loses their seat/);
+      expect(note.textContent).toMatch(/offline/);
+
+      fireEvent.click(button('Rotate invite link'));
+
+      const question = screen.getByText(/Rotate the invite link\?/);
+      expect(question.textContent).toMatch(/Nobody in the office loses their seat/);
+      expect(question.textContent).toMatch(/anyone who is away right now needs the new link/);
+    });
+
     it('puts the question away when the keys change hands mid-question', () => {
       seed({ role: 'owner' });
       render(<SettingsPanel />);
@@ -526,6 +545,126 @@ describe('SettingsPanel', () => {
     });
   });
 
+  /**
+   * The server has taken `transfer` since the day roles landed, and the panel
+   * spent a release telling owners to use a control that was never built —
+   * so an owner could not hand the office on, and could not delete themselves
+   * either, because the office refuses that until they have.
+   */
+  describe('handing the office over', () => {
+    const roster = [
+      person('me', 'ridham', 'owner'),
+      person('lee', 'lee', 'moderator'),
+      person('sam', 'sam', 'member'),
+      person('old', 'jules', 'member', 'kicked'),
+    ];
+
+    it('fires nothing on the first click, and the transfer on the second', () => {
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+
+      fireEvent.click(button('Hand over office: lee'));
+      expect(opsAfterOpening()).toEqual([]);
+
+      fireEvent.click(button('Yes, hand it over: lee'));
+
+      expect(opsAfterOpening()).toEqual([{ kind: 'transfer', memberId: 'lee' }]);
+    });
+
+    it('sends nothing at all if the answer is no', () => {
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+
+      fireEvent.click(button('Hand over office: sam'));
+      fireEvent.click(button('Never mind: sam'));
+
+      expect(opsAfterOpening()).toEqual([]);
+      expect(button('Hand over office: sam')).toBeTruthy();
+    });
+
+    it('says it is the whole office going, not a promotion', () => {
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+
+      fireEvent.click(button('Hand over office: sam'));
+
+      const question = screen.getByText(/Hand the whole office to sam\?/);
+      expect(question.textContent).toContain('the invite link');
+      expect(question.textContent).toContain('the door');
+      // What it costs the person clicking, which the button does not say.
+      expect(question.textContent).toContain('You stay on as a moderator');
+      expect(question.textContent).toContain('only they can hand it back');
+      expect(document.activeElement).toBe(button('Yes, hand it over: sam'));
+    });
+
+    it('offers it to nobody but the owner, and on nobody but an active seat', () => {
+      seed({ role: 'moderator', roster });
+      render(<SettingsPanel />);
+      expect(screen.queryByRole('button', { name: 'Hand over office: sam' })).toBeNull();
+
+      cleanup();
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+
+      // Not to a tombstone, which the server resolves as no such member, and
+      // not back to the person already holding the keys.
+      expect(screen.queryByRole('button', { name: 'Hand over office: jules' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Hand over office: ridham' })).toBeNull();
+      // A moderator is the likeliest heir there is — the owner picked them.
+      expect(button('Hand over office: lee')).toBeTruthy();
+    });
+
+    it('drops the ex-owner to a moderator panel the moment the office says so', () => {
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+      fireEvent.click(button('Hand over office: lee'));
+      fireEvent.click(button('Yes, hand it over: lee'));
+
+      // The server refreshes both members and re-pushes the roster; the panel
+      // has to follow, or the ex-owner sits looking at the door settings and
+      // an invite rotation the office would now refuse them.
+      apply({ type: 'member', member: memberView('me', 'ridham', 'moderator') });
+      apply({
+        type: 'roster',
+        members: [
+          person('lee', 'lee', 'owner'),
+          person('me', 'ridham', 'moderator'),
+          person('sam', 'sam', 'member'),
+        ],
+      });
+
+      expect(screen.queryByText('Office')).toBeNull();
+      expect(screen.queryByText('The door')).toBeNull();
+      expect(screen.queryByText('Leaderboard')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Hand over office: sam' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Make moderator: sam' })).toBeNull();
+      // Moderating is still theirs, and so is the way out that was closed to
+      // them while they held the keys.
+      expect(screen.getByText('People')).toBeTruthy();
+      expect(button('Remove: sam')).toBeTruthy();
+      expect(button('Delete me')).toBeTruthy();
+    });
+
+    it('takes the question away if the keys change hands while it is open', () => {
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+      fireEvent.click(button('Hand over office: lee'));
+      expect(button('Yes, hand it over: lee')).toBeTruthy();
+
+      apply({ type: 'member', member: memberView('me', 'ridham', 'moderator') });
+
+      expect(screen.queryByRole('button', { name: 'Yes, hand it over: lee' })).toBeNull();
+      expect(opsAfterOpening()).toEqual([]);
+    });
+
+    it('points an owner at the control instead of a control that is not there', () => {
+      seed({ role: 'owner', roster });
+      render(<SettingsPanel />);
+
+      expect(screen.getByText(/holding the keys/).textContent).toContain('People');
+    });
+  });
+
   describe('who is offered what', () => {
     const roster = [
       person('me', 'ridham', 'moderator'),
@@ -580,6 +719,29 @@ describe('SettingsPanel', () => {
       expect(screen.queryByRole('button', { name: 'Ban: ridham-senior' })).toBeNull();
       // Nor themselves.
       expect(screen.queryByRole('button', { name: 'Remove: ridham' })).toBeNull();
+    });
+
+    /**
+     * Telling somebody to reach for a control they do not have is worse than
+     * saying nothing: they go looking, find nothing, and conclude the office
+     * is broken. Rotating the link and setting the door are the owner's, and
+     * this note used to send moderators after both.
+     */
+    it('tells each role only what that role can actually do about a ban', () => {
+      seed({ role: 'moderator', roster });
+      render(<SettingsPanel />);
+      const note = screen.getByText(/Banning stops that person/);
+
+      expect(note.textContent).not.toMatch(/pair it with rotating/);
+      expect(note.textContent).toMatch(/the owner can rotate the link/);
+
+      cleanup();
+      seed({ role: 'owner', roster: [person('me', 'ridham', 'owner')] });
+      render(<SettingsPanel />);
+
+      expect(screen.getByText(/Banning stops that person/).textContent).toMatch(
+        /pair it with rotating the link/,
+      );
     });
 
     it('gives the owner the whole panel', () => {

@@ -335,6 +335,27 @@ describe('WorkspaceManager', () => {
     expect(manager.roster(room.id)[0]).toMatchObject({ id: zed.id, role: 'owner', sharing: false });
   });
 
+  it('does not let a reopened office claim somebody is sharing because they once paired', () => {
+    const room = office();
+    const zed = join(room, 'zed');
+    db.prepare('INSERT INTO devices (key, member_id, created_at) VALUES (?, ?, ?)').run(
+      'dev-key',
+      zed.id,
+      Date.now(),
+    );
+
+    // A restart: the durable state survives, every socket in the world does
+    // not. The member view used to read `sharing` off this devices row and
+    // never lower it again, so an office greeted a fortnight-old pairing with
+    // "Sharing on" while the laptop behind it had been shut the whole time.
+    // It says "a collector is attached right now" now, and right now none is.
+    const restarted = new WorkspaceManager(db);
+    const reopened = restarted.roomById(room.id);
+    if (!reopened) throw new Error('the office should still be there');
+
+    expect(reopened.memberView(zed.id, Date.now()).sharing).toBe(false);
+  });
+
   it('reads the audit trail newest first, no further than the limit', () => {
     const room = office();
     vi.useFakeTimers();
