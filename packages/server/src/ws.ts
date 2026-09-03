@@ -371,6 +371,12 @@ function handleWeb(
       return;
     }
 
+    // Adoption ahead of the new arrival, exactly as the resume path does it —
+    // and through the same refresh, so anyone already watching sees the
+    // heir's new role rather than learning it on their next reload.
+    // `createMember`'s own ensureOwner call then finds an owner and no-ops.
+    const adopted = rooms.ensureOwner(door.id);
+    if (adopted) door.refreshMember(adopted);
     const created = rooms.createMember(door.id, msg.displayName, msg.avatar);
     if (created === 'name-taken') {
       return sendWeb(ws, {
