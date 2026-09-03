@@ -104,6 +104,16 @@
   color: var(--color-parchment);
 }
 
+/* The landing page's own half of the tap-target minimum app.css sets for the
+   office. Written here for the same reason the reduced-motion block below is:
+   this file loads second, and a `.pixel-btn` rule over there loses to one
+   here on source order alone. */
+@media (pointer: coarse) {
+  .pixel-btn {
+    min-height: 44px;
+  }
+}
+
 /* Scanlines, the landing's ambient texture (pattern, not a gradient wash). */
 .scanlines {
   background-image: repeating-linear-gradient(

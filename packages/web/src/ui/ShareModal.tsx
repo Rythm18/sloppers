@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { mintPairingCode } from '../net/socket.js';
 import { useStore } from '../store.js';
 import { useModalManners } from './modal.js';
+import { useTouchSession } from './viewport.js';
 
 /**
  * Turns "share my agents" into one paste: mints a short-lived pairing code
@@ -29,6 +30,10 @@ function ShareModalBody() {
   const scrimRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const close = useCallback(() => setShareOpen(false), [setShareOpen]);
+  // There is no terminal on a phone, and no agents on it either. Handing
+  // somebody a shell command they cannot run — on the device they are holding
+  // — reads as the product not knowing where it is.
+  const onAPhone = useTouchSession();
 
   // The first dialog a new arrival ever meets, and for a while it was the one
   // hand-rolling its own Escape key with no focus trap and a live office
@@ -99,7 +104,20 @@ function ShareModalBody() {
           </button>
         </div>
         <div className="share-steps">
-          <span>Run this once on the machine where your agents live:</span>
+          {onAPhone ? (
+            <>
+              <span>
+                Pairing happens on the computer your agents run on. Open this office there — the
+                invite link works on any device — and press <strong>Share agents</strong>.
+              </span>
+              <span>
+                Or send yourself this command. It is good for ten minutes, which is long enough to
+                get it onto a laptop.
+              </span>
+            </>
+          ) : (
+            <span>Run this once on the machine where your agents live:</span>
+          )}
         </div>
 
         {failed ? (

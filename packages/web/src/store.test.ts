@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from './store.js';
 
 const baseMember = {
@@ -296,5 +296,46 @@ describe('store', () => {
     expect(state.doorAnswerable).toBeNull();
     expect(state.settingsOpen).toBe(false);
     expect(state.adminError).toBeNull();
+  });
+});
+
+/**
+ * On a laptop the board sits in the margin beside the office. On a phone
+ * there is no margin, so it arrives as a sheet across half the floor — which
+ * is the wrong first thing for somebody who just followed an invite to see,
+ * particularly when it will be reading "no tokens burned yet today".
+ *
+ * Read at load rather than watched, so `reset()` gives back the same answer
+ * the tab opened with. These re-import the module to catch it being read.
+ */
+describe('the board on arrival', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  /** Answer every media query the same way, whatever it asks. */
+  function screenSays(matches: boolean): void {
+    vi.stubGlobal('matchMedia', (media: string) => ({ matches, media }));
+  }
+
+  it('is open where there is room beside the office', async () => {
+    screenSays(false);
+    vi.resetModules();
+    const store = await import('./store.js');
+
+    expect(store.useStore.getState().leaderboardOpen).toBe(true);
+  });
+
+  it('is shut where it would cover the office it is about', async () => {
+    screenSays(true);
+    vi.resetModules();
+    const store = await import('./store.js');
+
+    expect(store.useStore.getState().leaderboardOpen).toBe(false);
+    // And still shut after a reset, which is how somebody who was removed
+    // comes back in.
+    store.useStore.getState().reset();
+    expect(store.useStore.getState().leaderboardOpen).toBe(false);
   });
 });

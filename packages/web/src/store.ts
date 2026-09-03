@@ -12,6 +12,7 @@ import type {
 } from '@sloppers/protocol';
 import { create } from 'zustand';
 import { routeServerMessage } from './game/bridge.js';
+import { isStackedLayout } from './ui/viewport.js';
 
 export type Phase = 'join' | 'world';
 export type Connection = 'idle' | 'connecting' | 'open' | 'reconnecting';
@@ -31,7 +32,15 @@ const initialState = {
   nearby: [] as string[],
   focusedId: null as string | null,
   shareOpen: false,
-  leaderboardOpen: true,
+  /**
+   * Open where the board sits beside the office and shut where it would
+   * arrive as a sheet across half of it. The first thing a friend following
+   * an invite on a phone should see is the room, not a scoreboard reading
+   * "no tokens burned yet today" over the top of it — and the Board button
+   * is right there. Read once, at load: a phone turned sideways mid-session
+   * has not asked for the board.
+   */
+  leaderboardOpen: !isStackedLayout(),
   joinError: null as string | null,
   settings: null as WorkspaceSettings | null,
   myRole: null as MemberRole | null,

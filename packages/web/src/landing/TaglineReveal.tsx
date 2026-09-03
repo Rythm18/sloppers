@@ -16,8 +16,8 @@ const EASE = [0.32, 0.72, 0, 1] as const;
 export function TaglineReveal() {
   let wordIndex = 0;
   return (
-    <section aria-label="tagline" className="mx-auto max-w-3xl px-6 py-24 text-center">
-      <p className="font-display text-4xl leading-tight text-parchment md:text-5xl">
+    <section aria-label="tagline" className="mx-auto max-w-3xl px-6 py-16 text-center sm:py-24">
+      <p className="font-display text-3xl leading-tight text-parchment sm:text-4xl md:text-5xl">
         {LINES.map((line) => (
           <span key={line.join(' ')} className="block [text-wrap:balance]">
             {line.map((word) => {

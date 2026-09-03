@@ -21,9 +21,15 @@ const TOUCH = '(pointer: coarse)';
  */
 const STACKED = '(max-width: 720px) and (min-height: 480px)';
 
+/**
+ * Asked of `globalThis` rather than `window` on purpose: this is read at
+ * module load by the store, and the store is loaded by tests that have no
+ * `window` at all. A missing `matchMedia` answers no, which is the desktop
+ * answer, which is the one that changes nothing.
+ */
 function ask(query: string): boolean {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
-  return window.matchMedia(query).matches;
+  if (typeof globalThis.matchMedia !== 'function') return false;
+  return globalThis.matchMedia(query).matches;
 }
 
 /** Whether this session is driven by a finger. */
@@ -44,8 +50,8 @@ export function useTouchSession(): boolean {
   const [touch, setTouch] = useState(isTouchSession);
 
   useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-    const list = window.matchMedia(TOUCH);
+    if (typeof globalThis.matchMedia !== 'function') return;
+    const list = globalThis.matchMedia(TOUCH);
     const onChange = () => setTouch(list.matches);
     // Re-read on the way in as well: the query could have flipped between the
     // first render and this effect, and the listener only hears what happens

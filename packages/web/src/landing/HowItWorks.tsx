@@ -70,7 +70,7 @@ function TerminalDemo() {
 
 export function HowItWorks() {
   return (
-    <section aria-label="how it works" className="mx-auto max-w-5xl px-6 pb-24">
+    <section aria-label="how it works" className="mx-auto max-w-5xl px-6 pb-16 sm:pb-24">
       <Reveal>
         <h2 className="pb-8 text-center font-display text-2xl text-parchment [text-wrap:balance]">
           three steps, no accounts
@@ -85,7 +85,9 @@ export function HowItWorks() {
             <p className="font-mono text-sm text-wire">
               Pick a name, get a link. The link is the key — nobody guesses their way in.
             </p>
-            <div className="mt-auto border-2 border-panel bg-ink px-3 py-2 font-mono text-xs text-crt">
+            {/* An invite code has nowhere to break on its own, and a URL
+                wider than a phone pushes the whole page sideways. */}
+            <div className="mt-auto border-2 border-panel bg-ink px-3 py-2 font-mono text-xs break-all text-crt">
               sloppers.fly.dev/?room=the-lab-k4xp2q
             </div>
           </article>

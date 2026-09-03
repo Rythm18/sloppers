@@ -70,12 +70,14 @@ export function Landing({ onOpenOffice }: { onOpenOffice: () => void }) {
         </nav>
 
         <main>
-          <header className="mx-auto max-w-3xl px-6 pt-14 pb-10 text-center">
+          <header className="mx-auto max-w-3xl px-6 pt-10 pb-10 text-center sm:pt-14">
             <motion.h1
               initial={{ opacity: 0, y: 24 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.8, ease: EASE }}
-              className="landing-heading-ink font-display text-4xl leading-tight [text-wrap:balance] md:text-5xl"
+              // Silkscreen has no narrow glyphs to fall back on, so display
+              // sizes have to come down on a phone rather than wrap harder.
+              className="landing-heading-ink font-display text-3xl leading-tight [text-wrap:balance] sm:text-4xl md:text-5xl"
             >
               <span className="md:whitespace-nowrap">your coding agents,</span>
               <br />

@@ -128,4 +128,34 @@ describe('HUD', () => {
     expect(screen.getByText(/Tap the floor to walk/)).toBeTruthy();
     expect(screen.queryByText(/WASD/)).toBeNull();
   });
+
+  // A tablet gains a keyboard, a convertible is folded back into a laptop.
+  // Asking once at load and never again leaves the wrong instruction on
+  // screen for the rest of the session.
+  it('changes its mind when the pointer does', () => {
+    const listeners = new Set<() => void>();
+    let coarse = true;
+    vi.stubGlobal('matchMedia', (media: string) => ({
+      get matches() {
+        return media.includes('pointer: coarse') && coarse;
+      },
+      media,
+      addEventListener: (_: string, fn: () => void) => {
+        listeners.add(fn);
+      },
+      removeEventListener: (_: string, fn: () => void) => {
+        listeners.delete(fn);
+      },
+    }));
+    seed('member');
+    render(<HUD />);
+    expect(screen.getByText(/Tap the floor to walk/)).toBeTruthy();
+
+    act(() => {
+      coarse = false;
+      for (const fire of listeners) fire();
+    });
+
+    expect(screen.getByText(/WASD or arrows to walk/)).toBeTruthy();
+  });
 });

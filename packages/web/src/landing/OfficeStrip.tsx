@@ -149,6 +149,11 @@ export function OfficeStrip() {
         canvas.style.height = `${stripH * SCALE}px`;
         worldW = canvas.width / SCALE;
         for (const w of walkers) {
+          // A phone's strip is a fraction of a laptop's, and the cast is laid
+          // out for the laptop. Anybody who ended up past the end of it would
+          // spend the first ten seconds of the page walking into frame, which
+          // on a phone is most of the cast and all of the first impression.
+          if (w.x > worldW - 16) w.x = Math.random() * Math.max(1, worldW - 32) + 16;
           w.tx = Math.random() * (worldW - 32) + 16;
           w.ty = Math.random() * (stripH - 40) + 12;
         }

@@ -32,7 +32,10 @@ describe('ShareModal', () => {
     useStore.getState().setRoomCode(ROOM);
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
 
   it('stays shut until the store opens it, and shuts again on Escape', async () => {
     render(<ShareModal />);
@@ -60,6 +63,35 @@ describe('ShareModal', () => {
 
     expect(screen.getByText(`npx sloppers@latest share K4X-P2Q@${location.host}`)).toBeTruthy();
     expect(mintMock).toHaveBeenCalledWith(ROOM);
+  });
+
+  // A phone is where the invite gets opened and the one place the command
+  // cannot be run. Printing "run this once on the machine where your agents
+  // live" beside a shell command, on a device with no shell and no agents,
+  // is the product not knowing where it is.
+  it('sends somebody on a phone to the computer their agents are on', async () => {
+    vi.stubGlobal('matchMedia', (media: string) => ({
+      matches: media.includes('pointer: coarse'),
+      media,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    render(<ShareModal />);
+    await open();
+
+    expect(screen.getByText(/Pairing happens on the computer your agents run on/)).toBeTruthy();
+    expect(screen.queryByText(/Run this once on the machine/)).toBeNull();
+    // The code still has ten minutes on it, which is long enough to get it
+    // onto a laptop — so it stays offered, just not as the instruction.
+    expect(screen.getByText(`npx sloppers@latest share K4X-P2Q@${location.host}`)).toBeTruthy();
+  });
+
+  it('gives a laptop the command as the instruction it is', async () => {
+    render(<ShareModal />);
+    await open();
+
+    expect(screen.getByText(/Run this once on the machine/)).toBeTruthy();
+    expect(screen.queryByText(/Pairing happens on the computer/)).toBeNull();
   });
 
   it('mints a fresh code each time it opens rather than showing the last one', async () => {
