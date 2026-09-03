@@ -179,6 +179,68 @@ describe('store', () => {
     });
   });
 
+  /**
+   * Every one of these used to leave `connecting` in place, which is the
+   * submit button reading "Stepping in…" for as long as the tab is open.
+   * They are listed one by one because each is a shape somebody can actually
+   * arrive in, not because the store branches on them separately — it no
+   * longer does, and that is the fix.
+   */
+  describe('refusals at the door', () => {
+    const refused = (code: string, message: string) =>
+      useStore.getState().applyServer({ type: 'error', code, message } as never);
+
+    it('says what a locked office really means, including that knocking is out', () => {
+      // The office's own sentence stops at "not accepting new people", which
+      // leaves the obvious next move — knock, wait — sounding available.
+      useStore.getState().setConnection('connecting');
+      refused('workspace-locked', 'this office is not accepting new people right now');
+
+      const state = useStore.getState();
+      expect(state.joinError).toMatch(/closed to new people/);
+      expect(state.joinError).toMatch(/knocking is not an option/);
+      expect(state.connection).toBe('idle');
+      expect(state.phase).toBe('join');
+    });
+
+    it('re-enables the form when the office rate-limits the join itself', () => {
+      // `bad-message` reaches the door through the per-connection limiter,
+      // which is spent before the join is even looked at.
+      useStore.getState().setConnection('connecting');
+      refused('bad-message', 'slow down');
+
+      expect(useStore.getState().joinError).toBe('slow down');
+      expect(useStore.getState().connection).toBe('idle');
+    });
+
+    it('takes a denied knocker off the waiting screen so they can read the answer', () => {
+      useStore.getState().applyServer({ type: 'knocking', answerable: true } as never);
+      refused('forbidden', 'nobody let you in this time');
+
+      const state = useStore.getState();
+      expect(state.knocking).toBe(false);
+      expect(state.joinError).toBe('nobody let you in this time');
+      expect(state.connection).toBe('idle');
+    });
+
+    it('reads a refused reconnect as the door, not as a refused click', () => {
+      // `phase` still says 'world' while a reconnect is in flight — we were
+      // in there a second ago. Judging by phase alone filed a dead resume as
+      // an admin refusal, leaving somebody looking at an office they had
+      // already been removed from with an odd note in a panel.
+      useStore.getState().applyServer(world as never);
+      useStore.getState().setConnection('reconnecting');
+
+      refused('bad-join', 'unknown member');
+
+      const state = useStore.getState();
+      expect(state.adminError).toBeNull();
+      expect(state.joinError).toBe('unknown member');
+      expect(state.phase).toBe('join');
+      expect(state.connection).toBe('idle');
+    });
+  });
+
   it('toggles the settings panel', () => {
     expect(useStore.getState().settingsOpen).toBe(false);
     useStore.getState().setSettingsOpen(true);

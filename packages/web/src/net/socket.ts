@@ -108,6 +108,13 @@ export class OfficeSocket {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws/web`);
     this.ws = ws;
+    /**
+     * Whether *this* connection has been let into the office. `joined` says
+     * "ever", which is what the reconnect banner wants; this says "now",
+     * which is what tells a door refusing a join apart from the office
+     * refusing an admin op somebody clicked.
+     */
+    let entered = false;
 
     ws.onopen = () => {
       this.attempts = 0;
@@ -150,6 +157,7 @@ export class OfficeSocket {
 
       if (msg.type === 'world') {
         this.joined = true;
+        entered = true;
         if (msg.you.memberSecret) {
           // The world tells us the real room code (created offices mint it
           // server-side); the identity is keyed by that.
@@ -158,16 +166,29 @@ export class OfficeSocket {
             memberSecret: msg.you.memberSecret,
           });
         }
+        // From here this connection *is* somebody, somewhere: a member id and
+        // an office. Every reconnect from now on has to put that member back
+        // in that office, so the intent that got us here is spent. Replaying
+        // it would mint a second office ('create'), or offer the office a
+        // name it already gave us and be told it is taken ('invited'), or
+        // stand us back in a queue we have already been let out of ('knock').
+        // The room code is the one identity is filed under — deliberately not
+        // updated when the invite rotates, because localStorage is not either.
+        this.intent = { kind: 'resume', roomCode: msg.roomCode };
         this.lastPresent = null;
         this.reportPresence();
       }
-      if (
-        msg.type === 'error' &&
-        (msg.code === 'bad-join' || msg.code === 'name-taken' || msg.code === 'room-not-found')
-      ) {
-        // A stale identity (wiped server db) reads as bad-join; forget it so
-        // the person can just pick a name again.
+      if (msg.type === 'error' && !entered) {
+        // The door refused this connection: a locked office, a taken name, a
+        // knock somebody said no to, a code pointing nowhere, credentials the
+        // office will not honour. None of them answer differently on a
+        // retry, so the attempt ends here rather than reconnecting into the
+        // same refusal every few seconds for as long as the tab is open.
         if (msg.code === 'bad-join' && this.intent.kind === 'resume') {
+          // The office does not know this member: kicked, banned or deleted
+          // while we were disconnected, or a server that lost its database.
+          // Forget the credentials so the next attempt is a fresh name
+          // rather than the same refusal.
           clearIdentity(this.intent.roomCode);
         }
         this.closed = true;

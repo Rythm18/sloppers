@@ -6,6 +6,7 @@ import type {
   RosterEntry,
   ServerToWeb,
   WebDeviceLink,
+  WebError,
   WebRemoved,
   WorkspaceSettings,
 } from '@sloppers/protocol';
@@ -75,6 +76,19 @@ interface SloppersStore extends State {
   applyServer(msg: ServerToWeb): void;
   reset(): void;
 }
+
+/**
+ * Refusals at the door whose full truth the office's own wording does not
+ * carry. Normally the server's sentence is the most specific thing anyone can
+ * say and it goes straight to the form; a locked office is the exception. It
+ * says only that it is not taking new people, which leaves the obvious next
+ * move — knock and wait — sounding available when it is the one thing a
+ * locked door does not offer.
+ */
+const DOOR_REFUSALS: Partial<Record<WebError['code'], string>> = {
+  'workspace-locked':
+    'This office is closed to new people right now — knocking is not an option here. Ask somebody inside to open it up for you.',
+};
 
 /** `myRole` isn't its own message — it's read off the member view matching `you`. */
 function deriveMyRole(you: string | null, members: Record<string, MemberView>): MemberRole | null {
@@ -186,31 +200,31 @@ export const useStore = create<SloppersStore>((set) => ({
         break;
       case 'error':
         set((s) => {
-          // Inside the office, the only things this browser sends are moves,
-          // presence, and admin ops — and the first two are never answered.
-          // So an error arriving here is the office refusing something
-          // somebody just clicked, and it belongs on that screen rather than
-          // nowhere. Held as the message alone: the wire says why, not what
-          // it is about, and the panel is what knows which control asked.
-          if (s.phase === 'world') return { adminError: msg.message };
-          // Fatal join errors land back on the form, re-enabled — leaving
-          // connection at 'connecting' would brick the submit button.
-          if (
-            msg.code === 'name-taken' ||
-            msg.code === 'bad-join' ||
-            msg.code === 'room-not-found'
-          ) {
-            return {
-              joinError: msg.message,
-              phase: 'join' as Phase,
-              connection: 'idle' as Connection,
-            };
-          }
-          // A server-side failure before we're in only matters on the door.
-          if (msg.code === 'server-error' && s.phase === 'join') {
-            return { joinError: msg.message, connection: 'idle' as Connection };
-          }
-          return s;
+          // Inside the office, on an open connection, the only things this
+          // browser sends are moves, presence, and admin ops — and the first
+          // two are never answered. So an error arriving here is the office
+          // refusing something somebody just clicked, and it belongs on that
+          // screen rather than nowhere. Held as the message alone: the wire
+          // says why, not what it is about, and the panel is what knows which
+          // control asked. `connection` is load-bearing: a reconnect that is
+          // refused arrives while `phase` still says 'world', and reading it
+          // as a refused click would leave somebody staring at an office they
+          // are no longer in.
+          if (s.phase === 'world' && s.connection === 'open') return { adminError: msg.message };
+          // Otherwise the door is answering: a join it will not take, a knock
+          // somebody said no to, or a resume it no longer honours. Every code
+          // that can arrive here ends the attempt, so rather than listing the
+          // ones we happen to have met — which is how the button came to sit
+          // on 'Stepping in…' forever for the ones we had not — all of them
+          // put the form back, enabled, with the reason on it.
+          return {
+            joinError: DOOR_REFUSALS[msg.code] ?? msg.message,
+            phase: 'join' as Phase,
+            connection: 'idle' as Connection,
+            // The wait is over either way, and a refusal shown behind the
+            // waiting screen is a refusal nobody reads.
+            knocking: false,
+          };
         });
         break;
       default:

@@ -1,7 +1,7 @@
 import type { AdminOp } from '@sloppers/protocol';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '../store.js';
-import { OfficeSocket, sendAdmin } from './socket.js';
+import { type JoinIntent, loadIdentity, OfficeSocket, sendAdmin } from './socket.js';
 
 /**
  * `OfficeSocket` talks to real browser globals (WebSocket, window, document,
@@ -82,6 +82,30 @@ const fakeLocalStorage = {
 // biome-ignore lint/suspicious/noExplicitAny: same
 (globalThis as any).localStorage = fakeLocalStorage;
 
+/** The office's answer to a join that worked, for a member it just minted. */
+const WORLD = {
+  type: 'world' as const,
+  you: { memberId: 'm1', memberSecret: 's3cret' },
+  roomCode: 'the-lab-k4xp2q',
+  roomName: 'the lab',
+  members: [],
+  leaderboard: [],
+};
+
+const CREATE: JoinIntent = {
+  kind: 'create',
+  roomName: 'test office',
+  displayName: 'ridham',
+  avatar: 'pixel',
+};
+
+const INVITED: JoinIntent = {
+  kind: 'invited',
+  roomCode: 'the-lab-k4xp2q',
+  displayName: 'ridham',
+  avatar: 'pixel',
+};
+
 describe('OfficeSocket', () => {
   let socket: OfficeSocket | null = null;
 
@@ -94,19 +118,46 @@ describe('OfficeSocket', () => {
   afterEach(() => {
     socket?.stop();
     socket = null;
+    vi.useRealTimers();
   });
 
-  function startAndOpen(): FakeWebSocket {
-    socket = new OfficeSocket({
-      kind: 'create',
-      roomName: 'test office',
-      displayName: 'ridham',
-      avatar: 'pixel',
-    });
-    socket.start();
+  /** The socket most recently handed to `connect()`. */
+  function latest(): FakeWebSocket {
     const ws = FakeWebSocket.instances.at(-1);
     if (!ws) throw new Error('expected a socket to have been created');
+    return ws;
+  }
+
+  /** The first thing a connection says, which is always its `join`. */
+  function joinSentOn(ws: FakeWebSocket): unknown {
+    const [first] = ws.sent;
+    if (!first) throw new Error('expected a join to have been sent');
+    return JSON.parse(first);
+  }
+
+  function start(intent: JoinIntent): FakeWebSocket {
+    socket = new OfficeSocket(intent);
+    socket.start();
+    const ws = latest();
     ws.triggerOpen();
+    return ws;
+  }
+
+  /**
+   * Drop the live connection and let the backoff elapse, which is what a
+   * wifi blip or a Fly cold start looks like from in here. The base backoff
+   * is 800ms with jitter, so a second covers it.
+   */
+  function dropAndReconnect(ws: FakeWebSocket): FakeWebSocket {
+    ws.triggerClose();
+    vi.advanceTimersByTime(1000);
+    const next = latest();
+    next.triggerOpen();
+    return next;
+  }
+
+  function startAndOpen(): FakeWebSocket {
+    const ws = start(CREATE);
     ws.sent.length = 0; // discard the join message; tests only care about what comes after
     return ws;
   }
@@ -161,5 +212,125 @@ describe('OfficeSocket', () => {
     expect(useStore.getState().connection).toBe('idle');
     expect(useStore.getState().removed).toBe('banned');
     expect(useStore.getState().phase).toBe('join');
+  });
+
+  /**
+   * A reconnect is not a second arrival. Once the office has answered with a
+   * `world`, this browser is a particular member of a particular office, and
+   * the only thing a dropped socket should do is put that member back — never
+   * re-run the errand that got them in, which the office would answer as if a
+   * stranger had walked up.
+   */
+  describe('what a reconnect asks the office for', () => {
+    beforeEach(() => vi.useFakeTimers());
+
+    it('resumes the office it created instead of opening a second one', () => {
+      // The tab that created an office keeps a `create` intent. Replayed on a
+      // reconnect, the server has no credentials to read, takes the create
+      // branch, and mints a whole new office — leaving the real one, and
+      // everyone invited to it, behind a URL this tab no longer points at.
+      const first = start(CREATE);
+      expect(joinSentOn(first)).toMatchObject({ createRoom: 'test office' });
+      first.triggerMessage(WORLD);
+
+      const second = dropAndReconnect(first);
+
+      expect(joinSentOn(second)).toEqual({
+        type: 'join',
+        memberId: 'm1',
+        memberSecret: 's3cret',
+      });
+    });
+
+    it('resumes an invited seat instead of offering its own name back', () => {
+      // Replaying an `invited` intent asks for a name the office has already
+      // handed to this very member, so it answers `name-taken` — accusing
+      // somebody of being someone else, over their own name.
+      const first = start(INVITED);
+      expect(joinSentOn(first)).toMatchObject({ displayName: 'ridham' });
+      first.triggerMessage(WORLD);
+
+      const second = dropAndReconnect(first);
+
+      expect(joinSentOn(second)).toEqual({
+        type: 'join',
+        memberId: 'm1',
+        memberSecret: 's3cret',
+      });
+    });
+
+    it('does not stand an admitted knocker back in the queue', () => {
+      // Being let in through a knock-mode door is still an arrival, and the
+      // intent that produced it would produce another knock.
+      const first = start(INVITED);
+      first.triggerMessage({ type: 'knocking', answerable: true });
+      first.triggerMessage(WORLD);
+
+      const second = dropAndReconnect(first);
+
+      expect(joinSentOn(second)).toMatchObject({ memberId: 'm1' });
+      expect(useStore.getState().knocking).toBe(false);
+    });
+
+    it('surfaces a removal that happened while the tab was disconnected', () => {
+      // Kicked, banned or deleted mid-blip, the office cannot tell us which:
+      // `authMember` refuses every inactive row the same way. What it can do
+      // is stop pretending we are still in there — the credentials are dead,
+      // so they are forgotten, the retrying stops, and the form comes back
+      // with the office's reason on it.
+      const first = start(CREATE);
+      first.triggerMessage(WORLD);
+      expect(loadIdentity('the-lab-k4xp2q')).not.toBeNull();
+
+      const second = dropAndReconnect(first);
+      second.triggerMessage({ type: 'error', code: 'bad-join', message: 'unknown member' });
+
+      expect(loadIdentity('the-lab-k4xp2q')).toBeNull();
+      expect(useStore.getState().phase).toBe('join');
+      expect(useStore.getState().connection).toBe('idle');
+      expect(useStore.getState().joinError).toBe('unknown member');
+      // And it stays refused: retrying the same dead credentials every few
+      // seconds is how a real refusal turns into a flickering screen.
+      const opened = FakeWebSocket.instances.length;
+      second.triggerClose();
+      vi.advanceTimersByTime(60_000);
+      expect(FakeWebSocket.instances).toHaveLength(opened);
+    });
+
+    it('stops knocking again after being refused at the door', () => {
+      // A denied knock arrives as an error and the office hangs up. Without
+      // ending the attempt, the backoff would put this browser straight back
+      // in the queue, forever, under the name that was just turned away.
+      const first = start(INVITED);
+      first.triggerMessage({ type: 'knocking', answerable: true });
+      first.triggerMessage({
+        type: 'error',
+        code: 'forbidden',
+        message: 'nobody let you in this time',
+      });
+
+      const opened = FakeWebSocket.instances.length;
+      first.triggerClose();
+      vi.advanceTimersByTime(60_000);
+
+      expect(FakeWebSocket.instances).toHaveLength(opened);
+      expect(useStore.getState().knocking).toBe(false);
+      expect(useStore.getState().joinError).toBe('nobody let you in this time');
+    });
+
+    it('keeps the connection when the office refuses something from inside', () => {
+      // A refused admin op is an answer, not a door slamming: ending the
+      // attempt on every error would drop somebody out of the office for
+      // clicking Ban on a person who outranks them.
+      const first = start(CREATE);
+      first.triggerMessage(WORLD);
+
+      first.triggerMessage({ type: 'error', code: 'forbidden', message: 'they outrank you' });
+
+      expect(useStore.getState().phase).toBe('world');
+      expect(useStore.getState().adminError).toBe('they outrank you');
+      const second = dropAndReconnect(first);
+      expect(joinSentOn(second)).toMatchObject({ memberId: 'm1' });
+    });
   });
 });

@@ -64,8 +64,17 @@ export function JoinScreen({
   const [invitePaste, setInvitePaste] = useState('');
   const [pasteError, setPasteError] = useState(false);
   const [preview, setPreview] = useState<Preview>({ state: 'loading' });
+  /** What this form itself objects to, before anything reaches the office. */
+  const [formError, setFormError] = useState<string | null>(null);
 
   const invited = invitedRoom !== null;
+  const deadInvite = invited && preview.state === 'dead';
+  /**
+   * The office to step into, or null when there isn't one to step into. A
+   * dead invite is not a door: the screen already offers to start an office
+   * instead, and submitting the dead code would only be refused again.
+   */
+  const inviteTarget = deadInvite ? null : invitedRoom;
 
   useEffect(() => {
     if (!invitedRoom) return;
@@ -77,9 +86,24 @@ export function JoinScreen({
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (!name.trim() || connecting) return;
-    if (invited && invitedRoom) onJoin(invitedRoom, name.trim(), avatar);
-    else if (roomName.trim()) onCreate(roomName.trim(), name.trim(), avatar);
+    if (connecting) return;
+    const office = roomName.trim();
+    const who = name.trim();
+    // `required` turns an untouched field back at the browser, which is the
+    // better answer because it points at the field. What reaches here is a
+    // field holding nothing but spaces — it satisfies `required` and trims to
+    // empty, and used to fall out of the bottom of this function in silence.
+    if (!inviteTarget && !office) {
+      setFormError('Give the office a name — anything your team would recognise.');
+      return;
+    }
+    if (!who) {
+      setFormError('Your teammates need something to call you.');
+      return;
+    }
+    setFormError(null);
+    if (inviteTarget) onJoin(inviteTarget, who, avatar);
+    else onCreate(office, who, avatar);
   };
 
   const followPaste = () => {
@@ -118,8 +142,6 @@ export function JoinScreen({
     );
   }
 
-  const deadInvite = invited && preview.state === 'dead';
-
   return (
     <div className="join">
       <form className="join-card panel" onSubmit={submit}>
@@ -152,11 +174,15 @@ export function JoinScreen({
             <input
               className="input"
               value={roomName}
-              onChange={(e) => setRoomName(e.target.value)}
+              onChange={(e) => {
+                setRoomName(e.target.value);
+                setFormError(null);
+              }}
               placeholder="the lab"
               maxLength={32}
               autoComplete="off"
               spellCheck={false}
+              required
             />
           </label>
         ) : null}
@@ -166,11 +192,15 @@ export function JoinScreen({
           <input
             className="input"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              setName(e.target.value);
+              setFormError(null);
+            }}
             placeholder="what your teammates call you"
             maxLength={32}
             autoComplete="off"
             spellCheck={false}
+            required
             // biome-ignore lint/a11y/noAutofocus: the only empty field on a single-purpose screen
             autoFocus
           />
@@ -195,7 +225,12 @@ export function JoinScreen({
           </fieldset>
         </div>
 
-        {joinError ? (
+        {/* The form's own objection outranks the office's: it is about the
+            field under the cursor right now, and the older one described an
+            attempt that has already been superseded. */}
+        {formError ? (
+          <p className="join-error">{formError}</p>
+        ) : joinError ? (
           <p className="join-error">
             {joinError}
             {joinError.includes('already called') ? (
@@ -209,7 +244,7 @@ export function JoinScreen({
         ) : null}
 
         <button className="btn" type="submit" disabled={connecting}>
-          {connecting ? 'Stepping in…' : invited && !deadInvite ? 'Step in' : 'Create office'}
+          {connecting ? 'Stepping in…' : inviteTarget ? 'Step in' : 'Create office'}
         </button>
 
         {!invited || deadInvite ? (
