@@ -26,6 +26,22 @@ export const collectorSnapshotSchema = z.object({
     /** Seconds since last human input, when the platform can tell us. */
     idleSeconds: z.number().nonnegative().optional(),
   }),
+  /**
+   * Whether this pairing shares token numbers at all — `visibility.tokens`.
+   *
+   * Withholding is invisible in the sessions themselves: the fields are simply
+   * gone, and a brand-new session that has not produced a token yet looks
+   * identical. So the office could not tell "I would rather not say" from
+   * "nothing happened", and rendered the first as the second. Saying it once,
+   * on the envelope, is the only way to tell them apart — and it says strictly
+   * less than the numbers it stands in for.
+   *
+   * Additive and optional: `sloppers@0.1.x` never sends it, and a member on
+   * that version who hides tokens still reads as idle. That is a known
+   * shortfall of the old wire rather than a design choice — nothing on it
+   * carries the distinction — and it clears itself when they upgrade.
+   */
+  sharesTokens: z.boolean().optional(),
 });
 export type CollectorSnapshot = z.infer<typeof collectorSnapshotSchema>;
 

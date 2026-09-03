@@ -721,6 +721,21 @@ button {
   font-size: 12px;
 }
 
+/* Unranked by choice. Muted rather than absent: the row says a person is here
+   and not playing, which is a different fact from an empty line. It gets no
+   meter — there is nothing to draw — so the grid ends after three cells. */
+.lb-row-private {
+  grid-template-columns: 18px 1fr auto;
+}
+
+.lb-private {
+  color: var(--wire);
+  font-size: 11px;
+  font-style: italic;
+  border-bottom: 1px dotted var(--wire);
+  cursor: help;
+}
+
 /* ------------------------------------------------------------ member card */
 
 .member-card {
@@ -915,6 +930,19 @@ button {
 .member-today b {
   color: var(--crt);
   font-weight: 600;
+}
+
+/* A sentence, not a row of figures — it reads as the same kind of statement as
+   "No live agent sessions right now" rather than as a total of zero. */
+.member-today-private {
+  font-style: italic;
+  cursor: help;
+}
+
+/* The counts either side of the total carry an explanation apiece: one says
+   what a "session" is counted from, the other why the minutes are hedged. */
+.member-today span[title] {
+  cursor: help;
 }
 
 .member-empty {

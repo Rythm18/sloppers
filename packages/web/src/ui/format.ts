@@ -1,5 +1,5 @@
-import type { PresenceState, SessionSnapshot, TokenTotals } from '@sloppers/protocol';
-import { billedTokens, PRICING } from '@sloppers/protocol';
+import type { DailyStats, PresenceState, SessionSnapshot, TokenTotals } from '@sloppers/protocol';
+import { PRICING, processedTokens } from '@sloppers/protocol';
 
 /**
  * 1234 → "1.2k", 5_400_000 → "5.4M", 2_800_000_000 → "2.8B" —
@@ -25,8 +25,78 @@ function trim(n: number): string {
   return fixed.endsWith('.0') ? fixed.slice(0, -2) : fixed;
 }
 
+/**
+ * Every token that went through the agent, cache included — the one number
+ * the office competes on. See `processedTokens` for why it is not input +
+ * output.
+ */
 export function burned(tokens: TokenTotals): string {
-  return formatTokens(billedTokens(tokens));
+  return formatTokens(processedTokens(tokens));
+}
+
+/**
+ * How a member who withholds their numbers reads, everywhere a number would
+ * otherwise be.
+ *
+ * The point is that it is a *state*, not a quantity. `0 tok / 0 sessions /
+ * est. $0.00` is what the tables genuinely hold for them, and every one of
+ * those zeroes is an assertion nobody made — it turned "I would rather not
+ * say" into a claim of having done nothing, printed beside their own live
+ * sessions. Not competing is a choice a person is allowed to make in the room
+ * without it looking like laziness.
+ */
+export const TOKENS_PRIVATE = 'private';
+
+export const TOKENS_PRIVATE_TITLE =
+  'This teammate keeps their numbers to themselves — token sharing is off in their collector, so nothing about their day reaches the office. Not zero: unsaid.';
+
+/** The member card's own sentence for it, where there is room for one. */
+export const TOKENS_PRIVATE_LINE = 'Keeps their numbers to themselves.';
+
+/**
+ * What a day's session count may call itself.
+ *
+ * A 0.2 collector groups a conversation's forks, resumes and subagent runs
+ * into one lineage before reporting it, so its count really is conversations.
+ * Before that, every transcript *file* counted: 599 files for 139 conversations
+ * on the local corpus, and one production day read 373 — more sessions than
+ * the wire can carry at once, on a day nobody ran anything like that many. The
+ * older number is not corrected here (the files are all the server has), so it
+ * keeps the older word and explains itself on hover.
+ */
+export function sessionsLabel(stats: DailyStats, n: number): string {
+  const noun = stats.precision === 'measured' ? 'conversation' : 'session';
+  return n === 1 ? noun : `${noun}s`;
+}
+
+export const SESSIONS_COARSE_TITLE =
+  'Counted per transcript file: a fork, a resume or a subagent run each add one, so this reads higher than the number of conversations you actually had. Collectors from 0.2 group them.';
+
+export const SESSIONS_MEASURED_TITLE =
+  'Conversations: forks, resumes and subagent runs are folded into the conversation they came from.';
+
+export const MINUTES_COARSE_TITLE =
+  'Approximate: the office marks a minute whenever an agent looks busy, and an agent counts as busy for up to ten minutes after its last output. Closer to how long an agent was alive than to time at the keyboard. Collectors from 0.2 measure it per minute of real output.';
+
+export const MINUTES_MEASURED_TITLE =
+  'Minutes that actually contained agent output, measured on your own machine.';
+
+/**
+ * Active minutes, hedged unless they were actually measured.
+ *
+ * Two definitions have always shared this column. A 0.2 collector sets one bit
+ * per minute that genuinely contained output; before that the server marks a
+ * minute whenever any session reads `working`, and a session stays `working`
+ * for ten minutes after its last output — so a three-second reply lights about
+ * eleven minutes and one production day totalled 1,315 of them, 21.9 hours.
+ * The two render identically and always did. The `≈` is the smallest mark that
+ * stops the second from being read as the first.
+ */
+export function activeMinutes(stats: DailyStats): { prefix: string; title: string } {
+  if (stats.precision === 'measured') {
+    return { prefix: '', title: MINUTES_MEASURED_TITLE };
+  }
+  return { prefix: '≈', title: MINUTES_COARSE_TITLE };
 }
 
 /**

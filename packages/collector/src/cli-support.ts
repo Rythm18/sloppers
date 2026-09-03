@@ -1,4 +1,4 @@
-import { billedTokens, type SessionSnapshot, type Visibility } from '@sloppers/protocol';
+import { processedTokens, type SessionSnapshot, type Visibility } from '@sloppers/protocol';
 import pc from 'picocolors';
 import { type CollectorConfig, isCatchAll, type PairingConfig } from './config.js';
 import type { RoutableSession } from './core/types.js';
@@ -73,7 +73,12 @@ export function describeTargets(pairings: readonly PairingConfig[], chosen: numb
 }
 
 function describeSession(snapshot: SessionSnapshot): string {
-  const tokens = snapshot.tokens ? ` · ${billedTokens(snapshot.tokens).toLocaleString()} tok` : '';
+  // The same total the office puts on the board. `sloppers status` and the
+  // leaderboard describing one session with two different numbers is exactly
+  // the kind of seam somebody spends an evening trying to reconcile.
+  const tokens = snapshot.tokens
+    ? ` · ${processedTokens(snapshot.tokens).toLocaleString()} tok`
+    : '';
   const title = snapshot.title ? ` — ${snapshot.title}` : '';
   return `${pc.bold(snapshot.harness)} ${snapshot.state.padEnd(7)} ${snapshot.project ?? '?'}${title}${tokens}`;
 }

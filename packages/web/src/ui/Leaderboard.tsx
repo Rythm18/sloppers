@@ -1,5 +1,5 @@
 import type { LeaderboardRow } from '@sloppers/protocol';
-import { billedTokens } from '@sloppers/protocol';
+import { processedTokens } from '@sloppers/protocol';
 import { memo, useState } from 'react';
 import { useStore } from '../store.js';
 import {
@@ -8,6 +8,8 @@ import {
   costTitle,
   formatCostUsd,
   formatTokens,
+  TOKENS_PRIVATE,
+  TOKENS_PRIVATE_TITLE,
 } from './format.js';
 
 export type LeaderboardSort = 'tokens' | 'cost';
@@ -15,6 +17,19 @@ export type LeaderboardSort = 'tokens' | 'cost';
 /** Today's estimated spend, or null when some model in the day has no price. */
 function costOf(row: LeaderboardRow): number | null {
   return row.stats.estimatedCostUsd ?? null;
+}
+
+/**
+ * Whether this row is a person who has opted out of being counted.
+ *
+ * They used to be dropped by the activity filter below, alongside everyone who
+ * simply had not started yet — an omission indistinguishable from an absence,
+ * with nothing anywhere saying which it was. They are still not ranked, because
+ * we have no number to rank them by, but the board says so in its own margin
+ * instead of quietly closing over the gap.
+ */
+export function isPrivate(row: LeaderboardRow): boolean {
+  return row.stats.tokensShared === false;
 }
 
 /**
@@ -29,7 +44,7 @@ function costOf(row: LeaderboardRow): number | null {
  */
 export function sortRows(rows: LeaderboardRow[], sort: LeaderboardSort): LeaderboardRow[] {
   const byTokens = (a: LeaderboardRow, b: LeaderboardRow) =>
-    billedTokens(b.stats.tokens) - billedTokens(a.stats.tokens);
+    processedTokens(b.stats.tokens) - processedTokens(a.stats.tokens);
   if (sort === 'tokens') return [...rows].sort(byTokens);
   return [...rows].sort((a, b) => {
     const ca = costOf(a);
@@ -51,8 +66,11 @@ export const Leaderboard = memo(function Leaderboard() {
   const [sort, setSort] = useState<LeaderboardSort>('tokens');
   if (!open) return null;
 
+  const withheld = rows.filter(isPrivate);
   const shown = sortRows(
-    rows.filter((r) => billedTokens(r.stats.tokens) > 0 || r.stats.sessionsRun > 0),
+    rows.filter(
+      (r) => !isPrivate(r) && (processedTokens(r.stats.tokens) > 0 || r.stats.sessionsRun > 0),
+    ),
     sort,
   );
   // The meter tracks whatever the list is ranked by, so a sorted column always
@@ -60,7 +78,7 @@ export const Leaderboard = memo(function Leaderboard() {
   // the honest width for a number we don't have.
   const max = Math.max(
     1,
-    ...shown.map((r) => (sort === 'cost' ? (costOf(r) ?? 0) : billedTokens(r.stats.tokens))),
+    ...shown.map((r) => (sort === 'cost' ? (costOf(r) ?? 0) : processedTokens(r.stats.tokens))),
   );
 
   return (
@@ -91,12 +109,12 @@ export const Leaderboard = memo(function Leaderboard() {
           </button>
         </span>
       </div>
-      {shown.length === 0 ? (
+      {shown.length === 0 && withheld.length === 0 ? (
         <p className="lb-empty">No tokens burned yet today. The office is suspiciously quiet.</p>
       ) : (
         <div className="leaderboard-rows">
           {shown.map((row, i) => {
-            const total = billedTokens(row.stats.tokens);
+            const total = processedTokens(row.stats.tokens);
             const cost = costOf(row);
             const meter = sort === 'cost' ? (cost ?? 0) : total;
             return (
@@ -124,6 +142,19 @@ export const Leaderboard = memo(function Leaderboard() {
               </div>
             );
           })}
+          {/* Unranked by choice, and under the ranks rather than mixed into
+              them: a rank is a claim about a quantity, and there is no
+              quantity here to make one about. The dash keeps the column
+              aligned without inventing a position. */}
+          {withheld.map((row) => (
+            <div className="lb-row lb-row-private" key={row.memberId}>
+              <span className="rank">&ndash;</span>
+              <span className="who">{row.displayName}</span>
+              <span className="lb-private" title={TOKENS_PRIVATE_TITLE}>
+                {TOKENS_PRIVATE}
+              </span>
+            </div>
+          ))}
         </div>
       )}
     </aside>

@@ -48,7 +48,7 @@ function dayCost(buckets: [string, TokenTotals][]): number | null {
 describe('pricing', () => {
   it('is stamped with the date it was sourced', () => {
     expect(PRICING.asOf).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(PRICING.asOf).toBe('2026-08-20');
+    expect(PRICING.asOf).toBe('2026-09-04');
   });
 
   it('prices a known model and refuses to guess an unknown one', () => {
@@ -90,10 +90,17 @@ describe('pricing', () => {
     // 1.25x input to write, 0.1x to read. Pinning the ratios catches a
     // transcription slip in any row without restating all eight tables, and
     // comparing whole objects names the offending model on failure.
+    //
+    // Fable 5.1 is the published exception: Anthropic prices its cache hits at
+    // 0.025x base input, a quarter of everyone else's. It is listed here by
+    // name rather than skipped, so that the exception is something the table
+    // has to keep earning — a future row quietly adopting 0.025x, or this one
+    // silently reverting to 0.1x, fails.
+    const readRatio: Record<string, number> = { 'claude-fable-5-1': 0.025 };
     const ratios = ratioTable((m) => m.startsWith('claude-'));
     expect(Object.keys(ratios).length).toBeGreaterThan(0);
     for (const [model, ratio] of Object.entries(ratios)) {
-      expect({ model, ...ratio }).toEqual({ model, write: 1.25, read: 0.1 });
+      expect({ model, ...ratio }).toEqual({ model, write: 1.25, read: readRatio[model] ?? 0.1 });
     }
   });
 
@@ -194,7 +201,7 @@ describe('pricing', () => {
         ['claude-sonnet-5', only('input', M)],
         ['gpt-5.6-sol', only('input', M)],
       ]),
-    ).toBe(5 + 2 + 5);
+    ).toBe(5 + 2 + 4);
   });
 
   it('surfaces null rather than a partial total when one model is unpriced', () => {

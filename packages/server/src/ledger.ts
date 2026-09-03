@@ -8,6 +8,7 @@ import {
   estimateCostUsd,
   MINUTES_PER_DAY,
   type SessionSnapshot,
+  type StatsPrecision,
   type TokenTotals,
   type UsageBucket,
 } from '@sloppers/protocol';
@@ -316,8 +317,27 @@ function prepare(db: Db) {
       HAVING SUM(input) > 0 OR SUM(output) > 0
           OR SUM(cache_read) > 0 OR SUM(cache_write) > 0
     `),
+    /**
+     * How many sessions ran on a day, and — from the same rows, in the same
+     * pass — which accounting wrote them.
+     *
+     * `model = FLAT_WATERMARK_MODEL` is the pre-0.2 flat path and nothing
+     * else can produce it (`usageBucketSchema.model` is `min(1)`, so the empty
+     * string cannot be forged over the wire). That makes the sentinel a
+     * reliable version mark on every row, which is the only way the server can
+     * tell what its own `sessionsRun` and `activeMinutes` mean: a flat row
+     * means a collector that keys sessions per transcript file and leaves
+     * minutes to the server's coarse mark, a bucketed row means one that
+     * groups rollouts into conversations and reports measured bitmaps.
+     *
+     * Read-only, and deliberately: it reports on the accounting rather than
+     * changing it.
+     */
     daySessions: db.prepare(`
-      SELECT COUNT(DISTINCT session_id) AS n FROM usage_watermarks
+      SELECT COUNT(DISTINCT session_id) AS n,
+             SUM(CASE WHEN model = ? THEN 1 ELSE 0 END) AS flat,
+             SUM(CASE WHEN model <> ? THEN 1 ELSE 0 END) AS bucketed
+      FROM usage_watermarks
       WHERE member_id = ? AND day = ?
     `),
   };
@@ -760,13 +780,40 @@ export class TokenLedger {
     // Retired rows are included deliberately: a session whose attribution was
     // re-based still ran on the days its old watermarks covered, and those are
     // not always days the new scheme reports.
-    const sessions = this.q.daySessions.get(memberIdValue, day) as { n: number };
+    const sessions = this.q.daySessions.get(
+      FLAT_WATERMARK_MODEL,
+      FLAT_WATERMARK_MODEL,
+      memberIdValue,
+      day,
+    ) as { n: number; flat: number | null; bucketed: number | null };
     return {
       tokens,
       sessionsRun: sessions.n,
       activeMinutes: countMinutes(this.minuteBitmap(memberIdValue, day)),
       byModel,
       estimatedCostUsd,
+      precision: precisionOf(sessions.flat ?? 0, sessions.bucketed ?? 0),
     };
   }
+}
+
+/**
+ * What a day's session count and minute total can honestly claim, from the
+ * shape of the watermark rows underneath them.
+ *
+ * Only an unmixed bucketed day earns `measured`. A day with even one flat row
+ * has a pre-0.2 collector in it, and both of the numbers this governs are
+ * *unions* over the day — the coarse marks are already OR-ed into the same
+ * bitmap and the per-file ids are already in the same distinct count — so the
+ * inflated half cannot be separated back out. The mixed day is the upgrade
+ * day, and calling it coarse is right: it genuinely contains coarse data.
+ *
+ * No rows at all yields `undefined` rather than a guess. That covers a day
+ * nobody worked, where every number is zero and the question is empty, and a
+ * member withholding their numbers, where `tokensShared` is the field that
+ * matters and this one has nothing to say.
+ */
+function precisionOf(flat: number, bucketed: number): StatsPrecision | undefined {
+  if (flat === 0 && bucketed === 0) return undefined;
+  return flat === 0 ? 'measured' : 'coarse';
 }

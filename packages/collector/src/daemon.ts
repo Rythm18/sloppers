@@ -252,15 +252,26 @@ export function buildPairingSnapshot(
   // Paused means paused: no sessions AND no machine telemetry — idle
   // seconds are at-the-keyboard presence data. Per pairing, so pausing one
   // workspace leaves the others sharing.
+  // `sharesTokens` rides even a paused snapshot. It is a statement about the
+  // owner's settings, not about this payload, and the office keeps showing a
+  // paused member's card — so dropping it here would make un-pausing the only
+  // way to stop reading as an affirmative zero.
+  const sharesTokens = pairing.visibility.tokens;
   if (pairing.paused) {
-    return { snapshot: { type: 'snapshot', sessions: [], machine: {} }, included: new Map() };
+    return {
+      snapshot: { type: 'snapshot', sessions: [], machine: {}, sharesTokens },
+      included: new Map(),
+    };
   }
   const { sessions, included } = buildDirtySnapshot(
     routed.map((session) => session.snapshot),
     pairing.visibility,
     minutes,
   );
-  return { snapshot: { type: 'snapshot', sessions, machine: { ...machine } }, included };
+  return {
+    snapshot: { type: 'snapshot', sessions, machine: { ...machine }, sharesTokens },
+    included,
+  };
 }
 
 /** Why one pairing's client gave up; see `standDownDecision`. */

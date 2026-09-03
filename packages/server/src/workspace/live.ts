@@ -1,11 +1,12 @@
 import {
-  billedTokens,
   type CollectorSnapshot,
+  type DailyStats,
   type LeaderboardRow,
   type MemberRole,
   type MemberView,
   type Position,
   type PresenceState,
+  processedTokens,
   type ServerToWeb,
   type SessionSnapshot,
   type WebRemoved,
@@ -63,6 +64,17 @@ interface MemberRuntime {
    * and its shape; what it claims is now something the room can actually see.
    */
   sharing: boolean;
+  /**
+   * What this member's collector last said about `visibility.tokens`.
+   *
+   * True until a collector says otherwise, because `sloppers@0.1.x` never says
+   * anything at all and the room must not accuse a silent machine of
+   * withholding. It lives on the member rather than on the collector link so
+   * that a laptop closing does not turn "keeps their numbers to themselves"
+   * back into "$0.00" — the setting is a fact about the person, and the last
+   * thing we were told about it stays true until we are told something else.
+   */
+  sharesTokens: boolean;
   position: Position;
   webClients: Set<WebClient>;
   collector: CollectorLink | null;
@@ -131,6 +143,7 @@ export class Room {
         // what made a restarted server greet everyone who had ever paired
         // with "Sharing on", collectors or no collectors.
         sharing: false,
+        sharesTokens: true,
         position: {
           x: SPAWN.x + (Math.random() - 0.5) * 96,
           y: SPAWN.y + (Math.random() - 0.5) * 48,
@@ -255,6 +268,9 @@ export class Room {
     runtime.collector.lastSeenAt = now;
     runtime.collector.idleSeconds = snapshot.machine.idleSeconds;
     runtime.collector.sessions = snapshot.sessions;
+    // Absent means "0.1.x, which cannot tell us", not "off": treating silence
+    // as withholding would relabel every member who has not upgraded.
+    runtime.sharesTokens = snapshot.sharesTokens ?? true;
     if (this.ledger.ingest(memberId, snapshot.sessions, now)) {
       this.scheduleLeaderboard();
     }
@@ -503,9 +519,24 @@ export class Room {
       presence: this.presenceOf(runtime, now),
       position: runtime.position,
       sessions: this.liveSessions(runtime, now),
-      today: this.ledger.todayFor(memberId, now),
+      today: this.statsFor(runtime, now),
       sharing: runtime.sharing,
     };
+  }
+
+  /**
+   * A member's day as the room reports it: the ledger's arithmetic, plus the
+   * one thing the ledger cannot know — whether these numbers are all of them.
+   *
+   * The ledger sees a withholding member as a member who did nothing, because
+   * that is exactly what reaches it: `applyVisibility` drops `tokens`, `usage`
+   * and `activeMinutes` in the collector, so no row is ever written. Every
+   * number below is therefore a truthful zero about an empty table and a false
+   * zero about a person, and only the snapshot envelope can say which.
+   */
+  private statsFor(runtime: MemberRuntime, now: number): DailyStats {
+    const stats = this.ledger.todayFor(runtime.id, now);
+    return runtime.sharesTokens ? stats : { ...stats, tokensShared: false };
   }
 
   private liveSessions(runtime: MemberRuntime, now: number): SessionSnapshot[] {
@@ -530,7 +561,7 @@ export class Room {
     if (!runtime) return;
     const presence = this.presenceOf(runtime, now);
     const sessions = this.liveSessions(runtime, now);
-    const today = this.ledger.todayFor(memberId, now);
+    const today = this.statsFor(runtime, now);
     const key = JSON.stringify([presence, sessions, today]);
     if (key === runtime.lastPresenceKey) return;
     runtime.lastPresenceKey = key;
@@ -546,9 +577,13 @@ export class Room {
       memberId: runtime.id,
       displayName: runtime.displayName,
       avatar: runtime.avatar,
-      stats: this.ledger.todayFor(runtime.id, now),
+      stats: this.statsFor(runtime, now),
     }));
-    rows.sort((a, b) => billedTokens(b.stats.tokens) - billedTokens(a.stats.tokens));
+    // Total tokens processed, cache included — the board's metric. Ranking on
+    // input + output ranked cache *misses*, which is a property of the harness
+    // rather than of the work: it scored Claude Code at output alone while
+    // Codex banked 8.35x the same ratio.
+    rows.sort((a, b) => processedTokens(b.stats.tokens) - processedTokens(a.stats.tokens));
     return rows;
   }
 

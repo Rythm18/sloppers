@@ -87,7 +87,7 @@ describe('MemberCard', () => {
     render(<MemberCard />);
 
     expect(modelRows()).toEqual([
-      ['gpt-5.6-sol', '1M', 'est.$5.00'],
+      ['gpt-5.6-sol', '1M', 'est.$4.00'],
       ['codex-auto-review', '1M', 'no est.'],
     ]);
   });
