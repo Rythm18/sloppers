@@ -145,9 +145,6 @@ export function formatCostUsd(usd: number): string {
  */
 export const COST_FLOOR_MARK = '≥';
 
-/** Below this, a floor rounds to nothing and stops being worth printing. */
-const ONE_CENT = 0.005;
-
 /**
  * The sentence a floor needs, which is not the one an estimate needs: what the
  * number leaves out, and that nobody can say how much that is.
@@ -208,16 +205,30 @@ export function modelCostView(usd: number | null): CostView {
  * the number the server ranked is the number the browser prints. `byModel` is
  * used only to name the models in the tooltip.
  */
+/**
+ * Truncate a floor to the precision `formatCostUsd` will print it at, so the
+ * nearest-rounding inside never lifts the printed number above the bound:
+ * cents below $10 (the `<$0.01` gate has already run), whole dollars above.
+ */
+function floorForPrint(usd: number): number {
+  return usd < 10 ? Math.floor(usd * 100) / 100 : Math.floor(usd);
+}
+
 export function dayCostView(stats: DailyStats): CostView {
   const exact = stats.estimatedCostUsd ?? null;
   if (exact !== null) return modelCostView(exact);
   const floor = stats.estimatedCostFloorUsd ?? 0;
-  // `!(>=)` rather than `<`: a NaN off a malformed wire falls to `no est.`
-  // instead of printing "≥$0.00".
-  if (!(floor >= ONE_CENT)) return modelCostView(null);
+  // Rounded DOWN before printing. `formatCostUsd` rounds to nearest, which
+  // is right for an estimate and wrong under a `≥`: "at least $13" on a
+  // $12.60 floor is a false claim half the time. A bound only ever
+  // understates itself — and the gate below runs on the truncated value, so
+  // a $0.007 floor reads `no est.` rather than `≥$0.00`. `!(>=)` rather than
+  // `<`: a NaN off a malformed wire falls to `no est.` too.
+  const printable = floorForPrint(floor);
+  if (!(printable >= 0.01)) return modelCostView(null);
   return {
     kind: 'floor',
-    text: `${COST_FLOOR_MARK}${formatCostUsd(floor)}`,
+    text: `${COST_FLOOR_MARK}${formatCostUsd(printable)}`,
     title: costFloorTitle(estimateCostFloorUsd(stats.byModel ?? {}).unpriced),
     usd: floor,
   };

@@ -180,6 +180,21 @@ describe('cost floors', () => {
     expect(view).toEqual({ kind: 'exact', text: '$5.00', title: costTitle(), usd: 5 });
   });
 
+  it('rounds a floor down, because "at least" must not overstate itself', () => {
+    // Nearest-rounding would print ≥$13 on a $12.60 floor — a false claim.
+    // An estimate may round either way; a bound only ever understates.
+    expect(dayCostView(day({ estimatedCostUsd: null, estimatedCostFloorUsd: 12.6 })).text).toBe(
+      '≥$12',
+    );
+    expect(dayCostView(day({ estimatedCostUsd: null, estimatedCostFloorUsd: 0.126 })).text).toBe(
+      '≥$0.12',
+    );
+    // And a floor that only *rounds up* to a cent has nothing true to print.
+    expect(dayCostView(day({ estimatedCostUsd: null, estimatedCostFloorUsd: 0.007 })).kind).toBe(
+      'unknown',
+    );
+  });
+
   it('still says no est. when nothing in the day could be priced', () => {
     // A floor of $0.00 is not a small amount of information; it is none, and
     // printed as money it reads as free.
