@@ -36,6 +36,7 @@ vi.mock('./net/socket.js', () => ({
   mintPairingCode: async () => ({ pairingCode: 'K4X-P2Q', expiresAt: Date.now() + 600_000 }),
   fetchRoomPreview: async () => null,
   sendAdmin: () => {},
+  requestHistory: () => {},
 }));
 
 const world: ServerToWeb = {

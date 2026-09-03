@@ -144,6 +144,11 @@ export class OfficeSocket {
     this.send({ type: 'admin', op });
   }
 
+  /** Ask the office for its recent days. Answered once, to this socket. */
+  sendHistory(days?: number): void {
+    this.send(days === undefined ? { type: 'history' } : { type: 'history', days });
+  }
+
   private connect(): void {
     if (this.closed) return;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -393,4 +398,25 @@ export async function mintPairingCode(roomCode: string): Promise<MintResult> {
  */
 export function sendAdmin(op: AdminOp): void {
   activeSocket?.sendAdmin(op);
+}
+
+/**
+ * Ask the office for its recent days, at most once.
+ *
+ * Two unrelated bits of UI want the same answer — the board's day switch and a
+ * member card's week — and both call this whenever they are shown. The guards
+ * are what make that safe: an answer already held is not asked for again, and
+ * a request already out is not doubled. History does not change while you are
+ * looking at it, so one per connection is the right number; a fresh `world`
+ * message clears the answer and the next view to open fetches again.
+ *
+ * A refusal releases `historyPending` without delivering an answer (see the
+ * store's error branch), so the very next click retries rather than sitting on
+ * a spinner. That is the only retry there is, and it is a human one.
+ */
+export function requestHistory(days?: number): void {
+  const state = useStore.getState();
+  if (state.history || state.historyPending || !activeSocket) return;
+  state.setHistoryPending(true);
+  activeSocket.sendHistory(days);
 }

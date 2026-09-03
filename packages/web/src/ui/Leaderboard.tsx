@@ -1,11 +1,13 @@
-import type { LeaderboardRow } from '@sloppers/protocol';
-import { processedTokens } from '@sloppers/protocol';
-import { memo, useState } from 'react';
+import type { LeaderboardRow, WebHistoryResult } from '@sloppers/protocol';
+import { emptyTokens, processedTokens } from '@sloppers/protocol';
+import { memo, useEffect, useState } from 'react';
+import { requestHistory } from '../net/socket.js';
 import { useStore } from '../store.js';
 import {
   COST_FLOOR_RANK_NOTE,
   type CostView,
   dayCostView,
+  dayLabel,
   formatTokens,
   TOKENS_PRIVATE,
   TOKENS_PRIVATE_TITLE,
@@ -73,15 +75,68 @@ export function sortRows(rows: LeaderboardRow[], sort: LeaderboardSort): Leaderb
 }
 
 /**
- * Today's burn, per teammate, resetting at local midnight. Friendly
- * competition is the point: rank one gets the lamp-gold rank number.
+ * A past day's board, built from the office's history answer.
+ *
+ * The same `LeaderboardRow` shape today's board is handed, so one day ranks,
+ * meters, prices and hedges exactly like another — the sort, the cost floors
+ * and the withheld margin are all the code that was already here. A member the
+ * history covers but that day does not is a real zero and stays in the list;
+ * the activity filter below is what decides whether a zero is worth a row, and
+ * it decides that identically for every day.
+ *
+ * A withholding member arrives with no days at all, so their row is
+ * synthesized from the flag alone: no numbers to show, and `isPrivate` puts
+ * them in the margin where the board says so out loud.
+ */
+export function historyRows(history: WebHistoryResult, offset: number): LeaderboardRow[] {
+  const day = history.days[offset];
+  if (day === undefined) return [];
+  return history.members.map((member) => ({
+    memberId: member.memberId,
+    displayName: member.displayName,
+    avatar: member.avatar,
+    stats: member.days.find((d) => d.day === day)?.stats ?? {
+      tokens: emptyTokens(),
+      sessionsRun: 0,
+      activeMinutes: 0,
+      ...(member.tokensShared === false ? { tokensShared: false } : {}),
+    },
+  }));
+}
+
+/**
+ * Today's burn, per teammate, resetting at local midnight — and, since the
+ * office started keeping days, yesterday's alongside it. Friendly competition
+ * is the point: rank one gets the lamp-gold rank number.
  */
 export const Leaderboard = memo(function Leaderboard() {
-  const rows = useStore((s) => s.leaderboard);
+  const today = useStore((s) => s.leaderboard);
   const open = useStore((s) => s.leaderboardOpen);
+  const history = useStore((s) => s.history);
+  const historyPending = useStore((s) => s.historyPending);
+  const boardDay = useStore((s) => s.boardDay);
+  const setBoardDay = useStore((s) => s.setBoardDay);
   const [sort, setSort] = useState<LeaderboardSort>('tokens');
+
+  // Asked for when the board opens, not when somebody reaches for yesterday:
+  // the answer is one message, it is cached for the connection, and having it
+  // in hand is the difference between a switch that flips and a switch that
+  // waits. `requestHistory` is idempotent, so this costs one request however
+  // many times the board is shown and hidden.
+  useEffect(() => {
+    if (open) requestHistory();
+  }, [open]);
+
   if (!open) return null;
 
+  // Today comes from the live board — it is still moving, and the history
+  // answer is a snapshot from whenever it was fetched. Every other day is
+  // finished, so a snapshot is all there is to have.
+  const rows = boardDay === 0 ? today : history ? historyRows(history, boardDay) : [];
+  // The date behind the word "Yesterday", whichever day is on screen — the
+  // switch has to be able to say what it would take you to, not what you are
+  // already looking at.
+  const yesterdayKey = history?.days[1];
   const withheld = rows.filter(isPrivate);
   const shown = sortRows(
     rows.filter(
@@ -98,9 +153,11 @@ export const Leaderboard = memo(function Leaderboard() {
   );
 
   return (
-    <aside className="leaderboard panel" aria-label="today's token burn">
+    <aside className="leaderboard panel" aria-label="the office's token burn">
       <div className="leaderboard-head">
-        <span className="panel-title">Today&rsquo;s burn</span>
+        {/* The title says which day, so the switch below never has to be read
+            to know what is on screen. */}
+        <span className="panel-title">{boardDay === 0 ? 'Today' : 'Yesterday'}&rsquo;s burn</span>
         {/* Each button carries its own full name rather than leaning on a
             group label: "tok" and "est. $" fit the panel but say nothing on
             their own when read aloud. */}
@@ -125,8 +182,41 @@ export const Leaderboard = memo(function Leaderboard() {
           </button>
         </span>
       </div>
-      {shown.length === 0 && withheld.length === 0 ? (
-        <p className="lb-empty">No tokens burned yet today. The office is suspiciously quiet.</p>
+      {/* Two days, named, and no date picker. Yesterday is the one day anybody
+          actually wants back — the day whose numbers were on this board when
+          they closed the tab — and every further day is on the member cards,
+          where a week has room to be a shape rather than a menu. */}
+      <div className="lb-days">
+        <button
+          type="button"
+          className="lb-day-btn"
+          aria-pressed={boardDay === 0}
+          onClick={() => setBoardDay(0)}
+        >
+          Today
+        </button>
+        <button
+          type="button"
+          className="lb-day-btn"
+          aria-pressed={boardDay === 1}
+          title={yesterdayKey ? dayLabel(yesterdayKey) : undefined}
+          onClick={() => setBoardDay(1)}
+        >
+          Yesterday
+        </button>
+      </div>
+      {boardDay !== 0 && !history ? (
+        <p className="lb-empty">
+          {historyPending
+            ? 'Fetching yesterday…'
+            : 'Could not reach yesterday just now — try the switch again.'}
+        </p>
+      ) : shown.length === 0 && withheld.length === 0 ? (
+        <p className="lb-empty">
+          {boardDay === 0
+            ? 'No tokens burned yet today. The office is suspiciously quiet.'
+            : 'Nobody burned anything yesterday. A day off is a day off.'}
+        </p>
       ) : (
         <div className="leaderboard-rows">
           {shown.map((row, i) => {

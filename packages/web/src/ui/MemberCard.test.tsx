@@ -58,6 +58,48 @@ function todayLine(): string {
   return document.querySelector('.member-today')?.textContent ?? '';
 }
 
+/**
+ * Seven day keys, newest first, exactly as the office serves them. Anchored on
+ * a Thursday so the initials the strip prints are checkable by eye.
+ */
+const WEEK_DAYS = [
+  '2026-09-03',
+  '2026-09-02',
+  '2026-09-01',
+  '2026-08-31',
+  '2026-08-30',
+  '2026-08-29',
+  '2026-08-28',
+];
+
+/**
+ * A history answer for this one member, `totals` given newest first — the
+ * order the wire uses. The strip reverses it, so `totals[0]` is today and
+ * lands in the *last* cell.
+ */
+function week(totals: number[]): ServerToWeb {
+  return {
+    type: 'history',
+    days: WEEK_DAYS,
+    members: [
+      {
+        memberId: 'me',
+        displayName: 'ridham',
+        avatar: 'pixel',
+        days: WEEK_DAYS.map((day, i) => ({
+          day,
+          stats: {
+            tokens: tok(totals[i] ?? 0),
+            sessionsRun: (totals[i] ?? 0) > 0 ? 1 : 0,
+            activeMinutes: 0,
+            estimatedCostUsd: 0,
+          },
+        })),
+      },
+    ],
+  };
+}
+
 /** The per-model list, as [model, tokens, cost] triples. */
 function modelRows(): string[][] {
   return [...document.querySelectorAll('.model-row')].map((r) =>
@@ -413,5 +455,95 @@ describe('MemberCard', () => {
     expect(todayLine()).toContain('0 tok');
     expect(todayLine()).toContain('0 sessions');
     expect(todayLine()).toContain('est.$0.00');
+  });
+
+  // ------------------------------------------------------------ the week
+
+  it('draws seven days with today at the lit end of them', () => {
+    seed({ tokens: tok(400), sessionsRun: 1, activeMinutes: 5 });
+    apply(week([400, 0, 100, 200, 0, 50, 800]));
+    render(<MemberCard />);
+
+    const cells = [...document.querySelectorAll('.week-day')];
+    expect(cells).toHaveLength(7);
+    // Oldest on the left, today on the right, and only today is lit.
+    expect(cells.filter((c) => c.className.includes('week-day-now'))).toHaveLength(1);
+    expect(cells[6]?.className).toContain('week-day-now');
+    expect([...document.querySelectorAll('.week-initial')].map((n) => n.textContent)).toEqual([
+      'F',
+      'S',
+      'S',
+      'M',
+      'T',
+      'W',
+      'T',
+    ]);
+  });
+
+  it('keeps a rest day’s cell and draws it as nothing', () => {
+    // Zero is a value in a rhythm. Dropping the day would slide every later
+    // bar one place along and turn somebody's day off into a working one.
+    seed({ tokens: tok(400), sessionsRun: 1, activeMinutes: 5 });
+    apply(week([400, 0, 0, 0, 0, 0, 800]));
+    render(<MemberCard />);
+
+    const heights = [...document.querySelectorAll('.week-track > i')].map(
+      (n) => (n as HTMLElement).style.height,
+    );
+    expect(heights).toHaveLength(7);
+    expect(heights.slice(1, 6)).toEqual(['0%', '0%', '0%', '0%', '0%']);
+    // The heaviest day fills the track; a smaller real day keeps visible ink
+    // rather than rounding away to look like a rest day.
+    expect(heights[0]).toBe('100%');
+    expect(heights[6]).toBe('50%');
+  });
+
+  it('gives a day too small to scale two pixels rather than none', () => {
+    seed({ tokens: tok(1), sessionsRun: 1, activeMinutes: 1 });
+    // A single token today against a million a week ago: 0.0001% of the track,
+    // which rounds to nothing and reads as a day nobody worked.
+    apply(week([1, 0, 0, 0, 0, 0, 1_000_000]));
+    render(<MemberCard />);
+    const heights = [...document.querySelectorAll('.week-track > i')].map(
+      (n) => (n as HTMLElement).style.height,
+    );
+    expect(heights[6]).toBe('7%');
+    expect(heights[0]).toBe('100%');
+  });
+
+  it('says which day each bar is, and what it cost, on hover', () => {
+    seed({ tokens: tok(400), sessionsRun: 1, activeMinutes: 5 });
+    apply(week([400, 0, 0, 0, 0, 0, 0]));
+    render(<MemberCard />);
+
+    const titles = [...document.querySelectorAll('.week-day')].map((n) => n.getAttribute('title'));
+    // The initial is ambiguous by design — two Ts in a week — so the hover has
+    // to be unambiguous about which day it is.
+    expect(titles[6]).toBe('Thu 3 Sep — 400 tok · 1 session · $0.00');
+    // And a day off says so in words rather than reporting `$0.00`, which
+    // reads as a claim about spending rather than a day nobody worked.
+    expect(titles[0]).toBe('Fri 28 Aug — nothing burned');
+  });
+
+  it('shows a withholding member no week at all', () => {
+    // Their current choice governs their past: the office serves them no days,
+    // so there is nothing to draw and nothing to apologise for.
+    seed({ tokens: tok(0), sessionsRun: 0, activeMinutes: 0, tokensShared: false }, LIVE_SESSION);
+    apply({
+      type: 'history',
+      days: WEEK_DAYS,
+      members: [
+        { memberId: 'me', displayName: 'ridham', avatar: 'pixel', days: [], tokensShared: false },
+      ],
+    });
+    render(<MemberCard />);
+    expect(document.querySelector('.week-strip')).toBeNull();
+    expect(todayLine()).toContain('Keeps their numbers to themselves');
+  });
+
+  it('draws nothing until the office has answered', () => {
+    seed({ tokens: tok(400), sessionsRun: 1, activeMinutes: 5 });
+    render(<MemberCard />);
+    expect(document.querySelector('.week-strip')).toBeNull();
   });
 });

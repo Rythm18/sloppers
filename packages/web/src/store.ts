@@ -7,6 +7,7 @@ import type {
   ServerToWeb,
   WebDeviceLink,
   WebError,
+  WebHistoryResult,
   WebRemoved,
   WorkspaceSettings,
 } from '@sloppers/protocol';
@@ -41,6 +42,26 @@ const initialState = {
    * has not asked for the board.
    */
   leaderboardOpen: !isStackedLayout(),
+  /**
+   * The office's recent days, as the server served them — one request per
+   * connection, kept for the life of it.
+   *
+   * Held whole rather than sliced per view because one answer feeds both
+   * readers: the board's day switch takes one day across every member, the
+   * member card's strip takes every day of one member. Fetching those
+   * separately would be two requests for data that arrives in one, and two
+   * chances for them to disagree about the same day.
+   */
+  history: null as WebHistoryResult | null,
+  /** A history request is out and unanswered. Keeps a click from becoming a flood. */
+  historyPending: false,
+  /**
+   * Which day the board is showing: 0 today, 1 yesterday — an index into
+   * `history.days`, not a date this browser worked out for itself. The days
+   * are cut on the server's clock, and a client doing its own arithmetic is
+   * exactly how a panel ends up with two definitions of today in it.
+   */
+  boardDay: 0,
   joinError: null as string | null,
   settings: null as WorkspaceSettings | null,
   myRole: null as MemberRole | null,
@@ -78,6 +99,8 @@ interface SloppersStore extends State {
   setFocused(id: string | null): void;
   setShareOpen(open: boolean): void;
   setLeaderboardOpen(open: boolean): void;
+  setBoardDay(offset: number): void;
+  setHistoryPending(pending: boolean): void;
   setJoinError(error: string | null): void;
   setSettingsOpen(open: boolean): void;
   setAdminError(message: string | null): void;
@@ -113,6 +136,8 @@ export const useStore = create<SloppersStore>((set) => ({
   setFocused: (focusedId) => set({ focusedId }),
   setShareOpen: (shareOpen) => set({ shareOpen }),
   setLeaderboardOpen: (leaderboardOpen) => set({ leaderboardOpen }),
+  setBoardDay: (boardDay) => set({ boardDay }),
+  setHistoryPending: (historyPending) => set({ historyPending }),
   setJoinError: (joinError) => set({ joinError }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   setAdminError: (adminError) => set({ adminError }),
@@ -142,6 +167,13 @@ export const useStore = create<SloppersStore>((set) => ({
           knocking: false,
           doorAnswerable: null,
           removed: null,
+          // Dropped rather than carried across. A world message is a fresh
+          // connection, and the office may well have been left open past
+          // midnight — in which case every day key in the old answer is off by
+          // one and "yesterday" would be labelling the day before it.
+          history: null,
+          historyPending: false,
+          boardDay: 0,
         });
         break;
       }
@@ -158,7 +190,17 @@ export const useStore = create<SloppersStore>((set) => ({
         set((s) => {
           const { [msg.memberId]: gone, ...rest } = s.members;
           void gone;
-          return { members: rest };
+          // Out of the history too. The office's own answer already leaves
+          // departed members out, but this browser is holding one from before
+          // they left — and a board that ranks somebody the room can no longer
+          // show is a row nobody can click.
+          const history = s.history
+            ? {
+                ...s.history,
+                members: s.history.members.filter((m) => m.memberId !== msg.memberId),
+              }
+            : null;
+          return { members: rest, history };
         });
         break;
       case 'presence':
@@ -180,6 +222,9 @@ export const useStore = create<SloppersStore>((set) => ({
         break;
       case 'leaderboard':
         set({ leaderboard: msg.rows });
+        break;
+      case 'history':
+        set({ history: msg, historyPending: false });
         break;
       case 'knocking':
         // Waiting on an owner/moderator decision at a knock-mode door. Sent
@@ -209,9 +254,9 @@ export const useStore = create<SloppersStore>((set) => ({
         break;
       case 'error':
         set((s) => {
-          // Inside the office, on an open connection, the only things this
-          // browser sends are moves, presence, and admin ops — and the first
-          // two are never answered. So an error arriving here is the office
+          // Inside the office, on an open connection, this browser sends
+          // moves, presence, admin ops and history requests — and the first two
+          // are never answered. So an error arriving here is the office
           // refusing something somebody just clicked, and it belongs on that
           // screen rather than nowhere. Held as the message alone: the wire
           // says why, not what it is about, and the panel is what knows which
@@ -219,7 +264,15 @@ export const useStore = create<SloppersStore>((set) => ({
           // refused arrives while `phase` still says 'world', and reading it
           // as a refused click would leave somebody staring at an office they
           // are no longer in.
-          if (s.phase === 'world' && s.connection === 'open') return { adminError: msg.message };
+          //
+          // The wire cannot say which of the two answerable messages this is
+          // about, so an outstanding history request is released either way.
+          // Releasing one that was in fact fine costs nothing — the answer
+          // still arrives and still lands — while holding one that was refused
+          // leaves "Yesterday" reading "loading…" until the tab is reloaded.
+          if (s.phase === 'world' && s.connection === 'open') {
+            return { adminError: msg.message, historyPending: false };
+          }
           // Otherwise the door is answering: a join it will not take, a knock
           // somebody said no to, or a resume it no longer honours. Every code
           // that can arrive here ends the attempt, so rather than listing the

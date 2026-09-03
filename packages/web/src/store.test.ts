@@ -297,6 +297,59 @@ describe('store', () => {
     expect(state.settingsOpen).toBe(false);
     expect(state.adminError).toBeNull();
   });
+
+  const history = {
+    type: 'history' as const,
+    days: ['2026-09-04', '2026-09-03'],
+    members: [
+      {
+        memberId: 'm1',
+        displayName: 'ridham',
+        avatar: 'pixel',
+        days: [
+          {
+            day: '2026-09-04',
+            stats: {
+              tokens: { input: 500, output: 0, cacheRead: 0, cacheWrite: 0 },
+              sessionsRun: 1,
+              activeMinutes: 3,
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  it('keeps the office history it was handed', () => {
+    useStore.getState().applyServer(history);
+    expect(useStore.getState().history?.days).toEqual(['2026-09-04', '2026-09-03']);
+    expect(useStore.getState().historyPending).toBe(false);
+  });
+
+  it('drops history on a fresh world, which may be a fresh day', () => {
+    // A tab left open past midnight resumes into an office whose "today" has
+    // moved. Every key in the old answer is off by one, and carrying it would
+    // put yesterday's label on the day before it.
+    useStore.getState().applyServer(history);
+    useStore.getState().setBoardDay(1);
+    useStore.getState().applyServer(world as never);
+
+    expect(useStore.getState().history).toBeNull();
+    expect(useStore.getState().boardDay).toBe(0);
+  });
+
+  it('releases a waiting history request when the office refuses something', () => {
+    // The wire cannot say which answerable message an error is about, so a
+    // pending request is released either way — the alternative is a board
+    // reading "fetching…" until the tab is reloaded.
+    useStore.getState().applyServer(world as never);
+    useStore.getState().setConnection('open');
+    useStore.getState().setHistoryPending(true);
+    useStore.getState().applyServer({ type: 'error', code: 'bad-message', message: 'slow down' });
+
+    expect(useStore.getState().historyPending).toBe(false);
+    expect(useStore.getState().adminError).toBe('slow down');
+  });
 });
 
 /**

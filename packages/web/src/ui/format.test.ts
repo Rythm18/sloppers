@@ -11,6 +11,8 @@ import {
   costTitle,
   countdown,
   dayCostView,
+  dayLabel,
+  dayTitle,
   formatCostUsd,
   formatTokens,
   MINUTES_COARSE_TITLE,
@@ -20,6 +22,7 @@ import {
   sessionsLabel,
   TOKENS_PRIVATE,
   TOKENS_PRIVATE_LINE,
+  weekdayInitial,
 } from './format.js';
 
 /** A day with only the fields under test set. */
@@ -358,5 +361,88 @@ describe('sessionLine', () => {
     );
     expect(sessionLine({ ...base, project: 'app' })).toBe('app');
     expect(sessionLine(base)).toBe('claude session');
+  });
+});
+
+describe('day labels', () => {
+  it('gives a week strip one letter per day', () => {
+    // 2026-08-31 is a Monday; the week runs from there.
+    expect(
+      [
+        '2026-08-31',
+        '2026-09-01',
+        '2026-09-02',
+        '2026-09-03',
+        '2026-09-04',
+        '2026-09-05',
+        '2026-09-06',
+      ].map(weekdayInitial),
+    ).toEqual(['M', 'T', 'W', 'T', 'F', 'S', 'S']);
+  });
+
+  it('reads a day key the same way wherever the reader is', () => {
+    // The key is a label cut from somebody else's calendar, not a moment. Read
+    // as local midnight it would slide a day for anybody west of the writer,
+    // and Monday's bar would sit under Sunday's initial.
+    expect(dayLabel('2026-09-02')).toBe('Wed 2 Sep');
+    expect(dayLabel('2026-01-01')).toBe('Thu 1 Jan');
+    expect(dayLabel('2026-12-31')).toBe('Thu 31 Dec');
+  });
+
+  it('hands back anything it cannot read rather than inventing a date', () => {
+    expect(dayLabel('not-a-day')).toBe('not-a-day');
+    expect(weekdayInitial('not-a-day')).toBe('');
+  });
+
+  it('says a day off in words rather than reporting nothing spent', () => {
+    expect(dayTitle('2026-09-02', day())).toBe('Wed 2 Sep — nothing burned');
+  });
+
+  it('carries every hedge today gets into a past day', () => {
+    // A day recorded by a pre-0.2 collector counts transcript files, and says
+    // so here as plainly as it does on the card.
+    const coarse = dayTitle(
+      '2026-09-02',
+      day({
+        tokens: { input: 1200, output: 0, cacheRead: 0, cacheWrite: 0 },
+        sessionsRun: 3,
+        precision: 'coarse',
+      }),
+    );
+    expect(coarse).toBe(`Wed 2 Sep — 1.2k tok · 3 sessions · ${COST_UNKNOWN}`);
+    const measured = dayTitle(
+      '2026-09-02',
+      day({
+        tokens: { input: 1200, output: 0, cacheRead: 0, cacheWrite: 0 },
+        sessionsRun: 3,
+        precision: 'measured',
+      }),
+    );
+    expect(measured).toContain('3 conversations');
+  });
+
+  it('floors a past day the way it floors today', () => {
+    const floored = dayTitle(
+      '2026-09-02',
+      day({
+        tokens: { input: 1200, output: 0, cacheRead: 0, cacheWrite: 0 },
+        sessionsRun: 1,
+        estimatedCostUsd: null,
+        estimatedCostFloorUsd: 12.4,
+      }),
+    );
+    expect(floored).toContain(`${COST_FLOOR_MARK}$12`);
+  });
+
+  it('says a past day it cannot price at all is unpriced', () => {
+    const unknown = dayTitle(
+      '2026-09-02',
+      day({
+        tokens: { input: 1200, output: 0, cacheRead: 0, cacheWrite: 0 },
+        sessionsRun: 1,
+        estimatedCostUsd: null,
+      }),
+    );
+    expect(unknown).toContain(COST_UNKNOWN);
   });
 });

@@ -104,6 +104,66 @@ export function activeMinutes(stats: DailyStats): { prefix: string; title: strin
 }
 
 /**
+ * A `YYYY-MM-DD` day key as a UTC instant, or null if it is not one.
+ *
+ * UTC because the key is a *label*, not a moment: it was cut from somebody
+ * else's local calendar and is only ever read back as the same three numbers.
+ * Rehydrating it into this browser's local midnight would let a timezone west
+ * of the writer's shift the whole strip a day, so that Monday's bar sat under
+ * Sunday's initial. Nothing here converts between clocks, and nothing should.
+ */
+function parseDay(day: string): Date | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!match) return null;
+  const parsed = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+const MONTHS = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const;
+
+/**
+ * The one letter a week strip has room for under a bar.
+ *
+ * Ambiguous on its own — two Ts and two Ss in every week — and deliberately so:
+ * the strip is a shape to be read at a glance, and the day each bar actually is
+ * lives in its hover, where there is room to say it properly. Seven initials in
+ * order is enough to find today at the right-hand end and count backwards.
+ */
+export function weekdayInitial(day: string): string {
+  const parsed = parseDay(day);
+  return parsed ? (WEEKDAYS[parsed.getUTCDay()]?.charAt(0) ?? '') : '';
+}
+
+/**
+ * A day key as a date somebody can read: `Wed 2 Sep`.
+ *
+ * Spelled out here rather than handed to `toLocaleDateString`, which would
+ * render the same office differently for two people sitting next to each other
+ * and, worse, could reformat the *label* according to the reader's locale when
+ * the label belongs to whoever did the work. Short enough for a tooltip, and
+ * unambiguous about which day it means, which the initial is not.
+ */
+export function dayLabel(day: string): string {
+  const parsed = parseDay(day);
+  if (!parsed) return day;
+  return `${WEEKDAYS[parsed.getUTCDay()]} ${parsed.getUTCDate()} ${MONTHS[parsed.getUTCMonth()]}`;
+}
+
+/**
  * What an unknown cost reads as. Not an em dash on its own: beside a column of
  * real dollars a bare dash is ambiguous — nobody can tell "we don't know" from
  * "nothing". The word says which, and `COST_UNKNOWN_TITLE` says why.
@@ -232,6 +292,27 @@ export function dayCostView(stats: DailyStats): CostView {
     title: costFloorTitle(estimateCostFloorUsd(stats.byModel ?? {}).unpriced),
     usd: floor,
   };
+}
+
+/**
+ * One day of a week strip, said properly.
+ *
+ * The initial under the bar is a hint; this is the sentence behind it — which
+ * day it actually was, what went through, how many sessions (in whichever noun
+ * that day's own precision has earned), and what it cost or at least cost.
+ * Every hedge the office applies to today applies here, per day, because a day
+ * in the past is not a day we know more about.
+ *
+ * A day with nothing in it says so in words. `0 tok · 0 sessions · $0.00` is
+ * arithmetically true of a rest day and reads as a report on somebody's
+ * spending rather than as a day they did not work.
+ */
+export function dayTitle(day: string, stats: DailyStats): string {
+  const label = dayLabel(day);
+  const total = processedTokens(stats.tokens);
+  if (total === 0 && stats.sessionsRun === 0) return `${label} — nothing burned`;
+  const sessions = `${stats.sessionsRun} ${sessionsLabel(stats, stats.sessionsRun)}`;
+  return `${label} — ${formatTokens(total)} tok · ${sessions} · ${dayCostView(stats).text}`;
 }
 
 /**

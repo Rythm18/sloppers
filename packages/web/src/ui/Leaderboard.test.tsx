@@ -1,9 +1,14 @@
 // @vitest-environment jsdom
-import type { LeaderboardRow, ServerToWeb } from '@sloppers/protocol';
+import type { LeaderboardRow, ServerToWeb, WebHistoryResult } from '@sloppers/protocol';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { requestHistory } from '../net/socket.js';
 import { useStore } from '../store.js';
 import { Leaderboard, sortRows } from './Leaderboard.js';
+
+vi.mock('../net/socket.js', () => ({ requestHistory: vi.fn() }));
+
+const requestHistoryMock = vi.mocked(requestHistory);
 
 /**
  * The leaderboard has to hold two numbers at once — tokens, which we always
@@ -102,6 +107,49 @@ function privateRow(memberId: string): LeaderboardRow {
 function seed(rows: LeaderboardRow[]): void {
   useStore.getState().reset();
   apply({ type: 'leaderboard', rows });
+}
+
+const TODAY = '2026-09-04';
+const YESTERDAY = '2026-09-03';
+
+/**
+ * A history answer in the shape the office actually serves: every member,
+ * every day of the window, zeroes included.
+ */
+function history(
+  members: { id: string; today?: number; yesterday?: number; withheld?: boolean }[],
+): WebHistoryResult {
+  return {
+    type: 'history',
+    days: [TODAY, YESTERDAY],
+    members: members.map((m) => ({
+      memberId: m.id,
+      displayName: m.id,
+      avatar: 'pixel',
+      ...(m.withheld
+        ? { days: [], tokensShared: false }
+        : {
+            days: [
+              { day: TODAY, stats: dayStats(m.today ?? 0) },
+              { day: YESTERDAY, stats: dayStats(m.yesterday ?? 0) },
+            ],
+          }),
+    })),
+  };
+}
+
+function dayStats(input: number): LeaderboardRow['stats'] {
+  return {
+    tokens: { input, output: 0, cacheRead: 0, cacheWrite: 0 },
+    sessionsRun: input > 0 ? 1 : 0,
+    activeMinutes: 0,
+    estimatedCostUsd: 0,
+  };
+}
+
+/** Flip the board to the day at `offset` by clicking its own switch. */
+function clickDay(name: 'Today' | 'Yesterday'): void {
+  fireEvent.click(screen.getByRole('button', { name }));
 }
 
 /** Names in the order they are rendered. */
@@ -406,5 +454,118 @@ describe('Leaderboard', () => {
       (n) => (n as HTMLElement).style.width,
     );
     expect(bars).toEqual(['100%']);
+  });
+
+  // --------------------------------------------------------- the day switch
+
+  it('shows yesterday under the Yesterday label, and today under Today', () => {
+    // The one bug a day switch can have that nobody looking at it can see:
+    // the label changes and the numbers do not. `busy` outworked `quiet`
+    // today and the reverse yesterday, so the order alone tells them apart.
+    seed([row('busy', 500, 1), row('quiet', 10, 1)]);
+    apply(
+      history([
+        { id: 'busy', today: 500, yesterday: 10 },
+        { id: 'quiet', today: 10, yesterday: 500 },
+      ]),
+    );
+    render(<Leaderboard />);
+    expect(rendered()).toEqual(['busy', 'quiet']);
+
+    clickDay('Yesterday');
+    expect(rendered()).toEqual(['quiet', 'busy']);
+    expect(screen.getByText(/Yesterday.s burn/)).toBeTruthy();
+
+    clickDay('Today');
+    expect(rendered()).toEqual(['busy', 'quiet']);
+    expect(screen.getByText(/Today.s burn/)).toBeTruthy();
+  });
+
+  it('names the date behind the word, whichever day is on screen', () => {
+    seed([row('busy', 500, 1)]);
+    apply(history([{ id: 'busy', today: 500, yesterday: 10 }]));
+    render(<Leaderboard />);
+    // From today, and still from yesterday: the switch says where it goes,
+    // never where you already are.
+    expect(screen.getByRole('button', { name: 'Yesterday' }).getAttribute('title')).toBe(
+      'Thu 3 Sep',
+    );
+    clickDay('Yesterday');
+    expect(screen.getByRole('button', { name: 'Yesterday' }).getAttribute('title')).toBe(
+      'Thu 3 Sep',
+    );
+  });
+
+  it('asks the office for its history when the board is shown', () => {
+    requestHistoryMock.mockClear();
+    seed([row('busy', 500, 1)]);
+    render(<Leaderboard />);
+    expect(requestHistoryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('says a quiet yesterday was a quiet yesterday, not a quiet today', () => {
+    // The office opened, nobody worked. That is a fact about a finished day
+    // and reads differently from a day still ahead of everybody.
+    seed([row('busy', 500, 1)]);
+    apply(history([{ id: 'busy', today: 500, yesterday: 0 }]));
+    render(<Leaderboard />);
+    clickDay('Yesterday');
+    expect(screen.getByText(/A day off is a day off/)).toBeTruthy();
+    expect(screen.queryByText(/suspiciously quiet/)).toBeNull();
+  });
+
+  it('waits for the answer rather than calling yesterday empty', () => {
+    // No history in hand is not the same claim as a day with nothing in it,
+    // and a board that says "nobody burned anything" while still fetching is
+    // asserting something it has not been told.
+    seed([row('busy', 500, 1)]);
+    act(() => useStore.getState().setHistoryPending(true));
+    render(<Leaderboard />);
+    clickDay('Yesterday');
+    expect(screen.getByText(/Fetching yesterday/)).toBeTruthy();
+    expect(screen.queryByText(/A day off/)).toBeNull();
+  });
+
+  it('offers the switch again when the answer never came', () => {
+    seed([row('busy', 500, 1)]);
+    render(<Leaderboard />);
+    clickDay('Yesterday');
+    expect(screen.getByText(/try the switch again/)).toBeTruthy();
+  });
+
+  it('withholds a member’s yesterday as firmly as their today', () => {
+    // Their current choice governs their whole history. The office sends no
+    // days for them at all, so the board has nothing to rank and says so in
+    // the margin — exactly as it does for today.
+    seed([row('busy', 500, 1), privateRow('quiet')]);
+    apply(
+      history([
+        { id: 'busy', today: 500, yesterday: 500 },
+        { id: 'quiet', withheld: true },
+      ]),
+    );
+    render(<Leaderboard />);
+    clickDay('Yesterday');
+
+    expect(rendered()).toEqual(['busy', 'quiet']);
+    expect([...document.querySelectorAll('.lb-row .rank')].map((n) => n.textContent)).toEqual([
+      '1',
+      '–',
+    ]);
+    expect(screen.getByText('private')).toBeTruthy();
+  });
+
+  it('drops a member the office let go from the day it is showing', () => {
+    seed([row('busy', 500, 1), row('gone', 900, 1)]);
+    apply(
+      history([
+        { id: 'busy', today: 500, yesterday: 500 },
+        { id: 'gone', today: 900, yesterday: 900 },
+      ]),
+    );
+    apply({ type: 'member-left', memberId: 'gone' });
+    render(<Leaderboard />);
+    clickDay('Yesterday');
+    expect(rendered()).toEqual(['busy']);
   });
 });

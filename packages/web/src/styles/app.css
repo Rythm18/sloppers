@@ -646,6 +646,41 @@ button {
   outline-offset: 1px;
 }
 
+/* The day switch: the same segmented control as the sort toggle, stretched
+   across the panel because there are only two of them and neither should have
+   to be hunted for. Its own row rather than crowded into the head, which
+   already carries the title and the sort. */
+.lb-days {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-bottom: 1px solid var(--panel-line);
+}
+
+.lb-day-btn {
+  padding: 5px 6px;
+  background: none;
+  border: none;
+  color: var(--wire);
+  font-family: var(--font-display);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.lb-day-btn + .lb-day-btn {
+  border-left: 1px solid var(--panel-line);
+}
+
+.lb-day-btn[aria-pressed="true"] {
+  background: var(--lamp);
+  color: var(--ink);
+}
+
+.lb-day-btn:focus-visible {
+  outline: 2px solid var(--crt);
+  outline-offset: -2px;
+}
+
 .lb-row {
   display: grid;
   grid-template-columns: 18px 1fr auto auto;
@@ -915,6 +950,84 @@ button {
 
 .model-tok {
   color: var(--crt);
+}
+
+/* ------------------------------------------------------------- week strip */
+
+.member-week {
+  padding: 6px 0 4px;
+  border-top: 1px solid var(--panel-line);
+}
+
+.member-week-title {
+  padding: 2px 12px 5px;
+  color: var(--wire);
+  font-family: var(--font-display);
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.member-week-wait {
+  padding: 8px 12px;
+  border-top: 1px solid var(--panel-line);
+  color: var(--wire);
+  font-size: 11px;
+}
+
+/* Seven equal columns whatever the panel's width, so the shape survives a
+   phone: the bars get thinner, the rhythm does not change. */
+.week-strip {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  padding: 0 12px;
+}
+
+.week-day {
+  display: grid;
+  gap: 3px;
+  justify-items: center;
+  cursor: help;
+}
+
+/* The baseline is what says a day happened. A rest day draws no bar at all and
+   still shows this rule, which is the difference between a day off and a day
+   the office has nothing for. */
+.week-track {
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
+  height: 26px;
+  border-bottom: var(--border-px) solid var(--panel-line);
+}
+
+.week-track > i {
+  display: block;
+  width: 100%;
+  background: var(--crt);
+  opacity: 0.7;
+}
+
+.week-initial {
+  color: var(--wire);
+  font-size: 9px;
+  line-height: 1;
+}
+
+/* Today, lit: the end of the run rather than one more bar in it. */
+.week-day-now .week-track {
+  border-bottom-color: var(--lamp);
+}
+
+.week-day-now .week-track > i {
+  background: var(--lamp);
+  opacity: 1;
+}
+
+.week-day-now .week-initial {
+  color: var(--lamp);
 }
 
 /* Wraps as whole facts. Without this the row keeps its single line by
