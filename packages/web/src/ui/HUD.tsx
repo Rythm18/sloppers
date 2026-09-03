@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useStore } from '../store.js';
+import { useTouchSession } from './viewport.js';
 
 export function HUD() {
   const roomCode = useStore((s) => s.roomCode);
@@ -14,6 +15,10 @@ export function HUD() {
   const setLeaderboardOpen = useStore((s) => s.setLeaderboardOpen);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const [copied, setCopied] = useState(false);
+  // The hint is the only instruction in the whole office, so it has to
+  // describe the controls this person actually has. Nobody arriving on a
+  // phone has a W key, and telling them to click is telling them nothing.
+  const touch = useTouchSession();
 
   // Somebody standing at the door is waiting on a person, not on a panel
   // being opened — so the wait is visible from the floor.
@@ -64,7 +69,11 @@ export function HUD() {
         </button>
       </div>
 
-      <div className="hud-hint">WASD or arrows to walk · click a teammate to peek</div>
+      <div className="hud-hint">
+        {touch
+          ? 'Tap the floor to walk · tap a teammate to peek'
+          : 'WASD or arrows to walk · click a teammate to peek'}
+      </div>
 
       {connection === 'reconnecting' ? (
         <div className="conn-lost panel">connection lost — retrying…</div>

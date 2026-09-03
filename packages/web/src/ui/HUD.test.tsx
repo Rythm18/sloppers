@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import type { KnockView, MemberRole, ServerToWeb } from '@sloppers/protocol';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '../store.js';
 import { HUD } from './HUD.js';
 
@@ -46,9 +46,27 @@ function seed(role: MemberRole, knocks: KnockView[] = []): void {
   if (knocks.length > 0) apply({ type: 'knocks', knocks });
 }
 
+/**
+ * Answer the pointer query the way a mouse or a finger would. jsdom has a
+ * `matchMedia` that says no to everything, which is exactly a desktop — so
+ * only the touch half needs saying, but both are stated to keep the pair
+ * readable.
+ */
+function pointerIs(kind: 'coarse' | 'fine'): void {
+  vi.stubGlobal('matchMedia', (media: string) => ({
+    matches: media.includes('pointer: coarse') && kind === 'coarse',
+    media,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+}
+
 describe('HUD', () => {
   beforeEach(() => useStore.getState().reset());
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
 
   it('offers settings to everyone — a member reaches their own way out through it', () => {
     seed('member');
@@ -88,5 +106,26 @@ describe('HUD', () => {
     render(<HUD />);
 
     expect(screen.queryByRole('button', { name: /at the door/ })).toBeNull();
+  });
+
+  // The office's one instruction. Offering WASD to a phone is not a smaller
+  // help than none — it is the screen telling somebody the controls they can
+  // see are all there is, and there is no keyboard coming.
+  it('names the keys to somebody holding a mouse', () => {
+    pointerIs('fine');
+    seed('member');
+    render(<HUD />);
+
+    expect(screen.getByText(/WASD or arrows to walk/)).toBeTruthy();
+    expect(screen.queryByText(/Tap the floor/)).toBeNull();
+  });
+
+  it('tells a finger to tap, and never mentions a key it does not have', () => {
+    pointerIs('coarse');
+    seed('member');
+    render(<HUD />);
+
+    expect(screen.getByText(/Tap the floor to walk/)).toBeTruthy();
+    expect(screen.queryByText(/WASD/)).toBeNull();
   });
 });

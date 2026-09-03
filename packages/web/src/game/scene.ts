@@ -8,7 +8,9 @@ import {
 import Phaser from 'phaser';
 import { useStore } from '../store.js';
 import { bridge, positionAnchor } from './bridge.js';
-import { buildOffice, isBlocked, type OfficeMap, WORLD_H, WORLD_W } from './map.js';
+import { buildOffice, type OfficeMap, WORLD_H, WORLD_W } from './map.js';
+import { bodyFits, findWalk, type Point } from './path.js';
+import { meansWalkThere } from './tap.js';
 import { TILE_SIZE } from './tiles.gen.js';
 import { isTypingSomewhere } from './typing.js';
 
@@ -17,6 +19,14 @@ const REMOTE_SPEED = 130;
 const NEARBY_RADIUS = 88;
 const MAX_NEARBY = 3;
 const HEAD_OFFSET = 26;
+
+/**
+ * How long a tapped walk may make no headway before it is abandoned. The
+ * planner and the mover agree about the furniture, so this should never
+ * fire — but "should never" is how an avatar ends up grinding against a desk
+ * forever, sending a position update every tick, until the tab is closed.
+ */
+const WALK_STALL_MS = 700;
 
 const PRESENCE_TINT: Record<PresenceState, number> = {
   active: 0x7de0a6,
@@ -136,6 +146,13 @@ export class OfficeScene extends Phaser.Scene {
   private lastSent: Position | null = null;
   private nearbyAt = 0;
   private unsubscribes: (() => void)[] = [];
+  /** Waypoints left in the walk a tap asked for; empty when nobody tapped. */
+  private walk: Point[] = [];
+  /** Closest we have come to the current waypoint, and when that last improved. */
+  private walkBest = Number.POSITIVE_INFINITY;
+  private walkBestAt = 0;
+  /** Whether the pointer went down on a teammate rather than on the floor. */
+  private pointerOnAvatar = false;
 
   constructor() {
     super('office');
@@ -186,6 +203,7 @@ export class OfficeScene extends Phaser.Scene {
       // protect the arrows from either; the body does not scroll.
       this.keys = keyboard.addKeys('up,down,left,right,w,a,s,d', false) as OfficeScene['keys'];
     }
+    this.listenForTaps();
 
     this.unsubscribes.push(
       bridge.on('pos', ({ memberId, position }) => {
@@ -229,6 +247,86 @@ export class OfficeScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       for (const unsubscribe of this.unsubscribes.splice(0)) unsubscribe();
     });
+  }
+
+  /**
+   * Tap the floor and walk there — the office's only control that does not
+   * need a keyboard.
+   *
+   * Read on the way *up* rather than on the way down, because until the
+   * pointer lifts there is no telling a tap from a drag, and a drag must mean
+   * nothing at all: the camera is pinned to the player and there is nothing
+   * to pan. Phaser hands both handlers the list of game objects under the
+   * pointer, which is how a teammate's avatar keeps its own click — the down
+   * half is remembered too, since the sprite's own handler fires there and a
+   * finger that slides a hair off an avatar before lifting still meant them.
+   *
+   * Nothing to unsubscribe: Phaser's per-scene input plugin drops its
+   * listeners when the scene shuts down, which is also when this scene dies.
+   */
+  private listenForTaps(): void {
+    this.input.on(Phaser.Input.Events.POINTER_DOWN, (_pointer: unknown, over: unknown[]) => {
+      this.pointerOnAvatar = over.length > 0;
+    });
+    this.input.on(
+      Phaser.Input.Events.POINTER_UP,
+      (pointer: Phaser.Input.Pointer, over: unknown[]) => {
+        const onAvatar = this.pointerOnAvatar || over.length > 0;
+        this.pointerOnAvatar = false;
+        if (!meansWalkThere({ travelledPx: pointer.getDistance(), onAvatar })) return;
+        // The pointer's own world coordinates are only refreshed by a hit
+        // test, which a tap on bare floor never triggers; ask the camera.
+        const target = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+        this.walkTo(target.x, target.y);
+      },
+    );
+  }
+
+  /** Plan a walk to a spot on the floor, replacing whatever was underway. */
+  private walkTo(x: number, y: number): void {
+    const sprite = this.player?.sprite;
+    if (!sprite) return;
+    this.walk = findWalk(this.office, { x: sprite.x, y: sprite.y }, { x, y });
+    this.walkBest = Number.POSITIVE_INFINITY;
+    this.walkBestAt = this.time.now;
+  }
+
+  /**
+   * The heading that carries the player along a tapped walk, as a unit
+   * vector — the same shape the keys produce, so everything downstream of it
+   * stays one code path. Waypoints fall away as they are reached, and the
+   * whole walk is abandoned if it stops making headway.
+   */
+  private steerAlongWalk(
+    now: number,
+    x: number,
+    y: number,
+    step: number,
+  ): { vx: number; vy: number } {
+    while (this.walk.length > 0) {
+      const next = this.walk[0];
+      if (!next) break;
+      const dx = next.x - x;
+      const dy = next.y - y;
+      const gap = Math.hypot(dx, dy);
+      // Within one tick's travel is arrival: aiming for exactness here only
+      // buys a jitter as the avatar steps back and forth over the spot.
+      if (gap <= step) {
+        this.walk.shift();
+        this.walkBest = Number.POSITIVE_INFINITY;
+        this.walkBestAt = now;
+        continue;
+      }
+      if (gap < this.walkBest - 0.5) {
+        this.walkBest = gap;
+        this.walkBestAt = now;
+      } else if (now - this.walkBestAt > WALK_STALL_MS) {
+        this.walk.length = 0;
+        break;
+      }
+      return { vx: dx / gap, vy: dy / gap };
+    }
+    return { vx: 0, vy: 0 };
   }
 
   /** Create the local player (possibly late, if the world message raced). */
@@ -287,14 +385,14 @@ export class OfficeScene extends Phaser.Scene {
     this.cameras.main.setZoom(zoom);
   }
 
-  override update(_time: number, dtMs: number): void {
-    this.updatePlayer(dtMs);
+  override update(time: number, dtMs: number): void {
+    this.updatePlayer(time, dtMs);
     for (const actor of this.actors.values()) actor.update(dtMs);
     this.updateAnchors();
     this.updateNearby();
   }
 
-  private updatePlayer(dtMs: number): void {
+  private updatePlayer(time: number, dtMs: number): void {
     if (!this.player || !this.keys) return;
     const k = this.keys;
     // Somebody typing their own name to confirm a deletion is not asking to
@@ -307,7 +405,6 @@ export class OfficeScene extends Phaser.Scene {
     let vy = typing
       ? 0
       : (k.up.isDown || k.w.isDown ? -1 : 0) + (k.down.isDown || k.s.isDown ? 1 : 0);
-    const moving = vx !== 0 || vy !== 0;
     if (vx !== 0 && vy !== 0) {
       vx *= Math.SQRT1_2;
       vy *= Math.SQRT1_2;
@@ -315,25 +412,25 @@ export class OfficeScene extends Phaser.Scene {
 
     const sprite = this.player.sprite;
     const step = (SPEED * dtMs) / 1000;
-    const tryMove = (nx: number, ny: number): boolean => {
-      for (const [ox, oy] of [
-        [-5, -1],
-        [5, -1],
-        [-5, 3],
-        [5, 3],
-      ] as const) {
-        if (isBlocked(this.office, nx + ox, ny + oy)) return false;
-      }
-      return true;
-    };
-    if (vx !== 0 && tryMove(sprite.x + vx * step, sprite.y)) sprite.x += vx * step;
-    if (vy !== 0 && tryMove(sprite.x, sprite.y + vy * step)) sprite.y += vy * step;
+    // A hand on the keys outranks a walk still being paced out: taking hold
+    // of the avatar has to work the instant you touch a key, not once it
+    // finishes an errand. A key swallowed by a text field is not a hand on
+    // the keys, which is why this reads the suppressed values and not the raw
+    // ones — typing "wander" into the office name must not cancel the walk.
+    if (vx !== 0 || vy !== 0) this.walk.length = 0;
+    else ({ vx, vy } = this.steerAlongWalk(time, sprite.x, sprite.y, step));
+    const moving = vx !== 0 || vy !== 0;
 
+    if (vx !== 0 && bodyFits(this.office, sprite.x + vx * step, sprite.y)) sprite.x += vx * step;
+    if (vy !== 0 && bodyFits(this.office, sprite.x, sprite.y + vy * step)) sprite.y += vy * step;
+
+    // Face the way you are mostly going. The keys only ever produce whole or
+    // perfectly diagonal headings, where this settles ties sideways exactly as
+    // it always has; a tapped walk arrives at any angle, and a heading that is
+    // nine parts north would otherwise be drawn facing east.
     let dir: Direction = this.lastSent?.dir ?? 'down';
-    if (vx < 0) dir = 'left';
-    else if (vx > 0) dir = 'right';
-    else if (vy < 0) dir = 'up';
-    else if (vy > 0) dir = 'down';
+    if (vx !== 0 && Math.abs(vx) >= Math.abs(vy)) dir = vx < 0 ? 'left' : 'right';
+    else if (vy !== 0) dir = vy < 0 ? 'up' : 'down';
 
     if (moving) sprite.anims.play(walkKey(this.player.view.avatar, dir), true);
     else {
