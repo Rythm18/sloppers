@@ -10,9 +10,9 @@ import { useStore } from '../store.js';
 import { bridge, positionAnchor } from './bridge.js';
 import { buildOffice, type OfficeMap, WORLD_H, WORLD_W } from './map.js';
 import { bodyFits, findWalk, type Point } from './path.js';
+import { keyHeading } from './steer.js';
 import { meansWalkThere } from './tap.js';
 import { TILE_SIZE } from './tiles.gen.js';
-import { isTypingSomewhere } from './typing.js';
 
 const SPEED = 110;
 const REMOTE_SPEED = 130;
@@ -396,19 +396,14 @@ export class OfficeScene extends Phaser.Scene {
     if (!this.player || !this.keys) return;
     const k = this.keys;
     // Somebody typing their own name to confirm a deletion is not asking to
-    // walk east. Keyboard state is global to the window, so the office has to
-    // notice where the letters are actually going.
-    const typing = isTypingSomewhere();
-    let vx = typing
-      ? 0
-      : (k.left.isDown || k.a.isDown ? -1 : 0) + (k.right.isDown || k.d.isDown ? 1 : 0);
-    let vy = typing
-      ? 0
-      : (k.up.isDown || k.w.isDown ? -1 : 0) + (k.down.isDown || k.s.isDown ? 1 : 0);
-    if (vx !== 0 && vy !== 0) {
-      vx *= Math.SQRT1_2;
-      vy *= Math.SQRT1_2;
-    }
+    // walk east; `keyHeading` is where that is settled, so this cannot ask
+    // for the keys without also asking where the letters are going.
+    let { vx, vy } = keyHeading({
+      left: k.left.isDown || k.a.isDown,
+      right: k.right.isDown || k.d.isDown,
+      up: k.up.isDown || k.w.isDown,
+      down: k.down.isDown || k.s.isDown,
+    });
 
     const sprite = this.player.sprite;
     const step = (SPEED * dtMs) / 1000;
