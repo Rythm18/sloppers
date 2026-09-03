@@ -3,10 +3,26 @@ import {
   COST_UNKNOWN,
   COST_UNKNOWN_TITLE,
   costTitle,
+  countdown,
   formatCostUsd,
   formatTokens,
   sessionLine,
 } from './format.js';
+
+describe('countdown', () => {
+  it('reads as a clock rather than a number to divide', () => {
+    expect(countdown(600)).toBe('10:00');
+    expect(countdown(587)).toBe('9:47');
+    expect(countdown(9)).toBe('0:09');
+    expect(countdown(0)).toBe('0:00');
+  });
+
+  it('clamps a deadline that has already passed', () => {
+    // The share dialog stops ticking at zero and the sign-in one goes
+    // negative on its way to being dismissed; neither may render "-1:-3".
+    expect(countdown(-63)).toBe('0:00');
+  });
+});
 
 describe('formatTokens', () => {
   it('keeps small numbers plain', () => {

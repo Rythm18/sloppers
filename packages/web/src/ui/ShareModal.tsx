@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { mintPairingCode } from '../net/socket.js';
+import { type MintFailure, mintPairingCode } from '../net/socket.js';
 import { useStore } from '../store.js';
+import { countdown } from './format.js';
 import { useModalManners } from './modal.js';
 import { useTouchSession } from './viewport.js';
 
@@ -8,6 +9,12 @@ import { useTouchSession } from './viewport.js';
  * Turns "share my agents" into one paste: mints a short-lived pairing code
  * and shows the exact command, host included. The collector never needs
  * flags or config by hand.
+ *
+ * And then it waits with them. Pairing finishes in a terminal, in another
+ * window, and the office is the only place that can say it worked — so this
+ * dialog watches the one field that changes when a collector attaches and
+ * says so out loud. It used to sit there counting down a code that had
+ * already been spent.
  */
 export function ShareModal() {
   const open = useStore((s) => s.shareOpen);
@@ -18,18 +25,49 @@ export function ShareModal() {
   return <ShareModalBody />;
 }
 
+/** What each way of failing to mint a code actually means, and what to do. */
+function MintFailureNote({ reason }: { reason: MintFailure }) {
+  if (reason === 'refused') {
+    return (
+      <p className="join-error">
+        The office does not recognise this browser — that happens when the invite was rotated, or
+        when this browser&rsquo;s storage was cleared.{' '}
+        <span className="join-hint">
+          On the machine where your agents share from, run <code>sloppers relink</code> to sign back
+          in.
+        </span>
+      </p>
+    );
+  }
+  return (
+    <p className="join-error">
+      Could not reach the office to ask for a code. It may be waking up — give it a moment.
+    </p>
+  );
+}
+
 function ShareModalBody() {
   const roomCode = useStore((s) => s.roomCode);
   const setShareOpen = useStore((s) => s.setShareOpen);
+  const you = useStore((s) => s.you);
+  const sharing = useStore((s) => (you ? (s.members[you]?.sharing ?? false) : false));
   const [code, setCode] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<number>(0);
   const [remaining, setRemaining] = useState<number>(0);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<MintFailure | null>(null);
   const scrimRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const close = useCallback(() => setShareOpen(false), [setShareOpen]);
+  /**
+   * Whether this office already had a collector when the dialog opened. Read
+   * once, on the way in: somebody already sharing who opens this to pair a
+   * second machine is not somebody to congratulate on pairing their first,
+   * and the celebration below belongs strictly to the moment it changes.
+   */
+  const wasSharing = useRef(sharing);
+  const justPaired = sharing && !wasSharing.current;
   // There is no terminal on a phone, and no agents on it either. Handing
   // somebody a shell command they cannot run — on the device they are holding
   // — reads as the product not knowing where it is.
@@ -41,11 +79,11 @@ function ShareModalBody() {
   useModalManners(scrimRef, dialogRef, close);
 
   const mint = useCallback(async () => {
-    setFailed(false);
+    setFailed(null);
     setCode(null);
     const minted = await mintPairingCode(roomCode);
-    if (!minted) {
-      setFailed(true);
+    if (!minted.ok) {
+      setFailed(minted.reason);
       return;
     }
     setCode(minted.pairingCode);
@@ -103,75 +141,103 @@ function ShareModalBody() {
             ×
           </button>
         </div>
-        <div className="share-steps">
-          {onAPhone ? (
-            <>
-              <span>
-                Pairing happens on the computer your agents run on. Open this office there — the
-                invite link works on any device — and press <strong>Share agents</strong>.
+        {justPaired ? (
+          /* The pairing happened in a terminal in some other window; this is
+             the office noticing, and it is the moment the whole thing starts
+             being about them. Announced politely — nobody asked for it, it
+             simply arrived. */
+          <div className="share-paired" aria-live="polite">
+            <p className="share-paired-line">
+              <span className="share-paired-mark" aria-hidden="true">
+                ✓
               </span>
-              <span>
-                Or send yourself this command. It is good for ten minutes, which is long enough to
-                get it onto a laptop.
-              </span>
-            </>
-          ) : (
-            <span>Run this once on the machine where your agents live:</span>
-          )}
-        </div>
-
-        {failed ? (
-          <div className="share-steps">
-            <p className="join-error">Could not mint a code — the server may be unreachable.</p>
-            <button type="button" className="btn btn-quiet" onClick={() => void mint()}>
-              Try again
+              Paired — your avatar is sharing.
+            </p>
+            <p className="settings-note">
+              Whatever your agents are up to shows up over your head from here on, and on the board
+              once they burn something. Nothing to keep open: the collector runs on its own.
+            </p>
+            <p className="share-privacy">
+              Only derived status ever leaves that machine — never prompts, code, or file contents.{' '}
+              <code>sloppers pause</code> stops sharing whenever you like.
+            </p>
+            <button type="button" className="btn" onClick={close}>
+              Back to the office
             </button>
           </div>
         ) : (
-          <div className="share-cmd">
-            <span className="prompt">$</span>
-            <span>{command ?? 'minting a code…'}</span>
-          </div>
+          <>
+            <div className="share-steps">
+              {onAPhone ? (
+                <>
+                  <span>
+                    Pairing happens on the computer your agents run on. Open this office there — the
+                    invite link works on any device — and press <strong>Share agents</strong>.
+                  </span>
+                  <span>
+                    Or send yourself this command. It is good for ten minutes, which is long enough
+                    to get it onto a laptop.
+                  </span>
+                </>
+              ) : (
+                <span>Run this once on the machine where your agents live:</span>
+              )}
+            </div>
+
+            {failed ? (
+              <div className="share-steps">
+                <MintFailureNote reason={failed} />
+                <button type="button" className="btn btn-quiet" onClick={() => void mint()}>
+                  Try again
+                </button>
+              </div>
+            ) : (
+              <div className="share-cmd">
+                <span className="prompt">$</span>
+                <span>{command ?? 'minting a code…'}</span>
+              </div>
+            )}
+
+            {copyFailed ? (
+              <p className="join-error">
+                This browser would not let the page reach your clipboard. Select the command above
+                and copy it by hand.
+              </p>
+            ) : null}
+
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <button type="button" className="btn" onClick={() => void copy()} disabled={!command}>
+                {copied ? 'Copied' : 'Copy command'}
+              </button>
+              {code && remaining === 0 ? (
+                <button type="button" className="btn btn-quiet" onClick={() => void mint()}>
+                  New code
+                </button>
+              ) : null}
+              {code ? (
+                <span className="share-expiry">
+                  {remaining > 0 ? `code expires in ${countdown(remaining)}` : 'code expired'}
+                </span>
+              ) : null}
+            </div>
+
+            <p className="share-privacy">
+              The collector reads your local Claude Code and Codex session files and sends only
+              derived status: session titles (short summaries generated from your prompts), project
+              and branch names, model, working/waiting state, and token counts. Never prompts, code,
+              or file contents. Every field can be hidden — <code>sloppers hide title</code>,{' '}
+              <code>sloppers hide tokens</code> — and <code>sloppers pause</code> stops sharing
+              entirely.
+            </p>
+            <p className="share-privacy">
+              Running from a checkout instead of npm? Use{' '}
+              <code>
+                node packages/collector/dist/cli.js share {code ?? '<code>'}@{shareTarget}
+              </code>
+              .
+            </p>
+          </>
         )}
-
-        {copyFailed ? (
-          <p className="join-error">
-            This browser would not let the page reach your clipboard. Select the command above and
-            copy it by hand.
-          </p>
-        ) : null}
-
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <button type="button" className="btn" onClick={() => void copy()} disabled={!command}>
-            {copied ? 'Copied' : 'Copy command'}
-          </button>
-          {code && remaining === 0 ? (
-            <button type="button" className="btn btn-quiet" onClick={() => void mint()}>
-              New code
-            </button>
-          ) : null}
-          {code ? (
-            <span className="share-expiry">
-              {remaining > 0 ? `code expires in ${remaining}s` : 'code expired'}
-            </span>
-          ) : null}
-        </div>
-
-        <p className="share-privacy">
-          The collector reads your local Claude Code and Codex session files and sends only derived
-          status: session titles (short summaries generated from your prompts), project and branch
-          names, model, working/waiting state, and token counts. Never prompts, code, or file
-          contents. Every field can be hidden — <code>sloppers hide title</code>,{' '}
-          <code>sloppers hide tokens</code> — and <code>sloppers pause</code> stops sharing
-          entirely.
-        </p>
-        <p className="share-privacy">
-          Running from a checkout instead of npm? Use{' '}
-          <code>
-            node packages/collector/dist/cli.js share {code ?? '<code>'}@{shareTarget}
-          </code>
-          .
-        </p>
       </section>
     </div>
   );

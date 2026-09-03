@@ -21,6 +21,7 @@ import type { RoutableSession } from './core/types.js';
 import { applyVisibility } from './core/visibility.js';
 import { type WatchHandle, watchSessions } from './core/watcher.js';
 import { CollectorClient } from './net/client.js';
+import { clearPidfile, writePidfile } from './service/liveness.js';
 
 const DEBOUNCE_MS = 1000;
 const HEARTBEAT_MS = 30_000;
@@ -388,6 +389,12 @@ export function startDaemon(opts: {
     throw new Error('Not paired yet — run `sloppers share <code>` first.');
   }
 
+  // Written after the config check, so a process that is about to throw
+  // "Not paired yet" never claims to be sharing. This is what `sloppers
+  // status` reads, and the only place a foreground `sloppers run` is
+  // visible from at all.
+  writePidfile(opts.home);
+
   const adapters = builtinAdapters(opts.home);
   const tracker = new SessionTracker(adapters);
 
@@ -582,6 +589,9 @@ export function startDaemon(opts: {
       clearInterval(heartbeat);
       clearInterval(idlePoll);
       configWatcher?.close();
+      // First, so a slow watcher close never leaves `status` telling somebody
+      // they are sharing while the daemon is on its way out.
+      clearPidfile(opts.home);
       await watcher.close();
       for (const runtime of runtimes) runtime.client.stop();
     },

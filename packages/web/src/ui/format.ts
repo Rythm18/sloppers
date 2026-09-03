@@ -61,6 +61,20 @@ export function formatCostUsd(usd: number): string {
   return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
+/**
+ * Whole seconds as a clock: `600` → `10:00`, `47` → `0:47`.
+ *
+ * Both dialogs that count a ten-minute credential down show the same TTL, and
+ * for a while only one of them showed it as time — the other printed `587s`,
+ * which is a number somebody has to divide before it means anything. Negative
+ * input clamps to `0:00`: a deadline that has passed is not a countdown, and
+ * `-1:-3` is not a thing to put on a screen.
+ */
+export function countdown(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
+}
+
 export const PRESENCE_LABEL: Record<PresenceState, string> = {
   active: 'at the desk',
   grinding: 'agents cooking',

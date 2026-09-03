@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { sendAdmin } from '../net/socket.js';
 import { useStore } from '../store.js';
+import { countdown } from './format.js';
 import { useModalManners } from './modal.js';
 import { qrPath } from './qr.js';
 
@@ -21,11 +22,6 @@ const NEARLY_GONE_SECONDS = 60;
  *  what tells the ticker to stop rather than something anybody is shown. */
 function secondsLeft(expiresAt: number): number {
   return Math.round((expiresAt - Date.now()) / 1000);
-}
-
-function countdown(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
 export function DeviceLinkModal() {

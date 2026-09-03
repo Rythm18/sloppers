@@ -810,6 +810,54 @@ describe('server integration', () => {
     collector.close();
   });
 
+  /**
+   * The seam behind "the share dialog has no success state". `sharing` rides
+   * on the member view and on nothing else — a `presence` message carries
+   * presence, sessions and today's totals, none of which need have changed
+   * when a collector with no live session attaches — so the browser that had
+   * just handed somebody the pairing command learned nothing at all until it
+   * was reloaded. There was no event for the dialog to notice.
+   */
+  it('tells the browser the moment a collector attaches, not only on reload', async () => {
+    const { client, world } = await join('ridham');
+    expect(world.members[0]?.sharing).toBe(false);
+    const base = `http://127.0.0.1:${server.port}`;
+
+    const mint = await fetch(`${base}/api/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        memberId: world.you.memberId,
+        memberSecret: world.you.memberSecret,
+      }),
+    });
+    const { pairingCode } = (await mint.json()) as { pairingCode: string };
+    const redeem = await fetch(`${base}/api/pair/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pairingCode }),
+    });
+    const paired = (await redeem.json()) as PairRedeemResponse;
+
+    const collector = new WebSocket(`ws://127.0.0.1:${server.port}/ws/collector`);
+    await new Promise<void>((resolve) => collector.on('open', () => resolve()));
+    collector.send(
+      JSON.stringify({ type: 'hello', deviceKey: paired.deviceKey, collectorVersion: '0.1.0' }),
+    );
+    await new Promise<void>((resolve) => collector.once('message', () => resolve()));
+
+    // No snapshot sent, deliberately: pairing is news on its own, and the
+    // person watching for it has not started an agent yet. The hello also
+    // re-announces the member row itself, which is still `sharing: false` at
+    // that point — so this waits for the flag, not merely for a message.
+    const upsert = await client.next((m) => m.type === 'member' && m.member.sharing);
+    if (upsert.type !== 'member') throw new Error('unreachable');
+    expect(upsert.member.id).toBe(world.you.memberId);
+    expect(upsert.member.sharing).toBe(true);
+
+    collector.close();
+  });
+
   it('answers a snapshot it could not record instead of taking the server down', async () => {
     const { client: owner, world } = await join('ridham');
     const base = `http://127.0.0.1:${server.port}`;

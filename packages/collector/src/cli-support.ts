@@ -3,6 +3,7 @@ import pc from 'picocolors';
 import { type CollectorConfig, isCatchAll, type PairingConfig } from './config.js';
 import type { RoutableSession } from './core/types.js';
 import { routeSessions, unroutedSessions } from './daemon.js';
+import type { Liveness } from './service/liveness.js';
 
 /**
  * The pure logic behind the CLI commands, kept out of `cli.ts` so it can be
@@ -94,13 +95,50 @@ function describeSession(snapshot: SessionSnapshot): string {
  * claims means editing `match` in that file, and there is no command for it.
  * Naming the path makes hand-editing a documented escape hatch instead of
  * something a person has to guess at.
+ *
+ * `daemon` is the answer to the question the whole command is really asked
+ * for — whether anything is actually sharing — and it is not derivable from
+ * the config at any price. See `sharingLine`.
  */
+/**
+ * What a workspace's `sharing` line may honestly say.
+ *
+ * `paused` is the config's business and the config knows it for certain. Every
+ * other answer is about a process, and for a long time this line read a green
+ * `on` off `pairing.paused === false` — so the office could be showing
+ * somebody as not sharing while their own diagnostic told them, in green,
+ * that they were. A flag saying nobody asked it to stop is not the same
+ * statement as "something is running".
+ */
+function sharingLine(pairing: PairingConfig, daemon: Liveness): string {
+  if (pairing.paused) return pc.yellow('paused');
+  if (daemon.state === 'running') return pc.green('on');
+  if (daemon.state === 'stopped') return pc.red('off — the collector is not running');
+  return pc.yellow('on, if the collector is running — could not tell');
+}
+
+/** The one line that says whether anything is sharing at all, and how we know. */
+function daemonLine(daemon: Liveness): string {
+  if (daemon.state === 'running') {
+    return `collector ${pc.green('running')}${daemon.pid ? pc.dim(` (pid ${daemon.pid})`) : ''}`;
+  }
+  if (daemon.state === 'stopped') {
+    return [
+      `collector ${pc.red('not running')} — nothing is reaching your office right now`,
+      pc.dim('  start it with `sloppers run`, or re-run `sloppers share <code>` to reinstall'),
+      pc.dim('  auto-start; `~/.sloppers/collector.log` says why it stopped'),
+    ].join('\n');
+  }
+  return `collector ${pc.yellow('unknown')} ${pc.dim(`(${daemon.why})`)}`;
+}
+
 export function renderStatus(
   config: CollectorConfig,
   sessions: readonly RoutableSession[],
   configFilePath: string,
+  daemon: Liveness,
 ): string[] {
-  const lines: string[] = [`config   ${configFilePath}`, ''];
+  const lines: string[] = [`config   ${configFilePath}`, daemonLine(daemon), ''];
   const routed = routeSessions(sessions, config.pairings);
 
   config.pairings.forEach((pairing, index) => {
@@ -113,7 +151,7 @@ export function renderStatus(
     // otherwise an empty catch-all listed first reads like a bug.
     const fallback = isCatchAll(pairing) ? pc.dim('  (fallback — claims whatever is left)') : '';
     lines.push(`  match    ${pairing.match.join(', ')}${fallback}`);
-    lines.push(`  sharing  ${pairing.paused ? pc.yellow('paused') : pc.green('on')}`);
+    lines.push(`  sharing  ${sharingLine(pairing, daemon)}`);
     const hidden = (Object.entries(pairing.visibility) as [keyof Visibility, boolean][])
       .filter(([, shared]) => !shared)
       .map(([field]) => field);

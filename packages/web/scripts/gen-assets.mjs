@@ -1,8 +1,9 @@
 /**
- * Generates every sprite the office uses — characters, tileset, favicon —
- * as original pixel art, so the project owns its look outright (no asset
- * packs, no licensing questions). Runs before dev/build; outputs land in
- * public/assets/ plus a generated tile-index module in src/game/.
+ * Generates every sprite the office uses — characters, tileset, favicon, and
+ * the link-preview card — as original pixel art, so the project owns its look
+ * outright (no asset packs, no licensing questions). Runs before dev/build;
+ * outputs land in public/assets/ plus a generated tile-index module in
+ * src/game/.
  *
  * Characters: one hand-authored 16×20 base (4 directions × 4 walk frames),
  * palette-swapped into the twelve avatars declared in @sloppers/protocol.
@@ -40,15 +41,37 @@ class Sheet {
     this.png.data[i + 2] = rgba[2];
     this.png.data[i + 3] = rgba[3];
   }
+  get(x, y) {
+    if (x < 0 || y < 0 || x >= this.png.width || y >= this.png.height) return [0, 0, 0, 0];
+    const i = (this.png.width * y + x) * 4;
+    return [this.png.data[i], this.png.data[i + 1], this.png.data[i + 2], this.png.data[i + 3]];
+  }
   rect(x, y, w, h, rgba) {
     for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) this.set(xx, yy, rgba);
   }
-  blitGrid(grid, legend, ox, oy, { mirror = false } = {}) {
+  /**
+   * One source pixel becomes a scale×scale block — nearest-neighbour by
+   * construction, which is the only enlargement pixel art tolerates.
+   * Fully-transparent source pixels are skipped rather than written, so
+   * furniture composites over floor exactly as it does in the game.
+   */
+  blitScaled(src, sx, sy, w, h, dx, dy, scale) {
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const px = src.get(sx + x, sy + y);
+        if (px[3] === 0) continue;
+        this.rect(dx + x * scale, dy + y * scale, scale, scale, px);
+      }
+    }
+  }
+  blitGrid(grid, legend, ox, oy, { mirror = false, scale = 1 } = {}) {
     grid.forEach((row, y) => {
       for (let x = 0; x < row.length; x++) {
         const ch = row[mirror ? row.length - 1 - x : x];
         const color = legend[ch];
-        if (color) this.set(ox + x, oy + y, color);
+        if (!color) continue;
+        if (scale === 1) this.set(ox + x, oy + y, color);
+        else this.rect(ox + x * scale, oy + y * scale, scale, scale, color);
       }
     });
   }
@@ -468,6 +491,148 @@ icon.rect(6, 12, 4, 1, hex('#8a80a5'));
 icon.rect(5, 13, 6, 1, hex('#8a80a5'));
 icon.write('favicon.png');
 
+// ------------------------------------------------------------- unfurl card
+
+/**
+ * The picture a sloppers link shows when somebody drops it into Slack or
+ * iMessage. The product is a place you look at, and for a long time the link
+ * to it unfurled as one word of text.
+ *
+ * So: not a banner, and not a screenshot either — the office itself, drawn
+ * from the same tiles and the same characters the game loads, at the same
+ * zoom a laptop gets (`applyZoom` in game/scene.ts settles on 3 for anything
+ * up to about 1500px wide). Every pixel here is one the office would draw.
+ *
+ * The arrangement below mirrors `buildOffice()` in src/game/map.ts, which is
+ * where the office is really defined. Nothing enforces that — a script cannot
+ * import a TypeScript module — so if the office is ever rearranged, rearrange
+ * it here too and re-run `pnpm --filter @sloppers/web gen`.
+ */
+const OG_W = 1200;
+const OG_H = 630;
+/**
+ * Four, where the office itself would pick three on a laptop. An unfurl is
+ * shown at a third of its size in a chat window, so the pixels have to be
+ * chunky enough to survive that — at 3× the people come out about fifteen
+ * pixels tall in Slack, which is a smudge.
+ */
+const OG_SCALE = 4;
+/**
+ * The leftmost column in frame. Chosen so neither edge cuts a desk in half:
+ * the pod at columns 4–5 falls entirely outside, the one at 22–23 entirely
+ * inside, and 18.75 columns fit across at this scale.
+ */
+const OG_X0 = 6;
+const MAP_W = 32;
+const MAP_H = 22;
+
+const card = new Sheet(OG_W, OG_H);
+card.rect(0, 0, OG_W, OG_H, PAL.ink);
+
+/** Tile index → its column in the tileset sheet. */
+const TILE = Object.fromEntries(TILE_NAMES.map((name, i) => [name, i]));
+
+const cardFloor = Array.from({ length: MAP_H }, () => Array.from({ length: MAP_W }, () => 0));
+const cardStuff = Array.from({ length: MAP_H }, () => Array.from({ length: MAP_W }, () => -1));
+const place = (x, y, tile) => {
+  if (cardStuff[y]) cardStuff[y][x] = tile;
+};
+
+for (let y = 0; y < MAP_H; y++) {
+  for (let x = 0; x < MAP_W; x++) {
+    cardFloor[y][x] = (x + y) % 2 === 0 ? TILE.floorA : TILE.floorB;
+  }
+}
+for (let x = 0; x < MAP_W; x++) {
+  place(x, 0, TILE.wallTop);
+  place(x, 1, TILE.wallFace);
+  place(x, MAP_H - 1, TILE.wallTop);
+}
+for (const x of [4, 5, 10, 11, 20, 21, 26, 27]) place(x, 1, TILE.window);
+for (const x of [15, 16]) place(x, 1, TILE.whiteboard);
+for (let y = 0; y < MAP_H; y++) {
+  place(0, y, TILE.wallTop);
+  place(MAP_W - 1, y, TILE.wallTop);
+}
+for (const y of [5, 9]) {
+  for (const x of [4, 10, 16, 22]) {
+    place(x, y, TILE.deskL);
+    place(x + 1, y, TILE.deskR);
+    place(x, y + 1, TILE.chair);
+  }
+}
+place(29, 2, TILE.plant);
+place(1, 2, TILE.plant);
+place(8, 14, TILE.plant);
+
+/** World pixel → card pixel. The crop starts at column OG_X0, row 0. */
+const cardX = (worldX) => (worldX - OG_X0 * T) * OG_SCALE;
+const cardY = (worldY) => worldY * OG_SCALE;
+
+const drawTile = (index, tx, ty) => {
+  card.blitScaled(tiles, index * T, 0, T, T, cardX(tx * T), cardY(ty * T), OG_SCALE);
+};
+for (let y = 0; y < MAP_H; y++) {
+  for (let x = 0; x < MAP_W; x++) {
+    drawTile(cardFloor[y][x], x, y);
+    if (cardStuff[y][x] >= 0) drawTile(cardStuff[y][x], x, y);
+  }
+}
+
+/** The four rows of the character sheet, as the pieces they are drawn from. */
+const POSE = {
+  down: { head: HEAD_DOWN, body: BODY_FRONT, legs: LEGS_STAND, step: LEGS_STEP_A, mirror: false },
+  left: {
+    head: HEAD_SIDE,
+    body: BODY_SIDE,
+    legs: LEGS_SIDE_STAND,
+    step: LEGS_SIDE_A,
+    mirror: true,
+  },
+  right: {
+    head: HEAD_SIDE,
+    body: BODY_SIDE,
+    legs: LEGS_SIDE_STAND,
+    step: LEGS_SIDE_A,
+    mirror: false,
+  },
+  up: { head: HEAD_UP, body: BODY_FRONT, legs: LEGS_STAND, step: LEGS_STEP_A, mirror: false },
+};
+
+/**
+ * One person standing on a tile, placed the way the scene places them: the
+ * sprite's origin is (0.5, 0.85) of a 16×20 frame, which puts its top nine
+ * pixels above the tile it is standing on — so somebody at a chair overlaps
+ * the desk in front of them, exactly as in the office.
+ */
+function drawPerson(avatar, dir, tx, ty, { walking = false } = {}) {
+  const pose = POSE[dir];
+  const legend = legendFor(avatar);
+  const opts = { mirror: pose.mirror, scale: OG_SCALE };
+  const ox = cardX(tx * T);
+  // Mid-step frames bob a pixel, and only the top half of the body does.
+  const bob = walking ? 1 : 0;
+  const oy = cardY(ty * T - 9);
+  card.blitGrid(pose.head, legend, ox, oy + bob * OG_SCALE, opts);
+  card.blitGrid(pose.body, legend, ox, oy + (10 + bob) * OG_SCALE, opts);
+  card.blitGrid(walking ? pose.step : pose.legs, legend, ox, oy + 15 * OG_SCALE, opts);
+}
+
+// An office with people in it. Backs to the camera at the desks, because that
+// is what working looks like from behind — a tile below the chair rather than
+// on it, so the monitor they are working at stays in the picture. The rest
+// are crossing the floor, which is what stops it reading as a diagram.
+drawPerson('clementine', 'up', 10, 7);
+drawPerson('juniper', 'up', 16, 7);
+drawPerson('mochi', 'up', 22, 7);
+drawPerson('pixel', 'right', 13, 8, { walking: true });
+drawPerson('ziggy', 'down', 19, 3);
+drawPerson('comet', 'left', 8, 4, { walking: true });
+drawPerson('rusty', 'down', 8, 9);
+
+card.write('og-office.png');
+
 console.log(
-  `assets: ${Object.keys(CAST).length} characters, ${TILE_NAMES.length} tiles → public/assets/`,
+  `assets: ${Object.keys(CAST).length} characters, ${TILE_NAMES.length} tiles, ` +
+    `1 unfurl card → public/assets/`,
 );

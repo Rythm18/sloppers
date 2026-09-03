@@ -21,6 +21,7 @@ import {
   unroutedSessions,
 } from './daemon.js';
 import { CollectorClient, type CollectorSocket } from './net/client.js';
+import { readPidfile } from './service/liveness.js';
 
 const DAY = '2026-08-19';
 const OTHER_DAY = '2026-08-18';
@@ -1249,6 +1250,34 @@ describe('startDaemon runs one client per pairing', () => {
     expect(() => startDaemon({ collectorVersion: 'test', home, log: () => {} })).toThrow(
       /Not paired/,
     );
+  });
+
+  /**
+   * The only thing on the machine that can answer "is anything sharing right
+   * now?" for a daemon somebody started by hand. `sloppers status` used to
+   * answer it from a boolean in a config file, in green, while the office
+   * showed the same person as not sharing.
+   */
+  it('publishes its own pid while it runs, and takes it back on the way out', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-daemon-'));
+    const office = new FakeCollectorServer();
+    servers.push(office);
+    saveConfig({ version: 2, pairings: [pairingFor(office.port, ['**'], 'a')] }, home);
+
+    daemon = startDaemon({ collectorVersion: 'test', home, log: () => {} });
+    expect(readPidfile(home)).toBe(process.pid);
+
+    await daemon.stop();
+    daemon = null;
+    expect(readPidfile(home)).toBeNull();
+  });
+
+  it('claims nothing when it refuses to start', () => {
+    // A process that threw its way back out is not sharing, and must not
+    // leave a note behind saying it is.
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-daemon-'));
+    expect(() => startDaemon({ collectorVersion: 'test', home, log: () => {} })).toThrow();
+    expect(readPidfile(home)).toBeNull();
   });
 });
 

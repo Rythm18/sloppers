@@ -15,8 +15,9 @@ const execFileAsync = promisify(execFile);
  * a broken install by simply rewriting the service.
  */
 
-const LAUNCHD_LABEL = 'dev.sloppers.collector';
-const SYSTEMD_UNIT = 'sloppers-collector.service';
+/** Also how `service/liveness.ts` asks each service manager about us. */
+export const LAUNCHD_LABEL = 'dev.sloppers.collector';
+export const SYSTEMD_UNIT = 'sloppers-collector.service';
 
 export function serviceSupported(): boolean {
   return process.platform === 'darwin' || process.platform === 'linux';

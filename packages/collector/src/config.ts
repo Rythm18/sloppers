@@ -104,6 +104,16 @@ export function logPath(home: string = homedir()): string {
   return join(configDir(home), 'collector.log');
 }
 
+/**
+ * Where the running daemon writes its process id. The only signal that
+ * answers "is anything actually sharing right now?" on every path there is:
+ * launchd and systemd know about a service they installed, and know nothing
+ * at all about `sloppers run` in a terminal.
+ */
+export function pidPath(home: string = homedir()): string {
+  return join(configDir(home), 'collector.pid');
+}
+
 export function loadConfig(home?: string): CollectorConfig | null {
   const path = configPath(home);
   if (!existsSync(path)) return null;

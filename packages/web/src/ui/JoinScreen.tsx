@@ -166,6 +166,16 @@ export function JoinScreen({
               A pixel office where your team&rsquo;s coding agents show up for work.
             </p>
           )}
+          {/* An invite link skips the landing page entirely (App renders it
+              only without a `?room=`), and it is how nearly everybody arrives.
+              Without this line the screen is a brand mark, a name field and a
+              button — and the next thing it asks for is a terminal command.
+              The greeting above says which office; this says what one is. */}
+          {(invited && preview.state === 'found') || deadInvite ? (
+            <p className="join-sub">
+              A pixel office where your team&rsquo;s coding agents show up for work.
+            </p>
+          ) : null}
         </div>
 
         {!invited || deadInvite ? (

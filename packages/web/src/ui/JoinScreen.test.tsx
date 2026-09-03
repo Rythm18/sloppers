@@ -135,4 +135,39 @@ describe('JoinScreen', () => {
     act(() => useStore.getState().setJoinError('someone here is already called ridham'));
     expect(screen.getByText(/already called ridham/)).toBeTruthy();
   });
+
+  /**
+   * An invite link is how nearly everybody meets sloppers, and it skips the
+   * landing page entirely — `App` renders that only when there is no `?room=`.
+   * The one sentence saying what the product is used to live in the branch
+   * for people who arrived without an invite, so the person the door was
+   * built for was the only one who never read it.
+   */
+  describe('saying what this is', () => {
+    const explains = () => screen.queryByText(/pixel office where your team/i);
+
+    it('tells an invitee what they have been invited to', async () => {
+      await show(ROOM);
+
+      expect(screen.getByText(/You’re invited to/)).toBeTruthy();
+      expect(explains()).toBeTruthy();
+    });
+
+    it('tells somebody holding a dead invite too, since they are about to make one', async () => {
+      previewMock.mockResolvedValue(null);
+      await show(ROOM);
+
+      expect(explains()).toBeTruthy();
+    });
+
+    it('says it once, not twice, while the invite is still being looked up', async () => {
+      // Mid-lookup the greeting has nothing to greet with, so the tagline is
+      // already the headline — and a second copy of it underneath reads as a
+      // rendering fault.
+      previewMock.mockReturnValue(new Promise(() => {}));
+      await show(ROOM);
+
+      expect(screen.getAllByText(/pixel office where your team/i)).toHaveLength(1);
+    });
+  });
 });

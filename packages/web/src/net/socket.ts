@@ -288,19 +288,41 @@ export async function fetchRoomPreview(
   return (await res.json()) as { name: string; memberCount: number };
 }
 
+/**
+ * Why a pairing code could not be minted. The two are not the same problem
+ * and do not have the same fix, and for a while they shared one sentence
+ * blaming the network: a 403 is the office looking at this browser's
+ * credentials and not recognising them (the invite was rotated, storage was
+ * cleared, the member was removed), which no amount of trying again resolves.
+ */
+export type MintFailure =
+  /** Nothing answered, or the office answered badly. Trying again may work. */
+  | 'unreachable'
+  /** The office answered, and said no to *this browser*. `sloppers relink`. */
+  | 'refused';
+
+export type MintResult =
+  | { ok: true; pairingCode: string; expiresAt: number }
+  | { ok: false; reason: MintFailure };
+
 /** Mint a pairing code for the share modal. */
-export async function mintPairingCode(
-  roomCode: string,
-): Promise<{ pairingCode: string; expiresAt: number } | null> {
+export async function mintPairingCode(roomCode: string): Promise<MintResult> {
+  // No identity here means this browser holds nothing to prove it belongs to
+  // the office — the same standing a rotated or cleared one leaves it in, and
+  // the same remedy, so it is reported as the office's refusal rather than as
+  // a network that is in fact perfectly fine.
   const identity = loadIdentity(roomCode);
-  if (!identity) return null;
+  if (!identity) return { ok: false, reason: 'refused' };
   const res = await fetch('/api/pair', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(identity),
   }).catch(() => null);
-  if (!res?.ok) return null;
-  return (await res.json()) as { pairingCode: string; expiresAt: number };
+  if (!res) return { ok: false, reason: 'unreachable' };
+  if (res.status === 403) return { ok: false, reason: 'refused' };
+  if (!res.ok) return { ok: false, reason: 'unreachable' };
+  const minted = (await res.json()) as { pairingCode: string; expiresAt: number };
+  return { ok: true, ...minted };
 }
 
 /**

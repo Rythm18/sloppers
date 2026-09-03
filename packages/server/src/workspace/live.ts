@@ -200,7 +200,16 @@ export class Room {
       previous.ws.close();
     }
     runtime.collector = { ws, lastSeenAt: Date.now(), idleSeconds: undefined, sessions: [] };
+    // The moment a pairing becomes real. `sharing` rides on the member view
+    // and on nothing else — a `presence` message carries presence, sessions
+    // and today's totals, none of which need have changed when a collector
+    // with no live session attaches — so without this the browser that just
+    // handed somebody the pairing command learns nothing at all until it is
+    // reloaded. Sent only on the edge: a reconnecting collector, or a second
+    // machine taking over, is not news to anybody.
+    const becameSharing = !runtime.sharing;
     runtime.sharing = true;
+    if (becameSharing) this.broadcastMember(memberId);
     this.refreshPresence(memberId);
     return true;
   }

@@ -6,7 +6,7 @@ import {
   relinkMintRequestSchema,
   relinkRedeemRequestSchema,
 } from '@sloppers/protocol';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import type { Db } from './db/index.js';
 import { deviceKey, pairingCode, relinkToken } from './ids.js';
 import type { WorkspaceManager } from './workspace/manager.js';
@@ -25,6 +25,38 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
   '.ico': 'image/x-icon',
 };
+
+/**
+ * Where this request thinks it arrived, honouring the proxy headers Fly sets
+ * (TLS terminates there, so the socket itself only ever saw plain http).
+ */
+function originOf(c: Context): string {
+  const url = new URL(c.req.url);
+  const proto = c.req.header('x-forwarded-proto') ?? url.protocol.replace(':', '');
+  const host = c.req.header('x-forwarded-host') ?? c.req.header('host') ?? url.host;
+  return `${proto}://${host}`;
+}
+
+/**
+ * Rewrite the root-relative `og:image` / `twitter:image` in index.html to
+ * absolute URLs against the host that asked for the page.
+ *
+ * Unfurlers want absolute URLs — Twitter's documentation insists on them —
+ * but the file on disk cannot know what host it will be served from, and
+ * hard-coding ours would mean every self-hosted office advertising a picture
+ * of somebody else's. So the file keeps a path, and this fills in the origin
+ * per request, which is the only place it is actually known.
+ *
+ * Deliberately narrow: only `content="/…"` on those two meta tags, only
+ * index.html, only when it is about to be sent as an HTML document. Anything
+ * broader would be a template engine, which this is not.
+ */
+export function absoluteSocialUrls(html: string, origin: string): string {
+  return html.replace(
+    /(<meta\s+(?:property="og:image"|name="twitter:image")\s+content=")(\/[^"]*)"/g,
+    (_match, head: string, path: string) => `${head}${origin}${path}"`,
+  );
+}
 
 export function createApp(deps: { db: Db; rooms: WorkspaceManager; webDist?: string }): Hono {
   const { db, rooms } = deps;
@@ -81,15 +113,13 @@ export function createApp(deps: { db: Db; rooms: WorkspaceManager; webDist?: str
       Date.now(),
     );
 
-    const url = new URL(c.req.url);
-    const proto = c.req.header('x-forwarded-proto') ?? url.protocol.replace(':', '');
-    const host = c.req.header('x-forwarded-host') ?? c.req.header('host') ?? url.host;
+    const origin = originOf(c);
     return c.json({
       deviceKey: key,
       memberId: member.id,
       displayName: member.displayName,
       roomCode,
-      wsUrl: `${proto === 'https' ? 'wss' : 'ws'}://${host}`,
+      wsUrl: origin.replace(/^http/, 'ws'),
     });
   });
 
@@ -173,10 +203,21 @@ export function createApp(deps: { db: Db; rooms: WorkspaceManager; webDist?: str
       }
       const type = MIME[extname(filePath)] ?? 'application/octet-stream';
       const immutable = requested.startsWith('/assets/');
-      return c.body(readFileSync(filePath), 200, {
+      const headers = {
         'content-type': type,
         'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
-      });
+      };
+      // The one document whose contents depend on who asked for it: the
+      // unfurl card's URL has to be absolute, and only the request knows
+      // against what. Everything else is bytes off the disk.
+      if (type === MIME['.html']) {
+        return c.body(
+          absoluteSocialUrls(readFileSync(filePath, 'utf8'), originOf(c)),
+          200,
+          headers,
+        );
+      }
+      return c.body(readFileSync(filePath), 200, headers);
     });
   }
 

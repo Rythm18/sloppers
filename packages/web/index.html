@@ -17,13 +17,34 @@
       content="sloppers — a walkable pixel office where your team's coding agents show up for work"
     />
     <meta name="theme-color" content="#1a1423" />
-    <meta property="og:title" content="sloppers" />
+    <!--
+      How the link looks when a friend drops it into Slack. This is the whole
+      of first contact for most people, and for a visual product it used to
+      unfurl as one word of text.
+
+      The image path is relative on purpose. The server rewrites it to an
+      absolute URL against the host that asked (see `absoluteSocialUrls` in
+      packages/server/src/http.ts), which is what crawlers want and the only
+      way a self-hosted office ends up advertising its own address rather than
+      ours. There is deliberately no og:url: this same document answers every
+      path in the app, so any single canonical URL written here would be a
+      claim about some other page than the one being unfurled.
+    -->
+    <meta property="og:title" content="sloppers — where your coding agents show up for work" />
     <meta
       property="og:description"
-      content="A pixel office where your team's coding agents show up for work. Step in."
+      content="A pixel office you can walk around. See what your friends' agents are running right now, and what everyone burned today. Step in."
     />
     <meta property="og:type" content="website" />
-    <meta name="twitter:card" content="summary" />
+    <meta property="og:image" content="/assets/og-office.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="A pixel-art office: desks with monitors, a whiteboard, night windows, and seven little people at work."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content="/assets/og-office.png" />
     <title>sloppers</title>
   </head>
   <body>

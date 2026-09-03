@@ -17,30 +17,38 @@ function knock(id: string, displayName: string): KnockView {
   return { id, displayName, avatar: 'pixel', requestedAt: 1 };
 }
 
-function seed(role: MemberRole, knocks: KnockView[] = []): void {
+function member(id: string, role: MemberRole, sharing: boolean) {
+  return {
+    id,
+    displayName: id,
+    avatar: 'pixel',
+    role,
+    presence: 'active' as const,
+    position: { x: 0, y: 0, dir: 'down' as const, moving: false },
+    sessions: [],
+    today: {
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      sessionsRun: 0,
+      activeMinutes: 0,
+    },
+    sharing,
+  };
+}
+
+function seed(
+  role: MemberRole,
+  knocks: KnockView[] = [],
+  { sharing = false, me = 'me', alone = true } = {},
+): void {
   useStore.getState().reset();
   apply({
     type: 'world',
-    you: { memberId: 'me' },
+    you: { memberId: me },
     roomCode: 'the-lab-k4xp2q',
     roomName: 'the lab',
-    members: [
-      {
-        id: 'me',
-        displayName: 'ridham',
-        avatar: 'pixel',
-        role,
-        presence: 'active',
-        position: { x: 0, y: 0, dir: 'down', moving: false },
-        sessions: [],
-        today: {
-          tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          sessionsRun: 0,
-          activeMinutes: 0,
-        },
-        sharing: false,
-      },
-    ],
+    members: alone
+      ? [member(me, role, sharing)]
+      : [member(me, role, sharing), member('nina', 'member', true)],
     leaderboard: [],
   });
   if (knocks.length > 0) apply({ type: 'knocks', knocks });
@@ -62,7 +70,12 @@ function pointerIs(kind: 'coarse' | 'fine'): void {
 }
 
 describe('HUD', () => {
-  beforeEach(() => useStore.getState().reset());
+  beforeEach(() => {
+    useStore.getState().reset();
+    // The nudge remembers being answered, and remembering it between tests
+    // would make every one of them depend on the order they ran in.
+    localStorage.clear();
+  });
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
@@ -129,6 +142,25 @@ describe('HUD', () => {
     expect(screen.queryByText(/WASD/)).toBeNull();
   });
 
+  // Half the hint was unfollowable in the office a new arrival actually
+  // lands in: their own, with nobody else in it. Sending somebody looking for
+  // a teammate who is not there is the hint inventing a bug for them to hunt.
+  it('does not send somebody in an empty office looking for a teammate', () => {
+    pointerIs('fine');
+    seed('owner');
+    render(<HUD />);
+
+    expect(screen.getByText('WASD or arrows to walk')).toBeTruthy();
+  });
+
+  it('mentions them once there is somebody to click', () => {
+    pointerIs('fine');
+    seed('owner', [], { alone: false });
+    render(<HUD />);
+
+    expect(screen.getByText(/click a teammate to peek/)).toBeTruthy();
+  });
+
   // A tablet gains a keyboard, a convertible is folded back into a laptop.
   // Asking once at load and never again leaves the wrong instruction on
   // screen for the rest of the session.
@@ -157,5 +189,78 @@ describe('HUD', () => {
     });
 
     expect(screen.getByText(/WASD or arrows to walk/)).toBeTruthy();
+  });
+
+  /**
+   * Somebody joined this office on 19 August, never paired a collector, and
+   * was swept out by the seven-day cleanup on 3 September. For a fortnight
+   * the office showed them four identical buttons and said nothing about the
+   * one that mattered. This is the office saying it.
+   */
+  describe('the empty-avatar nudge', () => {
+    const nudge = () => screen.queryByText(/nothing is sharing from your machine/);
+
+    it('tells a member who has never paired what is missing', () => {
+      seed('member');
+      render(<HUD />);
+
+      expect(nudge()).toBeTruthy();
+      // And names the button rather than pointing at a corner, because the
+      // buttons are a row on a laptop and a wrapped column on a phone. The
+      // name in the sentence has to be the name on the button.
+      const named = screen.getByText('Share agents', { selector: 'strong' });
+      expect(named.textContent).toBe(
+        screen.getByRole('button', { name: 'Share agents' }).textContent,
+      );
+    });
+
+    it('says nothing to somebody who is already sharing', () => {
+      seed('member', [], { sharing: true });
+      render(<HUD />);
+
+      expect(nudge()).toBeNull();
+    });
+
+    it('takes "not now" for an answer, and keeps taking it', () => {
+      seed('member');
+      const first = render(<HUD />);
+      fireEvent.click(screen.getByRole('button', { name: 'not now' }));
+      expect(nudge()).toBeNull();
+
+      // A reload: same member, same browser, nothing in the store about it.
+      first.unmount();
+      seed('member');
+      render(<HUD />);
+
+      expect(nudge()).toBeNull();
+    });
+
+    // Sharing settles it permanently rather than merely hiding it while the
+    // flag is up — otherwise the day a collector stops, the office turns
+    // back into a leaflet for somebody who has been sharing for a month.
+    it('never comes back once they have shared, even if sharing stops', () => {
+      seed('member', [], { sharing: true });
+      const first = render(<HUD />);
+      first.unmount();
+
+      seed('member', [], { sharing: false });
+      render(<HUD />);
+
+      expect(nudge()).toBeNull();
+    });
+
+    // Keyed by member, not by office: the invite code the identity is filed
+    // under changes on rotation and the member id does not.
+    it('is still owed to a different member on the same browser', () => {
+      seed('member');
+      const first = render(<HUD />);
+      fireEvent.click(screen.getByRole('button', { name: 'not now' }));
+      first.unmount();
+
+      seed('member', [], { me: 'someone-else' });
+      render(<HUD />);
+
+      expect(nudge()).toBeTruthy();
+    });
   });
 });

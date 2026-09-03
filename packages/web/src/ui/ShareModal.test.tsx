@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import type { MemberView, ServerToWeb } from '@sloppers/protocol';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mintPairingCode } from '../net/socket.js';
@@ -10,12 +11,48 @@ import { ShareModal } from './ShareModal.js';
  * key and nothing else — no focus trap, an office still clickable behind it —
  * while the two dialogs beside it shared one implementation of all of that.
  * These tests are about it keeping the same manners they do.
+ *
+ * And about the thing it never did at all: notice. Pairing finishes in a
+ * terminal, and this dialog sat there counting down a code that had already
+ * been spent, with nothing anywhere saying it had worked.
  */
 
 vi.mock('../net/socket.js', () => ({ mintPairingCode: vi.fn() }));
 
 const mintMock = vi.mocked(mintPairingCode);
 const ROOM = 'the-lab-k4xp2q';
+
+const apply = (msg: ServerToWeb) => act(() => useStore.getState().applyServer(msg));
+
+function member(sharing: boolean): MemberView {
+  return {
+    id: 'me',
+    displayName: 'ridham',
+    avatar: 'pixel',
+    role: 'owner',
+    presence: 'active',
+    position: { x: 0, y: 0, dir: 'down', moving: false },
+    sessions: [],
+    today: {
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      sessionsRun: 0,
+      activeMinutes: 0,
+    },
+    sharing,
+  };
+}
+
+/** In the office, as a member who is or is not already sharing. */
+function seed(sharing = false): void {
+  apply({
+    type: 'world',
+    you: { memberId: 'me' },
+    roomCode: ROOM,
+    roomName: 'the lab',
+    members: [member(sharing)],
+    leaderboard: [],
+  });
+}
 
 /** Open the modal and let the mint promise settle. */
 async function open(): Promise<void> {
@@ -27,7 +64,11 @@ async function open(): Promise<void> {
 describe('ShareModal', () => {
   beforeEach(() => {
     mintMock.mockReset();
-    mintMock.mockResolvedValue({ pairingCode: 'K4X-P2Q', expiresAt: Date.now() + 300_000 });
+    mintMock.mockResolvedValue({
+      ok: true,
+      pairingCode: 'K4X-P2Q',
+      expiresAt: Date.now() + 300_000,
+    });
     useStore.getState().reset();
     useStore.getState().setRoomCode(ROOM);
   });
@@ -99,7 +140,11 @@ describe('ShareModal', () => {
     await open();
     act(() => useStore.getState().setShareOpen(false));
 
-    mintMock.mockResolvedValue({ pairingCode: 'W9M-3TB', expiresAt: Date.now() + 300_000 });
+    mintMock.mockResolvedValue({
+      ok: true,
+      pairingCode: 'W9M-3TB',
+      expiresAt: Date.now() + 300_000,
+    });
     await open();
 
     expect(screen.getByText(`npx sloppers@latest share W9M-3TB@${location.host}`)).toBeTruthy();
@@ -164,17 +209,85 @@ describe('ShareModal', () => {
     });
   });
 
-  it('offers another go when the server would not mint a code', async () => {
-    mintMock.mockResolvedValueOnce(null);
+  it('offers another go when the office could not be reached', async () => {
+    mintMock.mockResolvedValueOnce({ ok: false, reason: 'unreachable' });
     render(<ShareModal />);
     await open();
 
-    expect(screen.getByText(/Could not mint a code/)).toBeTruthy();
+    expect(screen.getByText(/Could not reach the office/)).toBeTruthy();
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     });
 
     expect(screen.getByText(`npx sloppers@latest share K4X-P2Q@${location.host}`)).toBeTruthy();
+  });
+
+  // Both failures used to be "the server may be unreachable", including the
+  // one where the server answered immediately and said no. Somebody whose
+  // browser is no longer recognised — a rotated invite, cleared storage —
+  // would press Try again against a server that is perfectly fine, forever.
+  it('tells a refusal apart from an unreachable office', async () => {
+    mintMock.mockResolvedValueOnce({ ok: false, reason: 'refused' });
+    render(<ShareModal />);
+    await open();
+
+    expect(screen.getByText(/does not recognise this browser/)).toBeTruthy();
+    expect(screen.getByText('sloppers relink')).toBeTruthy();
+    expect(screen.queryByText(/Could not reach the office/)).toBeNull();
+  });
+
+  it('counts the code down as a clock, the way the sign-in dialog does', async () => {
+    mintMock.mockResolvedValue({
+      ok: true,
+      pairingCode: 'K4X-P2Q',
+      expiresAt: Date.now() + 600_000,
+    });
+    render(<ShareModal />);
+    await open();
+
+    expect(screen.getByText('code expires in 10:00')).toBeTruthy();
+  });
+
+  describe('when the pairing lands', () => {
+    /** What the office sends the moment a collector attaches. */
+    const collectorAttaches = () => apply({ type: 'member', member: member(true) });
+
+    it('says so, instead of counting down a code that has been spent', async () => {
+      seed(false);
+      render(<ShareModal />);
+      await open();
+      expect(screen.getByText(`npx sloppers@latest share K4X-P2Q@${location.host}`)).toBeTruthy();
+
+      collectorAttaches();
+
+      expect(screen.getByText(/your avatar is sharing/i)).toBeTruthy();
+      expect(screen.queryByText(/npx sloppers@latest share/)).toBeNull();
+      expect(screen.queryByText(/code expires in/)).toBeNull();
+    });
+
+    it('leaves the way out under the hand that is already there', async () => {
+      seed(false);
+      render(<ShareModal />);
+      await open();
+      collectorAttaches();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Back to the office' }));
+
+      expect(useStore.getState().shareOpen).toBe(false);
+    });
+
+    // Somebody pairing a second laptop is already sharing when they open
+    // this. Congratulating them on a pairing that happened last month — and
+    // hiding the command they came here for — would be the dialog reading
+    // its own state instead of what just happened.
+    it('says nothing to somebody who was already sharing when they opened it', async () => {
+      seed(true);
+      render(<ShareModal />);
+      await open();
+
+      expect(screen.queryByText(/your avatar is sharing/i)).toBeNull();
+      expect(screen.getByText(`npx sloppers@latest share K4X-P2Q@${location.host}`)).toBeTruthy();
+    });
   });
 });

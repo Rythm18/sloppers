@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { describeTargets, parseShareArgs, renderStatus, selectPairings } from './cli-support.js';
 import type { CollectorConfig, PairingConfig } from './config.js';
 import type { RoutableSession } from './core/types.js';
+import type { Liveness } from './service/liveness.js';
 
 /** picocolors may or may not emit escapes depending on the terminal. */
 const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
@@ -112,8 +113,12 @@ describe('renderStatus', () => {
     snapshot,
     cwd,
   });
-  const show = (cfg: CollectorConfig, sessions: RoutableSession[] = []) =>
-    plain(renderStatus(cfg, sessions, CONFIG_FILE)).join('\n');
+  const RUNNING: Liveness = { state: 'running', pid: 4321 };
+  const show = (
+    cfg: CollectorConfig,
+    sessions: RoutableSession[] = [],
+    daemon: Liveness = RUNNING,
+  ) => plain(renderStatus(cfg, sessions, CONFIG_FILE, daemon)).join('\n');
 
   it('names the config file, since editing a match pattern has no command', () => {
     // The only way to change what a workspace claims is to edit `match` in
@@ -184,5 +189,41 @@ describe('renderStatus', () => {
     expect(out).toContain('sharing  paused');
     expect(out).toContain('sharing  on');
     expect(out).toContain('hidden   tokens');
+  });
+
+  /**
+   * The failure this whole parameter exists for: somebody's office showed
+   * them as not sharing while `sloppers status` said `sharing on`, in green,
+   * because that line was read off `paused === false` in a config file and
+   * nothing had ever asked whether a daemon was running.
+   */
+  describe('and whether anything is actually running', () => {
+    it('says a workspace is on only when a daemon is', () => {
+      expect(show(config(work), [], RUNNING)).toContain('sharing  on');
+      expect(show(config(work), [], RUNNING)).toContain('collector running');
+    });
+
+    it('refuses to call it on when nothing is running', () => {
+      const out = show(config(work), [], { state: 'stopped' });
+      expect(out).not.toMatch(/sharing {2}on$/m);
+      expect(out).toContain('sharing  off — the collector is not running');
+      expect(out).toContain('collector not running');
+      // And says what to do about it, rather than leaving the log file as
+      // the only place left to look.
+      expect(out).toContain('sloppers run');
+    });
+
+    it('prints uncertainty as uncertainty where liveness cannot be known', () => {
+      const out = show(config(work), [], { state: 'unknown', why: 'no auto-start on win32' });
+      expect(out).toContain('could not tell');
+      expect(out).toContain('no auto-start on win32');
+      expect(out).not.toMatch(/sharing {2}on$/m);
+    });
+
+    it('still calls a paused workspace paused, whatever the daemon is doing', () => {
+      // Paused is the one thing the config does know for certain.
+      const out = show(config(pairing({ paused: true })), [], { state: 'stopped' });
+      expect(out).toContain('sharing  paused');
+    });
   });
 });

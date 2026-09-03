@@ -21,6 +21,7 @@ import { seedTracker } from './core/watcher.js';
 import { exitCodeFor, routingOrder, startDaemon } from './daemon.js';
 import { parseShareTarget, redeemPairingCode, wsUrlFor } from './net/pair.js';
 import { installService, serviceSupported, uninstallService } from './service/install.js';
+import { awaitDaemon, daemonLiveness, type Liveness } from './service/liveness.js';
 
 const CLI_PATH = fileURLToPath(import.meta.url);
 const VERSION = (
@@ -152,8 +153,12 @@ async function share(args: string[]): Promise<void> {
   if (!foreground && serviceSupported()) {
     try {
       await installService(CLI_PATH);
-      console.log(`${pc.green('✓')} auto-start installed — your avatar is live from now on`);
-      console.log(pc.dim('  logs: ~/.sloppers/collector.log · stop sharing: sloppers pause'));
+      // Installing a service and the service starting are two events, and
+      // this used to print the second one on witnessing the first: "your
+      // avatar is live from now on", green tick and all, while launchd was
+      // still deciding — or while the daemon was dying on a config it could
+      // not read. Give it a few seconds and then say what happened.
+      reportDaemon(await awaitDaemon(SERVICE_START_GRACE_MS));
       return;
     } catch (error) {
       console.log(
@@ -163,6 +168,31 @@ async function share(args: string[]): Promise<void> {
   }
   console.log(pc.dim('running in foreground — ctrl-c to stop'));
   runForeground();
+}
+
+/**
+ * How long to wait for the freshly-installed service to actually be running
+ * before reporting what happened. launchd's `bootstrap` returns as soon as
+ * the job is loaded and spawns it a moment later; systemd's `--now` blocks
+ * until the unit is up but not until the process inside it has settled. A few
+ * seconds covers both without turning a one-line command into a wait.
+ */
+const SERVICE_START_GRACE_MS = 4000;
+
+/** What `share` says about the daemon it just tried to start. */
+function reportDaemon(daemon: Liveness): void {
+  if (daemon.state === 'running') {
+    console.log(`${pc.green('✓')} auto-start installed, and the collector is running`);
+    console.log(pc.dim('  your office shows you sharing within a few seconds'));
+  } else if (daemon.state === 'stopped') {
+    console.log(`${pc.yellow('!')} auto-start installed, but the collector is not running`);
+    console.log(pc.dim('  nothing is being shared yet — `sloppers run` shows you why, in here'));
+  } else {
+    console.log(`${pc.green('✓')} auto-start installed`);
+    console.log(pc.dim(`  could not confirm the collector came up (${daemon.why})`));
+    console.log(pc.dim('  `sloppers status` says whether it is running'));
+  }
+  console.log(pc.dim('  logs: ~/.sloppers/collector.log · stop sharing: sloppers pause'));
 }
 
 function runForeground(): void {
@@ -216,7 +246,7 @@ function targeted(config: CollectorConfig, target: string | undefined): number[]
   return chosen;
 }
 
-function status(): void {
+async function status(): Promise<void> {
   const config = loadConfig();
   if (!config || config.pairings.length === 0) {
     console.log('not paired — run `sloppers share <code>` (mint one in the office web app)');
@@ -228,7 +258,15 @@ function status(): void {
   // on start; `status` reporting different totals than the daemon banks would
   // be worse than it being a little slower.
   seedTracker(adapters, tracker, undefined, { catchUp: true });
-  for (const line of renderStatus(config, tracker.routableSnapshot(Date.now()), configPath())) {
+  // Asked of the running process, not of the config: this command exists to
+  // be believed when the office and the config disagree.
+  const daemon = await daemonLiveness();
+  for (const line of renderStatus(
+    config,
+    tracker.routableSnapshot(Date.now()),
+    configPath(),
+    daemon,
+  )) {
     console.log(line);
   }
 }
@@ -332,7 +370,7 @@ async function main(): Promise<void> {
       runForeground();
       break;
     case 'status':
-      status();
+      await status();
       break;
     case 'pause':
       setPaused(true, args[0]);
