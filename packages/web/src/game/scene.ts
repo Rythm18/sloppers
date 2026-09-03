@@ -9,8 +9,8 @@ import Phaser from 'phaser';
 import { useStore } from '../store.js';
 import { bridge, positionAnchor } from './bridge.js';
 import { buildOffice, type OfficeMap, WORLD_H, WORLD_W } from './map.js';
-import { bodyFits, findWalk, type Point } from './path.js';
-import { keyHeading } from './steer.js';
+import { bodyFits, findWalk } from './path.js';
+import { frameHeading, Walk } from './steer.js';
 import { meansWalkThere } from './tap.js';
 import { TILE_SIZE } from './tiles.gen.js';
 
@@ -19,14 +19,6 @@ const REMOTE_SPEED = 130;
 const NEARBY_RADIUS = 88;
 const MAX_NEARBY = 3;
 const HEAD_OFFSET = 26;
-
-/**
- * How long a tapped walk may make no headway before it is abandoned. The
- * planner and the mover agree about the furniture, so this should never
- * fire — but "should never" is how an avatar ends up grinding against a desk
- * forever, sending a position update every tick, until the tab is closed.
- */
-const WALK_STALL_MS = 700;
 
 const PRESENCE_TINT: Record<PresenceState, number> = {
   active: 0x7de0a6,
@@ -146,11 +138,8 @@ export class OfficeScene extends Phaser.Scene {
   private lastSent: Position | null = null;
   private nearbyAt = 0;
   private unsubscribes: (() => void)[] = [];
-  /** Waypoints left in the walk a tap asked for; empty when nobody tapped. */
-  private walk: Point[] = [];
-  /** Closest we have come to the current waypoint, and when that last improved. */
-  private walkBest = Number.POSITIVE_INFINITY;
-  private walkBestAt = 0;
+  /** The walk a tap asked for, as it is paced out. */
+  private walk = new Walk();
   /** Whether the pointer went down on a teammate rather than on the floor. */
   private pointerOnAvatar = false;
 
@@ -262,7 +251,8 @@ export class OfficeScene extends Phaser.Scene {
    * finger that slides a hair off an avatar before lifting still meant them.
    *
    * Whether any of that adds up to a walk is `meansWalkThere`'s to say; this
-   * only hands it what happened, `wasTouch` included.
+   * only hands it what happened — `wasTouch`, and the element the finger came
+   * off, which is what keeps every panel in the React overlay safe.
    *
    * Nothing to unsubscribe: Phaser's per-scene input plugin drops its
    * listeners when the scene shuts down, which is also when this scene dies.
@@ -278,6 +268,7 @@ export class OfficeScene extends Phaser.Scene {
         this.pointerOnAvatar = false;
         const gesture = {
           fromTouch: pointer.wasTouch,
+          onCanvas: pointer.upElement === this.game.canvas,
           travelledPx: pointer.getDistance(),
           onAvatar,
         };
@@ -294,47 +285,7 @@ export class OfficeScene extends Phaser.Scene {
   private walkTo(x: number, y: number): void {
     const sprite = this.player?.sprite;
     if (!sprite) return;
-    this.walk = findWalk(this.office, { x: sprite.x, y: sprite.y }, { x, y });
-    this.walkBest = Number.POSITIVE_INFINITY;
-    this.walkBestAt = this.time.now;
-  }
-
-  /**
-   * The heading that carries the player along a tapped walk, as a unit
-   * vector — the same shape the keys produce, so everything downstream of it
-   * stays one code path. Waypoints fall away as they are reached, and the
-   * whole walk is abandoned if it stops making headway.
-   */
-  private steerAlongWalk(
-    now: number,
-    x: number,
-    y: number,
-    step: number,
-  ): { vx: number; vy: number } {
-    while (this.walk.length > 0) {
-      const next = this.walk[0];
-      if (!next) break;
-      const dx = next.x - x;
-      const dy = next.y - y;
-      const gap = Math.hypot(dx, dy);
-      // Within one tick's travel is arrival: aiming for exactness here only
-      // buys a jitter as the avatar steps back and forth over the spot.
-      if (gap <= step) {
-        this.walk.shift();
-        this.walkBest = Number.POSITIVE_INFINITY;
-        this.walkBestAt = now;
-        continue;
-      }
-      if (gap < this.walkBest - 0.5) {
-        this.walkBest = gap;
-        this.walkBestAt = now;
-      } else if (now - this.walkBestAt > WALK_STALL_MS) {
-        this.walk.length = 0;
-        break;
-      }
-      return { vx: dx / gap, vy: dy / gap };
-    }
-    return { vx: 0, vy: 0 };
+    this.walk.begin(findWalk(this.office, { x: sprite.x, y: sprite.y }, { x, y }), this.time.now);
   }
 
   /** Create the local player (possibly late, if the world message raced). */
@@ -403,25 +354,22 @@ export class OfficeScene extends Phaser.Scene {
   private updatePlayer(time: number, dtMs: number): void {
     if (!this.player || !this.keys) return;
     const k = this.keys;
-    // Somebody typing their own name to confirm a deletion is not asking to
-    // walk east; `keyHeading` is where that is settled, so this cannot ask
-    // for the keys without also asking where the letters are going.
-    let { vx, vy } = keyHeading({
-      left: k.left.isDown || k.a.isDown,
-      right: k.right.isDown || k.d.isDown,
-      up: k.up.isDown || k.w.isDown,
-      down: k.down.isDown || k.s.isDown,
-    });
-
     const sprite = this.player.sprite;
     const step = (SPEED * dtMs) / 1000;
-    // A hand on the keys outranks a walk still being paced out: taking hold
-    // of the avatar has to work the instant you touch a key, not once it
-    // finishes an errand. A key swallowed by a text field is not a hand on
-    // the keys, which is why this reads the suppressed values and not the raw
-    // ones — typing "wander" into the office name must not cancel the walk.
-    if (vx !== 0 || vy !== 0) this.walk.length = 0;
-    else ({ vx, vy } = this.steerAlongWalk(time, sprite.x, sprite.y, step));
+    // Everything about which way to go — the typing guard, a key taking the
+    // avatar back from a tapped walk, waypoints retiring, an errand that has
+    // stopped getting anywhere — is settled in `steer.ts`, in numbers a test
+    // can reach. What is left here is a sprite, a camera and a socket.
+    const { vx, vy } = frameHeading(
+      this.walk,
+      {
+        left: k.left.isDown || k.a.isDown,
+        right: k.right.isDown || k.d.isDown,
+        up: k.up.isDown || k.w.isDown,
+        down: k.down.isDown || k.s.isDown,
+      },
+      { now: time, x: sprite.x, y: sprite.y, step },
+    );
     const moving = vx !== 0 || vy !== 0;
 
     if (vx !== 0 && bodyFits(this.office, sprite.x + vx * step, sprite.y)) sprite.x += vx * step;

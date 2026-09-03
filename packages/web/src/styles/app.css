@@ -374,15 +374,28 @@ button {
   color: var(--wire);
 }
 
-/* The row is a rail for the buttons, not a lid over the office: the gaps
-   between them, and the whole width of it once it stretches on a phone,
-   stay floor you can tap. */
 .hud-actions {
   position: absolute;
   top: 14px;
   right: 14px;
   display: flex;
   gap: 10px;
+}
+
+/*
+ * The row is a rail for the buttons, not a lid over the office: the gaps
+ * between them, and the whole width of it once it stretches on a phone, stay
+ * floor you can tap.
+ *
+ * Written as `.hud > .hud-actions` for the specificity and nothing else.
+ * `.hud > *` above sets `pointer-events: auto` on this very element, and a
+ * bare `.hud-actions` ties with it — so which one won would come down to
+ * which was written last, and a tidy-up that reorders the file would quietly
+ * restore a band across the top of the office that swallows every tap aimed
+ * at the floor behind it. Nothing would fail; the office would just stop
+ * answering up there.
+ */
+.hud > .hud-actions {
   pointer-events: none;
 }
 

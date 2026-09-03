@@ -18,8 +18,13 @@ const TOUCH = '(pointer: coarse)';
  * floor until both are true; a phone turned sideways fails the second and
  * keeps the side-by-side layout, which is the right one for a shape that is
  * all width and no height.
+ *
+ * This must stay word for word the same as the stacking block in
+ * `styles/app.css`. It is the same question asked in two languages, and the
+ * only thing that reads wrong when they disagree is a board that opens over
+ * an office it was supposed to sit beside.
  */
-const STACKED = '(max-width: 720px) and (min-height: 480px)';
+const STACKED = '(max-width: 720px) and (min-height: 500px)';
 
 /**
  * Asked of `globalThis` rather than `window` on purpose: this is read at

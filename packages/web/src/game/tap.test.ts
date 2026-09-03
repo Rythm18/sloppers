@@ -8,7 +8,7 @@ import { type Gesture, meansWalkThere, TAP_SLOP_PX } from './tap.js';
  * and one that was not a finger.
  */
 
-const TAP: Gesture = { fromTouch: true, travelledPx: 0, onAvatar: false };
+const TAP: Gesture = { fromTouch: true, onCanvas: true, travelledPx: 0, onAvatar: false };
 
 describe('meansWalkThere', () => {
   it('takes a still finger on the floor as a destination', () => {
@@ -42,6 +42,20 @@ describe('meansWalkThere', () => {
   // Asked of the event, not of the hardware: a touchscreen laptop reports a
   // fine pointer for the trackpad it mostly uses and still takes real taps.
   it('answers a finger on a machine that also has a mouse', () => {
-    expect(meansWalkThere({ fromTouch: true, travelledPx: 2, onAvatar: false })).toBe(true);
+    expect(meansWalkThere({ ...TAP, travelledPx: 2 })).toBe(true);
+  });
+
+  // Every panel in the React overlay rests on this. Phaser listens for touch
+  // on the *window* and filters by target, so DOM stacking is not what keeps
+  // a tap off the office — a gate inside Phaser is, and it is an internal we
+  // reach through a caret range. Restated here so it is ours to keep.
+  it('ignores a finger that came off a panel laid over the office', () => {
+    expect(meansWalkThere({ ...TAP, onCanvas: false })).toBe(false);
+  });
+
+  it('ignores it however still and however clear of an avatar it was', () => {
+    expect(
+      meansWalkThere({ fromTouch: true, onCanvas: false, travelledPx: 0, onAvatar: false }),
+    ).toBe(false);
   });
 });

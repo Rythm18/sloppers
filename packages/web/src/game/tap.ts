@@ -1,8 +1,21 @@
 /**
  * What a finger lifting off the office floor means.
  *
- * Three things have to be true, and none of them is about where the pointer
- * ended up.
+ * Four things have to be true, and none of them is about where on the floor
+ * the pointer ended up.
+ *
+ * It has to have come off the office itself, rather than off a panel laid
+ * over it. This is not belt-and-braces for the browser's hit testing: Phaser
+ * binds its touch listeners to the *window* and filters by target, so DOM
+ * stacking does not keep a tap off the canvas and never did. Phaser's own
+ * gate is the thing that has been protecting every dialog, card and button in
+ * the overlay — `InputPlugin.js:2066` only emits `POINTER_UP` when
+ * `pointer.upElement === game.canvas`, sending everything else to
+ * `POINTER_UP_OUTSIDE`. That is an internal, we depend on it through a caret
+ * range, and a minor bump could move it without a word. So the condition is
+ * restated here as our own, where it is ours to keep and a test can hold it.
+ * (Touch targets are sticky to where the touch began, so a finger that starts
+ * on a HUD button and lifts over the floor is still the button's.)
  *
  * It has to have been a finger. A mouse click on bare floor did nothing
  * before and does nothing now — desktop already has two ways to drive the
@@ -31,10 +44,14 @@ export const TAP_SLOP_PX = 14;
 export interface Gesture {
   /** Whether this pointer release came from a touchscreen. */
   fromTouch: boolean;
+  /** Whether it came off the office canvas rather than a panel over it. */
+  onCanvas: boolean;
   travelledPx: number;
   onAvatar: boolean;
 }
 
 export function meansWalkThere(gesture: Gesture): boolean {
-  return gesture.fromTouch && !gesture.onAvatar && gesture.travelledPx <= TAP_SLOP_PX;
+  return (
+    gesture.fromTouch && gesture.onCanvas && !gesture.onAvatar && gesture.travelledPx <= TAP_SLOP_PX
+  );
 }
