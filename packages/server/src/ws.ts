@@ -514,6 +514,24 @@ function handleCollector(ws: WebSocket, deps: { db: Db; rooms: WorkspaceManager 
         // minting a pairing code needs an active member.
         const removed = row ? deps.rooms.memberById(row.member_id, { includeRemoved: true }) : null;
         if (removed) {
+          // `member-removed` is a 0.2 code. A 0.1.x collector's enum has four
+          // entries, so the message fails its schema, gets dropped, and the
+          // close behind it reads as a network blip — reconnect, forever, on
+          // ≤30s backoff, for as long as that laptop is open. The one code an
+          // old collector both understands and *stops* on is `superseded`:
+          // it logs "another machine took over", keeps its config, and exits
+          // 0 — which the service files treat as "do not restart". Wrong
+          // words for a ban, but a clean stop with the config intact beats an
+          // eternal retry, and 0.2 collectors get the true sentence.
+          const speaks02 = /^(?:[1-9]\d*\.|0\.(?:[2-9]|\d{2,}))/.test(msg.collectorVersion);
+          if (!speaks02) {
+            sendCollector(ws, {
+              type: 'error',
+              code: 'superseded',
+              message: 'this office no longer accepts reports for this member',
+            });
+            return ws.close();
+          }
           sendCollector(ws, {
             type: 'error',
             code: 'member-removed',

@@ -1278,5 +1278,21 @@ describe('server integration', () => {
     expect(answer.message).not.toContain('sloppers share');
     expect(answer.message).toContain('banned');
     collector.close();
+
+    // A published 0.1.x collector cannot parse `member-removed` — its error
+    // enum has four entries — so the message would be dropped and the close
+    // read as a network blip: reconnect, forever. The one code it both
+    // understands and terminally stops on is `superseded` (exit 0, config
+    // kept, service files decline to restart a successful exit).
+    const old = new WebSocket(`ws://127.0.0.1:${server.port}/ws/collector`);
+    await new Promise<void>((resolve) => old.on('open', () => resolve()));
+    old.send(
+      JSON.stringify({ type: 'hello', deviceKey: paired.deviceKey, collectorVersion: '0.1.1' }),
+    );
+    const oldReply = await new Promise<string>((resolve) =>
+      old.once('message', (d) => resolve(String(d))),
+    );
+    expect((JSON.parse(oldReply) as { code: string }).code).toBe('superseded');
+    old.close();
   });
 });
