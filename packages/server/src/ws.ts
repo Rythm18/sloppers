@@ -196,6 +196,22 @@ function refusalCode(result: Extract<AdminResult, { ok: false }>): 'forbidden' |
   return result.code === 'forbidden' ? 'forbidden' : 'bad-message';
 }
 
+/**
+ * What to tell a browser whose stored credentials the office will not take.
+ * `gone` is the row behind them when there is one — their own secret is what
+ * unlocked it, so none of this is readable by anybody else.
+ *
+ * A lifted ban leaves a `kicked` row, so this is also the sentence an
+ * unbanned person meets when they click the old invite: it has to send them
+ * at the door rather than leave them guessing. A standing ban gets the plain
+ * fact and no route around it.
+ */
+function resumeRefusal(gone: MemberRecord | null): string {
+  if (!gone) return 'unknown member';
+  if (gone.status === 'banned') return 'that office banned you';
+  return 'that seat is gone — pick a name and the invite will let you back in';
+}
+
 function handleWeb(
   ws: WebSocket,
   ip: string,
@@ -263,15 +279,33 @@ function handleWeb(
       // out the people inside it.
       const member = rooms.authMember(msg.memberId, msg.memberSecret);
       if (!member) {
-        return sendWeb(ws, { type: 'error', code: 'bad-join', message: 'unknown member' });
+        // The code stays `bad-join` — it is what the browser latches on to
+        // forget these credentials — but "unknown member" was not true of
+        // somebody the office removed and can still name. It matters most
+        // right after an unban: the row is a tombstone on purpose (banning
+        // freed the display name, so reviving it could collide), and the
+        // thing they were promised is the door, which is exactly what this
+        // sentence has to point at.
+        return sendWeb(ws, {
+          type: 'error',
+          code: 'bad-join',
+          message: resumeRefusal(rooms.removedMember(msg.memberId, msg.memberSecret)),
+        });
       }
       const resumed = rooms.roomById(member.workspaceId);
       if (!resumed) {
         return sendWeb(ws, { type: 'error', code: 'server-error', message: 'room unavailable' });
       }
+      // An office can go ownerless between two visits — the stale sweep
+      // erases whoever opened it if they never paired a device — and a
+      // knock-mode or locked door never reaches the one place that used to
+      // adopt. Somebody coming back is the moment to notice.
+      const heir = rooms.ensureOwner(member.workspaceId);
+      if (heir) resumed.refreshMember(heir);
       rooms.touchMember(member.id);
-      resumed.memberJoined(member);
-      enterAs(resumed, member);
+      const current = heir === member.id ? (rooms.memberById(member.id) ?? member) : member;
+      resumed.memberJoined(current);
+      enterAs(resumed, current);
       return;
     }
 
@@ -463,6 +497,27 @@ function handleCollector(ws: WebSocket, deps: { db: Db; rooms: WorkspaceManager 
         .get(msg.deviceKey) as { member_id: string } | undefined;
       const member = row ? deps.rooms.memberById(row.member_id) : null;
       if (!member) {
+        // Two different failures used to share one answer. A device key that
+        // means nothing (never paired, or paired to a member since deleted —
+        // `delete` erases the devices row with everything else) is genuinely
+        // unknown, and a collector is right to forget a pairing that points
+        // nowhere. A kicked or banned member's key is not that: the row is
+        // still here, the office knows whose machine this is, and it is only
+        // the person who is gone. Telling that machine it is "not paired" made
+        // it delete its own config and print a remedy this server refuses —
+        // minting a pairing code needs an active member.
+        const removed = row ? deps.rooms.memberById(row.member_id, { includeRemoved: true }) : null;
+        if (removed) {
+          sendCollector(ws, {
+            type: 'error',
+            code: 'member-removed',
+            message:
+              removed.status === 'banned'
+                ? 'that office banned you — nothing to share there any more'
+                : 'that office let you go — nothing to share there any more',
+          });
+          return ws.close();
+        }
         sendCollector(ws, {
           type: 'error',
           code: 'unknown-device',

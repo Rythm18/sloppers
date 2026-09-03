@@ -395,6 +395,15 @@ describe('standDownDecision', () => {
     expect(standDownDecision(['superseded', 'unknown-device'])).toBe('unknown-device');
     expect(standDownDecision(['unknown-device'])).toBe('unknown-device');
   });
+
+  it('reports being let go on its own, above a takeover and below a broken pairing', () => {
+    // Three terminal reasons, one message to print. The order is by what the
+    // person can act on: a pairing this machine should re-make outranks a
+    // door that closed on them, which outranks another machine taking over.
+    expect(standDownDecision(['removed'])).toBe('removed');
+    expect(standDownDecision(['removed', 'superseded'])).toBe('removed');
+    expect(standDownDecision(['removed', 'unknown-device'])).toBe('unknown-device');
+  });
 });
 
 describe('exitCodeFor', () => {
@@ -404,6 +413,7 @@ describe('exitCodeFor', () => {
     expect(exitCodeFor('unknown-device')).toBe(0);
     expect(exitCodeFor('superseded')).toBe(0);
     expect(exitCodeFor('unpaired')).toBe(0);
+    expect(exitCodeFor('removed')).toBe(0);
   });
 
   it('exits non-zero for a genuine failure, so the service actually restarts', () => {
@@ -617,9 +627,9 @@ class FakeCollectorServer {
    * was fine and then got revoked (member deleted after the fact), rather
    * than one that was rejected from the very first hello.
    */
-  rejectWith?: 'unknown-device' | 'superseded';
+  rejectWith?: 'unknown-device' | 'superseded' | 'member-removed';
 
-  constructor(rejectWith?: 'unknown-device' | 'superseded') {
+  constructor(rejectWith?: 'unknown-device' | 'superseded' | 'member-removed') {
     this.rejectWith = rejectWith;
     this.wss = new WebSocketServer({ port: 0 });
     this.wss.on('connection', (ws) => {
@@ -1095,6 +1105,48 @@ describe('startDaemon runs one client per pairing', () => {
     // confirm the daemon still only ever stood down once.
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(standDownCalls).toBe(1);
+  }, 30_000);
+
+  it('keeps its config when an office lets the member go, and stops rather than misdirecting', async () => {
+    // Being shown the door is not a broken pairing. The device key is fine
+    // and the office knows exactly whose it is — so nothing on this machine
+    // is wrong, and nothing on this machine should be deleted. The remedy
+    // `unknown-device` prints ("run `sloppers share` again") is one the
+    // office would refuse anyway, because minting needs an active member.
+    const home = mkdtempSync(join(tmpdir(), 'sloppers-daemon-'));
+    const office = new FakeCollectorServer('member-removed');
+    servers.push(office);
+    const solePairing = pairingFor(office.port, ['**'], 'a');
+    saveConfig({ version: 2, pairings: [solePairing] }, home);
+
+    const logged: string[] = [];
+    let stoodDown: string | undefined;
+    daemon = startDaemon({
+      collectorVersion: 'test',
+      home,
+      log: (m) => logged.push(m),
+      onUnknownDevice: () => {
+        stoodDown = 'unknown-device';
+      },
+      onSuperseded: () => {
+        stoodDown = 'superseded';
+      },
+      onMemberRemoved: () => {
+        stoodDown = 'removed';
+      },
+    });
+
+    await waitUntil(() => stoodDown !== undefined);
+    expect(stoodDown).toBe('removed');
+    expect(loadConfig(home)?.pairings.map((p) => p.deviceKey)).toEqual([solePairing.deviceKey]);
+    // It says what is true, and does not send them at a command that fails.
+    expect(logged.some((m) => m.includes('sloppers share'))).toBe(false);
+    expect(logged.some((m) => m.includes('let you go'))).toBe(true);
+
+    // And it stops knocking: one hello, refused, and no reconnect behind it.
+    const attempts = office.connections;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(office.connections).toBe(attempts);
   }, 30_000);
 
   it('does not drop a pairing on a raw connection close — only an authoritative rejection does', async () => {

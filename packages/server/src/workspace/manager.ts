@@ -228,15 +228,28 @@ export class WorkspaceManager {
       .prepare("SELECT COUNT(*) AS n FROM members WHERE workspace_id = ? AND status = 'active'")
       .get(workspace) as { n: number };
     if (count.n >= MAX_MEMBERS_PER_WORKSPACE) return 'room-full';
+    // Somebody already in the office inherits ahead of somebody arriving at
+    // it: a leaked link should not hand the keys to a stranger while a
+    // moderator the owner themselves promoted is sitting inside.
+    this.ensureOwner(workspace);
     // Adoption, not "first ever member": migration 002 can leave a workspace
     // with no members at all (a room that was empty when it migrated), and an
-    // owner who was deleted or banned leaves one ownerless. Whoever walks in
-    // next takes the keys.
+    // owner who was deleted or banned leaves one ownerless. With nobody left
+    // to inherit, whoever walks in next takes the keys.
     const owned = this.db
       .prepare(
         "SELECT 1 FROM members WHERE workspace_id = ? AND role = 'owner' AND status = 'active' LIMIT 1",
       )
       .get(workspace);
+    // Founding an office is not a change of hands — there were no hands, and
+    // the roster says who opened it from the first second. Walking into one
+    // that already had people in it and leaving with the keys is, and that is
+    // the row somebody will want later. Only asked when the office turns out
+    // to be ownerless, which is rare.
+    const adopting =
+      owned === undefined &&
+      this.db.prepare('SELECT 1 FROM members WHERE workspace_id = ? LIMIT 1').get(workspace) !==
+        undefined;
     const record: MemberRecord = {
       id: memberId(),
       workspaceId: workspace,
@@ -266,7 +279,55 @@ export class WorkspaceManager {
       // Unique index on (workspace, lower(name)) WHERE status = 'active'.
       return 'name-taken';
     }
+    // The largest privilege change the system can make, and nobody clicked
+    // anything to cause it. `workspace.adopt` is what answers "who made them
+    // the owner?" — see `ensureOwner` for the other way it happens.
+    if (adopting) this.logEvent(workspace, null, 'workspace.adopt', record.id, 'new member');
     return record;
+  }
+
+  /**
+   * Make sure this office has an owner, and say who just inherited if one had
+   * to. Null when it already had one, or when nobody is left who could take
+   * it. Idempotent, so it is safe to call on any path that might be looking
+   * at an ownerless office.
+   *
+   * An office loses its owner mostly through the stale sweep: whoever opened
+   * it never paired a device and stopped coming back. `createMember` used to
+   * be the only thing that noticed, which a `knock` or `locked` door never
+   * reaches — so every knock waited forever at a door nobody could answer,
+   * and the setting that closed it is owner-only to change. Sealed shut.
+   *
+   * The heir is the most senior person still inside: a moderator first (the
+   * owner picked them, which is the closest thing left to their intent), then
+   * the longest-standing member. Deliberately *not* a fallback to `link`
+   * mode — the door was set that way on purpose, and quietly opening it is a
+   * bigger liberty than handing the keys to somebody already trusted with a
+   * seat. Tombstones are records, not residents, so a room whose only rows
+   * are kicked or banned stays ownerless and ages out.
+   */
+  ensureOwner(workspace: string): string | null {
+    const owned = this.db
+      .prepare(
+        "SELECT 1 FROM members WHERE workspace_id = ? AND role = 'owner' AND status = 'active' LIMIT 1",
+      )
+      .get(workspace);
+    if (owned !== undefined) return null;
+    const heir = this.db
+      .prepare(`
+        SELECT id, role FROM members
+        WHERE workspace_id = ? AND status = 'active'
+        ORDER BY CASE role WHEN 'moderator' THEN 0 ELSE 1 END, created_at, id
+        LIMIT 1
+      `)
+      .get(workspace) as { id: string; role: MemberRole } | undefined;
+    if (!heir) return null;
+    this.db.prepare("UPDATE members SET role = 'owner' WHERE id = ?").run(heir.id);
+    // Nobody is the actor: this is the office repairing itself, and the log
+    // should not name a person who did not decide it. The detail carries what
+    // they were before, which is the whole reason they were chosen.
+    this.logEvent(workspace, null, 'workspace.adopt', heir.id, heir.role);
+    return heir.id;
   }
 
   touchMember(memberIdValue: string): void {
@@ -302,6 +363,17 @@ export class WorkspaceManager {
     remove(stale.map((s) => s.id));
     for (const s of stale) this.rooms.get(s.workspace_id)?.forgetMember(s.id);
 
+    // This is where offices go ownerless: the sweep has no exemption for an
+    // owner, so the friend who opened one from a browser, never ran `sloppers
+    // share`, and did not come back for a week takes the keys with them. Fix
+    // it here, where the loss actually happens, rather than waiting for
+    // somebody to walk in — a knock-mode door has nobody who can let them in,
+    // so nobody may ever walk in again.
+    for (const workspace of new Set(stale.map((s) => s.workspace_id))) {
+      const heir = this.ensureOwner(workspace);
+      if (heir) this.rooms.get(workspace)?.refreshMember(heir);
+    }
+
     // Workspaces whose last member aged out go too — otherwise abandoned
     // offices accumulate until the cap permanently locks out creation. A
     // surviving banned row counts as a member here, and deliberately so: the
@@ -334,6 +406,23 @@ export class WorkspaceManager {
   authMember(memberIdValue: string, secret: string): MemberRecord | null {
     const row = this.db
       .prepare(`SELECT ${MEMBER_COLUMNS} FROM members WHERE id = ? AND status = 'active'`)
+      .get(memberIdValue) as MemberRow | undefined;
+    if (!row || !secretsMatch(row.secret, secret)) return null;
+    return toRecord(row);
+  }
+
+  /**
+   * The tombstone behind credentials `authMember` just refused, when there is
+   * one — so a refusal can say what actually happened instead of "unknown
+   * member". Never a way in: it hands back a row, and every caller of it is
+   * writing a sentence.
+   *
+   * Still secret-checked, and for the usual reason: without it, holding an id
+   * would be enough to ask the office whether that person is banned.
+   */
+  removedMember(memberIdValue: string, secret: string): MemberRecord | null {
+    const row = this.db
+      .prepare(`SELECT ${MEMBER_COLUMNS} FROM members WHERE id = ? AND status != 'active'`)
       .get(memberIdValue) as MemberRow | undefined;
     if (!row || !secretsMatch(row.secret, secret)) return null;
     return toRecord(row);

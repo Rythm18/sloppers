@@ -43,9 +43,23 @@ export const collectorHelloOkSchema = z.object({
 });
 export type CollectorHelloOk = z.infer<typeof collectorHelloOkSchema>;
 
+/**
+ * `member-removed` is the one code here that is not about the device.
+ * `unknown-device` says the key means nothing — the honest answer to a
+ * pairing that was erased, and one a collector rightly responds to by
+ * forgetting it. Being kicked or banned is the opposite: the key is good and
+ * the office knows exactly whose it is, so a collector that hears this keeps
+ * everything it has and simply stops.
+ *
+ * Additive on purpose. `sloppers@0.1.x` is in the wild and its copy of this
+ * enum has four codes, so a message carrying the fifth fails its parse and is
+ * dropped — the socket closes behind it and that collector reconnects on its
+ * usual backoff, which is worse than being told and much better than deleting
+ * its own configuration over a sentence that was never true.
+ */
 export const collectorErrorSchema = z.object({
   type: z.literal('error'),
-  code: z.enum(['unknown-device', 'superseded', 'bad-message', 'server-error']),
+  code: z.enum(['unknown-device', 'superseded', 'bad-message', 'server-error', 'member-removed']),
   message: z.string(),
 });
 export type CollectorError = z.infer<typeof collectorErrorSchema>;

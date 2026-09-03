@@ -206,6 +206,10 @@ function runForeground(): void {
     // failure) do NOT restart us; the user has to run `sloppers share
     // <code>` again to get back in.
     onUnknownDevice: () => process.exit(exitCodeFor('unknown-device')),
+    // Every office let this member go. Nothing on disk is wrong, so nothing
+    // was touched — but there is nobody to share with, and a restart would
+    // ask the same question and get the same answer. Exit clean.
+    onMemberRemoved: () => process.exit(exitCodeFor('removed')),
     // Another machine took over — exit clean so the service does NOT restart.
     onSuperseded: () => process.exit(exitCodeFor('superseded')),
   });

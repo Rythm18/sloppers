@@ -5,6 +5,7 @@ import {
   collectorSnapshotSchema,
   collectorToServerSchema,
   emptyTokens,
+  serverToCollectorSchema,
   serverToWebSchema,
   sessionSnapshotSchema,
   webToServerSchema,
@@ -71,6 +72,26 @@ describe('collector messages', () => {
 
   it('rejects unknown message types', () => {
     expect(collectorToServerSchema.safeParse({ type: 'exfiltrate' }).success).toBe(false);
+  });
+
+  it('carries the codes a collector branches on, new ones included', () => {
+    // Additive only: 0.1.x is out there and speaks this protocol, so the
+    // codes it already knows have to keep parsing exactly as they did, and
+    // one it has never heard of has to fail its parse rather than land as
+    // something it might mistake for a different code — a rejected message
+    // is dropped, and dropping is the safe half of the compatibility deal.
+    for (const code of ['unknown-device', 'superseded', 'bad-message', 'server-error']) {
+      const parsed = serverToCollectorSchema.safeParse({ type: 'error', code, message: 'why' });
+      expect([code, parsed.success]).toEqual([code, true]);
+    }
+    expect(
+      serverToCollectorSchema.safeParse({ type: 'error', code: 'member-removed', message: 'why' })
+        .success,
+    ).toBe(true);
+    expect(
+      serverToCollectorSchema.safeParse({ type: 'error', code: 'from-the-future', message: 'why' })
+        .success,
+    ).toBe(false);
   });
 });
 

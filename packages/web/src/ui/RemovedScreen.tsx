@@ -5,9 +5,16 @@ import type { RemovalReason } from '../store.js';
  * the same thing to the person who lost it: a kick is a door closed, a
  * delete is a record erased, a ban is a decision about them.
  *
- * Only the first two offer a way back, because only the first two have one —
- * the office refuses a banned member by name, and a button that fires an op
- * the server will not honour is a worse answer than no button.
+ * Only the first two offer a way back, because only the first two have one:
+ * a ban stands until somebody lifts it, and that is not this person's to do,
+ * so a button here would be a promise the office has not made.
+ *
+ * What none of them offer is the seat itself. Removal leaves a tombstone row
+ * the office will not authenticate against (`authMember` is active-only), and
+ * that is on purpose — banning frees the display name, so reviving the old
+ * identity could collide with somebody now holding it. "Join again" therefore
+ * means walking back in as somebody new, and each line below says so rather
+ * than letting the button imply otherwise.
  */
 interface Removal {
   /** The word for what happened, in Silkscreen and the alert colour. */
@@ -25,14 +32,14 @@ const REMOVALS: Record<RemovalReason, Removal> = {
     title: 'Shown the door',
     what: (office) => `Somebody removed you from ${office}.`,
     consequence:
-      'Nothing of yours was deleted, and the invite link still works — if you have it, you can walk back in.',
+      'The invite link still works, so you can walk straight back in — you would arrive fresh, though, under a name of your choosing and with none of your stats.',
     canReturn: true,
   },
   banned: {
     title: 'Banned',
     what: (office) => `Somebody banned you from ${office}.`,
     consequence:
-      'That is the end of it for this name. If you think it was a mistake, the only way back is to ask whoever runs the office to lift it.',
+      'That is the end of it for this name, and nothing here will undo it. Whoever runs the office can lift it — there is no telling when — and if they do, the invite takes you back in as somebody new, with none of your stats.',
     canReturn: false,
   },
   deleted: {

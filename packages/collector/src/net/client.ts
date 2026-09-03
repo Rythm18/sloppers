@@ -39,6 +39,12 @@ export interface CollectorClientOptions {
   log: (message: string) => void;
   /** Called when the server rejects our device key (re-pairing needed). */
   onUnknownDevice?: () => void;
+  /**
+   * Called when the office recognises this device and has removed the member
+   * behind it (kicked or banned). Pointedly not `onUnknownDevice`: nothing
+   * about the pairing is wrong, so nothing about it should be undone.
+   */
+  onMemberRemoved?: () => void;
   /** Called when another machine paired for this member took over. */
   onSuperseded?: () => void;
   /**
@@ -188,6 +194,14 @@ export class CollectorClient {
         this.opts.log('server does not recognize this device — run `sloppers share` again');
         this.stop();
         this.opts.onUnknownDevice?.();
+      } else if (msg.type === 'error' && msg.code === 'member-removed') {
+        // The office's own sentence, because only it knows whether this was a
+        // kick or a ban. Terminal either way — reconnecting would ask the
+        // same question and get the same answer — but nothing here is broken,
+        // so nothing here is thrown away.
+        this.opts.log(`${msg.message}; this machine keeps its pairing either way`);
+        this.stop();
+        this.opts.onMemberRemoved?.();
       } else if (msg.type === 'error' && msg.code === 'superseded') {
         this.opts.log('another machine took over sharing for this member — standing down');
         this.stop();

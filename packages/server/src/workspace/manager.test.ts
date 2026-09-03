@@ -130,6 +130,93 @@ describe('WorkspaceManager', () => {
     expect(next.role).toBe('owner');
   });
 
+  it('gives an ownerless office to the senior member already in it, not the next arrival', () => {
+    // The keys should not go to a stranger holding a link while a moderator
+    // the owner themselves promoted is sitting inside.
+    const room = office();
+    const owner = join(room, 'ridham');
+    const early = join(room, 'sam');
+    const moderator = join(room, 'nina');
+    manager.setRole(moderator.id, 'moderator');
+    manager.deleteMember(owner.id);
+
+    expect(manager.ensureOwner(room.id)).toBe(moderator.id);
+    expect(manager.memberById(moderator.id)?.role).toBe('owner');
+    expect(manager.memberById(early.id)?.role).toBe('member');
+    // Idempotent: an office that has an owner is left exactly as it is.
+    expect(manager.ensureOwner(room.id)).toBeNull();
+  });
+
+  it('falls back to the longest-standing member when no moderator is left', () => {
+    const room = office();
+    const owner = join(room, 'ridham');
+    const early = join(room, 'sam');
+    const late = join(room, 'nina');
+    db.prepare('UPDATE members SET created_at = ? WHERE id = ?').run(1000, early.id);
+    db.prepare('UPDATE members SET created_at = ? WHERE id = ?').run(2000, late.id);
+    manager.deleteMember(owner.id);
+
+    expect(manager.ensureOwner(room.id)).toBe(early.id);
+  });
+
+  it('leaves an office with nobody in it ownerless rather than inventing an owner', () => {
+    const room = office();
+    const owner = join(room, 'ridham');
+    const banned = join(room, 'mallory');
+    manager.setStatus(banned.id, 'banned');
+    manager.deleteMember(owner.id);
+
+    // A tombstone is a record, not a resident.
+    expect(manager.ensureOwner(room.id)).toBeNull();
+    expect(manager.memberById(banned.id, { includeRemoved: true })?.role).toBe('member');
+  });
+
+  it('records every change of hands, including the ones nobody clicked', () => {
+    const room = office();
+    const founder = join(room, 'ridham');
+    const heir = join(room, 'sam');
+    manager.deleteMember(founder.id);
+    manager.ensureOwner(room.id);
+    // Nobody is left, so the office is ownerless again and the next person
+    // through the door takes it — the shape of the leaked-link case.
+    manager.setStatus(heir.id, 'banned');
+    const stranger = join(room, 'mallory');
+
+    const adoptions = manager.events(room.id).filter((e) => e.action === 'workspace.adopt');
+    expect(adoptions).toHaveLength(2);
+    expect(adoptions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ actorId: null, targetId: heir.id, detail: 'member' }),
+        expect.objectContaining({ actorId: null, targetId: stranger.id, detail: 'new member' }),
+      ]),
+    );
+  });
+
+  it('does not call opening an office a change of hands', () => {
+    // Nobody handed anything over — the roster has said who owns it since the
+    // second it existed. An event here would put a line in every office's log
+    // answering a question nobody asks.
+    const room = office();
+    join(room, 'ridham');
+    expect(manager.events(room.id)).toEqual([]);
+  });
+
+  it('adopts an office the sweep just emptied of its owner', () => {
+    const room = office();
+    const gone = join(room, 'ridham');
+    const staying = join(room, 'sam');
+    const old = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    db.prepare('UPDATE members SET created_at = ?, last_seen_at = ? WHERE id = ?').run(
+      old,
+      old,
+      gone.id,
+    );
+    db.prepare('UPDATE workspaces SET created_at = ?').run(old);
+
+    expect(manager.cleanupStaleMembers()).toBe(1);
+    expect(manager.memberById(staying.id)?.role).toBe('owner');
+  });
+
   it('only addresses a removed member when asked to', () => {
     const room = manager.createRoom('the lab');
     if (!room) throw new Error('room not created');

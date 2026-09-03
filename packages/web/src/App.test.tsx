@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import type { ServerToWeb } from '@sloppers/protocol';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App.js';
 import { useStore } from './store.js';
@@ -23,13 +23,15 @@ vi.mock('./game/PhaserStage.js', () => ({
   PhaserStage: () => <div className="stage" data-testid="office" aria-hidden="true" />,
 }));
 
+const net = vi.hoisted(() => ({ clearIdentity: vi.fn() }));
+
 vi.mock('./net/socket.js', () => ({
   OfficeSocket: class {
     start(): void {}
     stop(): void {}
   },
   loadIdentity: () => null,
-  clearIdentity: () => {},
+  clearIdentity: net.clearIdentity,
   redeemRelinkToken: async () => null,
   mintPairingCode: async () => ({ pairingCode: 'K4X-P2Q', expiresAt: Date.now() + 600_000 }),
   fetchRoomPreview: async () => null,
@@ -102,5 +104,26 @@ describe('App', () => {
       useStore.getState().setSettingsOpen(true);
     });
     expect(office.hasAttribute('inert')).toBe(true);
+  });
+
+  it('puts a kicked member back at the office door, with the dead credentials forgotten', async () => {
+    // "Join again" is the whole promise the card makes to the two reasons
+    // that offer it. What it has to land on is the invite form for the same
+    // office — not the landing page, and not a resume that would stall on
+    // credentials the office no longer honours.
+    net.clearIdentity.mockClear();
+    await act(async () => {
+      useStore.getState().applyServer({ type: 'removed', reason: 'kicked' });
+    });
+    render(<App />);
+    expect(screen.getByText('Shown the door')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Join again' }));
+    });
+
+    expect(net.clearIdentity).toHaveBeenCalledWith('the-lab-k4xp2q');
+    expect(screen.queryByText('Shown the door')).toBeNull();
+    expect(screen.getByText('Your name')).toBeTruthy();
   });
 });

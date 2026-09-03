@@ -737,6 +737,107 @@ describe('server integration', () => {
     expect(admitted.type === 'world' && admitted.you.memberSecret).toBeTruthy();
   });
 
+  it('turns a lifted ban into a door somebody can actually walk through', async () => {
+    const { client: owner, world } = await join('ridham');
+    const { client: sam, world: samWorld } = await join('sam');
+    const credentials = {
+      type: 'join',
+      memberId: samWorld.you.memberId,
+      memberSecret: samWorld.you.memberSecret,
+    };
+
+    owner.send({ type: 'admin', op: { kind: 'ban', memberId: samWorld.you.memberId } });
+    const shown = await sam.next((m) => m.type === 'removed');
+    expect(shown.type === 'removed' && shown.reason).toBe('banned');
+
+    // While the ban stands, the office says so rather than coaching them
+    // round it. Their own secret is what unlocks the answer, so nothing here
+    // is readable by anybody else.
+    const duringBan = new WebClientHarness(server.port);
+    clients.push(duringBan);
+    await duringBan.open();
+    duringBan.send(credentials);
+    const refusedBanned = await duringBan.next((m) => m.type === 'error');
+    if (refusedBanned.type !== 'error') throw new Error('unreachable');
+    expect(refusedBanned.code).toBe('bad-join');
+    expect(refusedBanned.message).toContain('banned');
+    expect(refusedBanned.message).not.toContain('pick a name');
+
+    owner.send({ type: 'admin', op: { kind: 'unban', memberId: samWorld.you.memberId } });
+    await owner.next((m) => m.type === 'roster' && m.members.some((r) => r.status === 'kicked'));
+
+    // The credentials stay dead — the tombstone is what keeps the freed name
+    // from colliding, and reviving it was never the promise. The promise was
+    // the door, so the refusal has to point at it.
+    const stale = new WebClientHarness(server.port);
+    clients.push(stale);
+    await stale.open();
+    stale.send(credentials);
+    const refused = await stale.next((m) => m.type === 'error');
+    if (refused.type !== 'error') throw new Error('unreachable');
+    expect(refused.code).toBe('bad-join');
+    expect(refused.message).toContain('pick a name');
+
+    // And the invite is the capability: same link, same name, fresh member.
+    const back = await arrive(world.roomCode, 'sam');
+    const again = (await back.next((m) => m.type === 'world')) as WebWorld;
+    expect(again.you.memberId).not.toBe(samWorld.you.memberId);
+    expect(again.you.memberSecret).toBeTruthy();
+  });
+
+  it('hands an ownerless office to whoever is left rather than sealing it shut', async () => {
+    const { client: owner, world } = await join('ridham');
+    const { client: nina, world: ninaWorld } = await join('nina');
+    const { world: samWorld } = await join('sam');
+    owner.send({ type: 'admin', op: { kind: 'promote', memberId: ninaWorld.you.memberId } });
+    await owner.next((m) => m.type === 'member' && m.member.role === 'moderator');
+    await setJoinMode(owner, 'knock');
+
+    // The way an office actually loses its owner: whoever set it up never
+    // paired a device and stopped coming back. Nothing in the knock door
+    // would ever adopt, so without a repair the room is sealed for good.
+    const old = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    server.db
+      .prepare('UPDATE members SET created_at = ?, last_seen_at = ? WHERE id = ?')
+      .run(old, old, world.you.memberId);
+    server.db.prepare('UPDATE workspaces SET created_at = ?').run(old);
+    server.rooms.cleanupStaleMembers();
+
+    // The moderator the owner themselves promoted inherits, ahead of the
+    // longer-standing plain member — and the people inside are told.
+    const inherited = await nina.next((m) => m.type === 'member' && m.member.role === 'owner');
+    expect(inherited.type === 'member' && inherited.member.id).toBe(ninaWorld.you.memberId);
+    expect(server.rooms.memberById(samWorld.you.memberId)?.role).toBe('member');
+
+    // Which is the whole point: the door opens again.
+    const visitor = await arrive(world.roomCode, 'theo');
+    const waiting = await visitor.next((m) => m.type === 'knocking');
+    expect(waiting.type === 'knocking' && waiting.answerable).toBe(true);
+    const knock = await firstKnock(nina);
+    nina.send({ type: 'admin', op: { kind: 'knock-admit', knockId: knock.id } });
+    expect((await visitor.next((m) => m.type === 'world')).type).toBe('world');
+  });
+
+  it('writes an audit row for an office that changed hands with nobody clicking', async () => {
+    const { client: owner, world } = await join('ridham');
+    const { world: samWorld } = await join('sam');
+
+    const old = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    server.db
+      .prepare('UPDATE members SET created_at = ?, last_seen_at = ? WHERE id = ?')
+      .run(old, old, world.you.memberId);
+    server.db.prepare('UPDATE workspaces SET created_at = ?').run(old);
+    server.rooms.cleanupStaleMembers();
+    await owner.waitClosed();
+
+    // "Who made *them* the owner?" is the argument a friend group has, and
+    // the only honest answer is a row that says nobody did.
+    const events = server.rooms.events(server.rooms.getRoom(world.roomCode)?.id ?? '');
+    const adopted = events.find((e) => e.action === 'workspace.adopt');
+    expect(adopted?.targetId).toBe(samWorld.you.memberId);
+    expect(adopted?.actorId).toBeNull();
+  });
+
   it('pair → redeem → collector snapshot → browser sees sessions and leaderboard', async () => {
     const { client, world } = await join('ridham');
     const base = `http://127.0.0.1:${server.port}`;
@@ -955,5 +1056,48 @@ describe('server integration', () => {
       collector.once('message', (d) => resolve(String(d))),
     );
     expect(JSON.parse(reply).code).toBe('unknown-device');
+  });
+
+  it('tells a removed member’s collector it was let go, not that its pairing is broken', async () => {
+    const { client: owner } = await join('ridham');
+    const { world: samWorld } = await join('sam');
+    const base = `http://127.0.0.1:${server.port}`;
+
+    const mint = await fetch(`${base}/api/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        memberId: samWorld.you.memberId,
+        memberSecret: samWorld.you.memberSecret,
+      }),
+    });
+    const { pairingCode } = (await mint.json()) as { pairingCode: string };
+    const redeem = await fetch(`${base}/api/pair/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pairingCode }),
+    });
+    const paired = (await redeem.json()) as PairRedeemResponse;
+
+    owner.send({ type: 'admin', op: { kind: 'ban', memberId: samWorld.you.memberId } });
+    await owner.next((m) => m.type === 'roster' && m.members.some((r) => r.status === 'banned'));
+
+    // The device row survives a ban — only a delete erases it — so the
+    // pairing on that machine is perfectly good and the office knows exactly
+    // whose it is. Answering `unknown-device` makes the daemon delete its own
+    // config and print a remedy the office would refuse.
+    const collector = new WebSocket(`ws://127.0.0.1:${server.port}/ws/collector`);
+    await new Promise<void>((resolve) => collector.on('open', () => resolve()));
+    collector.send(
+      JSON.stringify({ type: 'hello', deviceKey: paired.deviceKey, collectorVersion: '0.2.0' }),
+    );
+    const reply = await new Promise<string>((resolve) =>
+      collector.once('message', (d) => resolve(String(d))),
+    );
+    const answer = JSON.parse(reply) as { code: string; message: string };
+    expect(answer.code).toBe('member-removed');
+    expect(answer.message).not.toContain('sloppers share');
+    expect(answer.message).toContain('banned');
+    collector.close();
   });
 });

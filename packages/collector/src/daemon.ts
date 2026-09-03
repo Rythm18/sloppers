@@ -264,7 +264,7 @@ export function buildPairingSnapshot(
 }
 
 /** Why one pairing's client gave up; see `standDownDecision`. */
-export type StandDownReason = 'unknown-device' | 'superseded';
+export type StandDownReason = 'unknown-device' | 'superseded' | 'removed';
 
 /**
  * What the daemon as a whole should do. The two client reasons, plus
@@ -282,14 +282,19 @@ export type StandDown = StandDownReason | 'unpaired';
  * For the single-pairing user that is exactly the previous behaviour: the one
  * client reports, the daemon stands down.
  *
- * When the reasons disagree, `unknown-device` wins over `superseded` for the
- * message it produces (see `STAND_DOWN_MESSAGE`) — not for the exit code:
- * `exitCodeFor` treats every `StandDown` reason as equally terminal, so
- * neither one restarts the service. `unknown-device` reaching here at all is
- * vestigial in today's wiring: a single pairing's own rejection is absorbed
- * by `dropPairing` before it ever gets this far (see `createRuntime`'s
- * `onUnknownDevice`), which is what actually closes the restart loop this
- * reason used to cause back when it lingered here instead of being dropped.
+ * When the reasons disagree they only compete over the message
+ * (`STAND_DOWN_MESSAGE`), never the exit code: `exitCodeFor` treats every
+ * `StandDown` reason as equally terminal, so none of them restarts the
+ * service. The order is by what the person can actually act on — a pairing
+ * this machine should re-make (`unknown-device`), then a door that closed on
+ * them (`removed`), then another machine taking over (`superseded`).
+ * `unknown-device` reaching here at all is vestigial in today's wiring: a
+ * single pairing's own rejection is absorbed by `dropPairing` before it ever
+ * gets this far (see `createRuntime`'s `onUnknownDevice`), which is what
+ * actually closes the restart loop this reason used to cause back when it
+ * lingered here instead of being dropped. `removed` deliberately is *not*
+ * absorbed that way — see `onMemberRemoved` — so this is the only place it
+ * is ever decided.
  *
  * An empty list is `unpaired` rather than "carry on". It is not a rejection
  * and not a takeover — the config simply has nothing in it, which is the same
@@ -302,7 +307,9 @@ export function standDownDecision(
 ): StandDown | null {
   if (reasons.length === 0) return 'unpaired';
   if (reasons.some((reason) => reason === undefined)) return null;
-  return reasons.every((reason) => reason === 'superseded') ? 'superseded' : 'unknown-device';
+  if (reasons.some((reason) => reason === 'unknown-device')) return 'unknown-device';
+  if (reasons.some((reason) => reason === 'removed')) return 'removed';
+  return 'superseded';
 }
 
 /**
@@ -313,6 +320,12 @@ const STAND_DOWN_MESSAGE: Record<StandDown, string> = {
   'unknown-device':
     'no workspace is sharing any more — this device is not recognized; run `sloppers share` again',
   superseded: 'no workspace is sharing any more — another machine took over every one',
+  // No remedy on purpose. `sloppers share` mints through an active member, so
+  // the office would refuse it — and the pairing on disk is fine and stays
+  // put, so there is nothing here to repair. If somebody lets them back in,
+  // that is a new member and a new code.
+  removed:
+    'no workspace is sharing any more — that office let you go; nothing here was changed, and nothing here needs fixing',
   unpaired: 'no workspaces left in the config — nothing to share; standing down',
 };
 
@@ -381,6 +394,14 @@ export function startDaemon(opts: {
    * more; the daemon needs `sloppers share <code>` run again.
    */
   onUnknownDevice?: () => void;
+  /**
+   * Every office this device is paired with has removed the member behind it
+   * (kicked or banned). Terminal like the two below — asking again gets the
+   * same answer — but the pairings stay on disk: they are not broken, and
+   * deleting them would be this machine punishing itself for somebody else's
+   * decision. There is no command to run, so none is printed.
+   */
+  onMemberRemoved?: () => void;
   /** Another machine took over every workspace; the daemon has stopped. */
   onSuperseded?: () => void;
 }): Daemon {
@@ -414,7 +435,10 @@ export function startDaemon(opts: {
     // `unpaired` exits clean like `superseded`: nothing is wrong that a
     // restart could fix, and `startDaemon` would only throw on the way back
     // up, so a restarting service would flap instead of standing still.
+    // `unpaired` rides with `superseded` here because it has no callback of
+    // its own and never did — both mean "stopped, nothing to do".
     if (decision === 'unknown-device') opts.onUnknownDevice?.();
+    else if (decision === 'removed') opts.onMemberRemoved?.();
     else opts.onSuperseded?.();
   };
 
@@ -461,6 +485,15 @@ export function startDaemon(opts: {
         onUnknownDevice: () => {
           const remaining = dropPairing(runtime.pairing.deviceKey, opts.home);
           if (remaining.pairings.length === 0) finishUnknownDevice();
+        },
+        // Deliberately not `dropPairing`: the office knows this device and
+        // said so — it is the member it will not have. Erasing a working
+        // pairing here is what used to leave somebody banned from one office
+        // with no sloppers config at all, and a printed remedy that server
+        // would refuse. Stands down like `superseded`, keeping everything.
+        onMemberRemoved: () => {
+          runtime.standDown = 'removed';
+          standDown();
         },
         onSuperseded: () => {
           runtime.standDown = 'superseded';

@@ -36,14 +36,23 @@ describe('RemovedScreen', () => {
     expect(screen.getByText('Shown the door')).toBeTruthy();
     expect(screen.getByText(/removed you from the lab/)).toBeTruthy();
     expect(screen.getByText(/invite link still works/)).toBeTruthy();
+    // What comes back is the door, not the seat: the office refuses the
+    // credentials they still hold, so they arrive as somebody new.
+    expect(screen.getByText(/arrive fresh/)).toBeTruthy();
   });
 
-  it('tells a banned member it was a decision about them', () => {
+  it('tells a banned member it was a decision about them, and promises nothing', () => {
     show('banned');
 
     expect(screen.getByText('Banned')).toBeTruthy();
     expect(screen.getByText(/banned you from the lab/)).toBeTruthy();
-    expect(screen.getByText(/ask whoever runs the office to lift it/)).toBeTruthy();
+    // Lifting a ban is somebody else's to do, on nobody's schedule, and it
+    // hands back a door rather than the seat they had. The old line — "the
+    // only way back is to ask whoever runs the office to lift it" — read as
+    // a procedure with an outcome, and there is no procedure.
+    expect(screen.getByText(/no telling when/)).toBeTruthy();
+    expect(screen.getByText(/none of your stats/)).toBeTruthy();
+    expect(screen.queryByText(/the only way back/)).toBeNull();
   });
 
   it('tells a deleted member what was actually erased', () => {
