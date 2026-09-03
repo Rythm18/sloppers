@@ -160,6 +160,37 @@ describe('JoinScreen', () => {
       expect(explains()).toBeTruthy();
     });
 
+    /**
+     * Rotating the invite is the ordinary way a link dies, and it takes
+     * nobody's seat with it — the credentials in a browser name the office by
+     * themselves. A member who reads "this invite doesn't point to an office
+     * anymore" and nothing else has been told their office is gone, which is
+     * both untrue and the one thing they will act on.
+     */
+    it('says what a dead link actually costs, which is not the seat behind it', async () => {
+      previewMock.mockResolvedValue(null);
+      await show(ROOM);
+
+      const tagline = screen.getByText(/doesn’t point to an office anymore/);
+      expect(tagline.textContent).toMatch(/link was rotated/);
+      expect(tagline.textContent).toMatch(/still yours/);
+      expect(tagline.textContent).toMatch(/browser you last used gets you back in/);
+    });
+
+    it('offers the browser as a way back, not only a paired machine', async () => {
+      // The office refuses a member their own name at a rotated door, and the
+      // only remedy offered used to be a collector — which the people this
+      // catches are exactly the people who do not have one.
+      await show(ROOM);
+      act(() => {
+        useStore.getState().setJoinError('someone here is already called ridham');
+      });
+
+      const hint = screen.getByText(/Was that you\?/);
+      expect(hint.textContent).toMatch(/browser you last used/);
+      expect(hint.textContent).toMatch(/sloppers relink/);
+    });
+
     it('says it once, not twice, while the invite is still being looked up', async () => {
       // Mid-lookup the greeting has nothing to greet with, so the tagline is
       // already the headline — and a second copy of it underneath reads as a
