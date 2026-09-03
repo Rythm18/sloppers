@@ -47,8 +47,12 @@ export function burned(tokens: TokenTotals): string {
  */
 export const TOKENS_PRIVATE = 'private';
 
+// "From here on", not "nothing about their day": switching sharing off
+// mid-day suppresses the morning's numbers from display, it does not unsend
+// them. Claiming more privacy than the system delivers is the same class of
+// lie as the zero this state replaced.
 export const TOKENS_PRIVATE_TITLE =
-  'This teammate keeps their numbers to themselves — token sharing is off in their collector, so nothing about their day reaches the office. Not zero: unsaid.';
+  'This teammate keeps their numbers to themselves — token sharing is off in their collector, so their day is not counted here. Not zero: unsaid.';
 
 /** The member card's own sentence for it, where there is room for one. */
 export const TOKENS_PRIVATE_LINE = 'Keeps their numbers to themselves.';

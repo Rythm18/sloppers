@@ -33,7 +33,10 @@ export const BubbleLayer = memo(function BubbleLayer() {
               </div>
               <div className="bubble-line">{sessionLine(top)}</div>
               <div className="bubble-meta">
-                {member.today.tokens ? (
+                {/* Withheld is a choice, and the bubble floats over their
+                    head all day — the one place a false zero would read as
+                    "did nothing" to the whole room. */}
+                {member.today.tokensShared !== false && member.today.tokens ? (
                   <span className="tokens">{burned(member.today.tokens)} tok today</span>
                 ) : null}
                 <span>

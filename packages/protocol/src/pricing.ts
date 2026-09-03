@@ -25,9 +25,9 @@ export interface ModelRate {
  *
  * Re-read 2026-09-04. Since the 2026-08-20 pass OpenAI has cut `gpt-5.6-sol`
  * (5/30 → 4/20, and it is 47.9% of the office's Codex tokens) and `gpt-5.3-codex`
- * (3.5/28 → 1.75/14), and published `gpt-5.5`, whose absence was the one
- * genuine gap in the table. Anthropic has added Fable 5.1, Mythos 5/5.1,
- * Opus 4.5 and Sonnet 4.5; every rate already listed was unchanged.
+ * (3.5/28 → 1.75/14), and published `gpt-5.5` and `gpt-6-astra`. Anthropic has
+ * added Fable 5.1, Mythos 5/5.1, Opus 4.5 and Sonnet 4.5; every rate already
+ * listed was unchanged.
  */
 export const PRICING = {
   asOf: '2026-09-04',
@@ -67,7 +67,11 @@ export const PRICING = {
     // input price. So `cacheWrite` equals `input` on every row below by
     // design; it is not a copy-paste slip, and it is not the Anthropic 1.25x
     // rule with a typo. `cacheRead` is the published cached-input price.
+    // Sol's 4/20 is promotional — the page holds it "at least through
+    // November 21, 2026". If a day suddenly looks pricier after that, re-read
+    // the page before assuming a bug.
     'gpt-5.6-sol': { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 4 },
+    'gpt-6-astra': { input: 10, output: 50, cacheRead: 1, cacheWrite: 10 },
     'gpt-5.6-terra': { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2 },
     'gpt-5.6-luna': { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.2 },
     'gpt-5.5': { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 5 },
