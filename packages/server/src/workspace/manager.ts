@@ -510,7 +510,16 @@ export class WorkspaceManager {
     if (room) room.settings = settings;
   }
 
-  /** Everyone the workspace has ever admitted, removed members included. */
+  /**
+   * Everyone the workspace has ever admitted, removed members included.
+   *
+   * `sharing` here is "has ever paired a device", which is not what the same
+   * word means on a `MemberView` — that one is "a collector is attached right
+   * now", because the HUD beside it has to stop saying "Sharing on" when a
+   * laptop shuts. This is the durable fact, and the right one for a list that
+   * includes people who have not been seen in a week: it answers "is this
+   * person set up at all", which no live socket can.
+   */
   roster(workspace: string): RosterEntry[] {
     const rows = this.db
       .prepare(`
