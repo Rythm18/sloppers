@@ -81,13 +81,56 @@ describe('serving the built app', () => {
     // Fly terminates TLS at its proxy, so the socket only ever sees plain
     // http — the forwarded headers are the only place the real scheme and
     // host survive, and an unfurl advertising http:// would be redirected.
-    const res = await fetch(`http://127.0.0.1:${server.port}/?room=the-lab-k4xp2q`, {
-      headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'sloppers.fly.dev' },
+    // Trusting them is opt-in, the same TRUST_PROXY gate the rate limiter
+    // puts on x-forwarded-for.
+    process.env.TRUST_PROXY = '1';
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.port}/?room=the-lab-k4xp2q`, {
+        headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'sloppers.fly.dev' },
+      });
+      const html = await res.text();
+
+      expect(html).toContain('content="https://sloppers.fly.dev/assets/og-office.png"');
+      expect(html).not.toContain('content="/assets/og-office.png"');
+    } finally {
+      delete process.env.TRUST_PROXY;
+    }
+  });
+
+  it('ignores forwarded headers when no proxy has been declared trustworthy', async () => {
+    // On a direct deployment the client writes X-Forwarded-* itself. Without
+    // TRUST_PROXY those headers are nobody's testimony — the card resolves
+    // against the Host header Node already policed.
+    const res = await fetch(`http://127.0.0.1:${server.port}/`, {
+      headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'evil.example' },
     });
     const html = await res.text();
 
-    expect(html).toContain('content="https://sloppers.fly.dev/assets/og-office.png"');
-    expect(html).not.toContain('content="/assets/og-office.png"');
+    expect(html).not.toContain('evil.example');
+    expect(html).toContain(`content="http://127.0.0.1:${server.port}/assets/og-office.png"`);
+  });
+
+  it('cannot be talked into reflecting markup, even by a trusted proxy', async () => {
+    // The reviewer's live probe: a forwarded host shaped like an attribute
+    // breakout. Under TRUST_PROXY a compromised or sloppy proxy is still not
+    // allowed to put <script> in every page — the allowlist rejects the
+    // header and the origin falls back to Host.
+    process.env.TRUST_PROXY = '1';
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.port}/`, {
+        headers: {
+          'x-forwarded-host': 'evil.com"><script>alert(document.domain)</script><meta x="',
+          'x-forwarded-proto': 'javascript:alert(1)//',
+        },
+      });
+      const html = await res.text();
+
+      expect(html).not.toContain('<script>alert');
+      expect(html).not.toContain('javascript:');
+      expect(html).toContain(`content="http://127.0.0.1:${server.port}/assets/og-office.png"`);
+    } finally {
+      delete process.env.TRUST_PROXY;
+    }
   });
 
   it('serves the card itself from the app, so nothing has to reach a CDN', async () => {

@@ -7,6 +7,7 @@ import {
   relinkRedeemRequestSchema,
 } from '@sloppers/protocol';
 import { type Context, Hono } from 'hono';
+import { isSafeHost, isSafeProto, trustsProxy } from './proxy.js';
 import type { Db } from './db/index.js';
 import { deviceKey, pairingCode, relinkToken } from './ids.js';
 import type { WorkspaceManager } from './workspace/manager.js';
@@ -27,14 +28,40 @@ const MIME: Record<string, string> = {
 };
 
 /**
- * Where this request thinks it arrived, honouring the proxy headers Fly sets
- * (TLS terminates there, so the socket itself only ever saw plain http).
+ * Where this request thinks it arrived, or `null` when nothing trustworthy
+ * says.
+ *
+ * Fly terminates TLS at its proxy, so the socket here only ever sees plain
+ * http and the forwarded headers are the only place the real scheme and host
+ * survive. They are also the only headers a client can write freely, and this
+ * value is interpolated into a document — so they are read only under
+ * `TRUST_PROXY=1` (the same gate the rate limiter puts on `x-forwarded-for`,
+ * ws.ts), and only when they are shaped like a scheme and a host. Anything
+ * else falls through to what Node parsed for us, and if even that is not
+ * presentable, to nothing at all.
+ *
+ * One consequence worth knowing about before it looks like a bug: a proxy
+ * that terminates TLS but does not send `x-forwarded-proto` — or a deployment
+ * that has not set `TRUST_PROXY=1` — makes this `http://`, so the unfurl card
+ * is advertised over http. Set `TRUST_PROXY=1` behind a proxy that overwrites
+ * the forwarded headers, which is the same thing that keeps everybody off one
+ * rate-limit bucket.
  */
-function originOf(c: Context): string {
+function originOf(c: Context): string | null {
   const url = new URL(c.req.url);
-  const proto = c.req.header('x-forwarded-proto') ?? url.protocol.replace(':', '');
-  const host = c.req.header('x-forwarded-host') ?? c.req.header('host') ?? url.host;
-  return `${proto}://${host}`;
+  const trusted = trustsProxy();
+  const protos = [
+    trusted ? c.req.header('x-forwarded-proto') : undefined,
+    url.protocol.replace(':', ''),
+  ];
+  const hosts = [
+    trusted ? c.req.header('x-forwarded-host') : undefined,
+    c.req.header('host'),
+    url.host,
+  ];
+  const proto = protos.find(isSafeProto);
+  const host = hosts.find(isSafeHost);
+  return proto && host ? `${proto}://${host}` : null;
 }
 
 /**
@@ -51,7 +78,11 @@ function originOf(c: Context): string {
  * index.html, only when it is about to be sent as an HTML document. Anything
  * broader would be a template engine, which this is not.
  */
-export function absoluteSocialUrls(html: string, origin: string): string {
+export function absoluteSocialUrls(html: string, origin: string | null): string {
+  // No trustworthy origin — leave the paths relative. Some unfurlers will
+  // drop the card, but a missing picture beats reflecting a header we could
+  // not vouch for into every page.
+  if (!origin) return html;
   return html.replace(
     /(<meta\s+(?:property="og:image"|name="twitter:image")\s+content=")(\/[^"]*)"/g,
     (_match, head: string, path: string) => `${head}${origin}${path}"`,
@@ -113,7 +144,12 @@ export function createApp(deps: { db: Db; rooms: WorkspaceManager; webDist?: str
       Date.now(),
     );
 
-    const origin = originOf(c);
+    // The address the collector will dial back on. `originOf` can decline to
+    // answer, and a pairing that succeeded but handed back no server would be
+    // a worse failure than a guess — so the last resort is the URL Node
+    // parsed, which is what this line used before there was anything to
+    // validate.
+    const origin = originOf(c) ?? new URL(c.req.url).origin;
     return c.json({
       deviceKey: key,
       memberId: member.id,
