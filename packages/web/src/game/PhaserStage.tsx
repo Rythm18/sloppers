@@ -32,6 +32,12 @@ export function PhaserStage() {
             width: '100%',
             height: '100%',
           },
+          // Said out loud rather than left to Phaser, which decides whether to
+          // bind touch listeners at all from a one-shot probe of the document
+          // as the game boots. When that probe is wrong the office is simply
+          // unwalkable and nothing anywhere says why — and it costs a
+          // mouse-only machine four listeners that never fire.
+          input: { touch: true },
           scene: [OfficeScene],
         });
         // Debug handle for bug reports: inspect the live game from devtools.

@@ -261,6 +261,9 @@ export class OfficeScene extends Phaser.Scene {
    * half is remembered too, since the sprite's own handler fires there and a
    * finger that slides a hair off an avatar before lifting still meant them.
    *
+   * Whether any of that adds up to a walk is `meansWalkThere`'s to say; this
+   * only hands it what happened, `wasTouch` included.
+   *
    * Nothing to unsubscribe: Phaser's per-scene input plugin drops its
    * listeners when the scene shuts down, which is also when this scene dies.
    */
@@ -273,7 +276,12 @@ export class OfficeScene extends Phaser.Scene {
       (pointer: Phaser.Input.Pointer, over: unknown[]) => {
         const onAvatar = this.pointerOnAvatar || over.length > 0;
         this.pointerOnAvatar = false;
-        if (!meansWalkThere({ travelledPx: pointer.getDistance(), onAvatar })) return;
+        const gesture = {
+          fromTouch: pointer.wasTouch,
+          travelledPx: pointer.getDistance(),
+          onAvatar,
+        };
+        if (!meansWalkThere(gesture)) return;
         // The pointer's own world coordinates are only refreshed by a hit
         // test, which a tap on bare floor never triggers; ask the camera.
         const target = this.cameras.main.getWorldPoint(pointer.x, pointer.y);

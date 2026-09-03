@@ -43,8 +43,23 @@ button {
   inset: 0;
 }
 
+/*
+ * Phaser ships a helper that sets `touch-action` on its canvas and, as of
+ * 3.90, never calls it — so the floor has to say this for itself.
+ *
+ * It matters even though Phaser's own touch handling calls preventDefault on
+ * everything it sees: this is read by the browser before a single listener
+ * runs, so `manipulation` drops the wait-and-see for a second tap that makes
+ * the first one feel a third of a second slow. The callout and the selection
+ * are iOS's answer to a long press, which here is somebody resting a finger
+ * on the office.
+ */
 .stage canvas {
   image-rendering: pixelated;
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* ---------------------------------------------------------------- panels */
@@ -817,9 +832,12 @@ button {
   color: var(--crt);
 }
 
+/* Wraps as whole facts. Without this the row keeps its single line by
+   breaking inside each one, and "10 active min" comes apart across three. */
 .member-today {
   display: flex;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 4px 14px;
   padding: 8px 12px 10px;
   font-size: 11px;
   color: var(--wire);
@@ -1209,12 +1227,6 @@ button {
     font-size: 24px;
   }
 
-  /* Six faces across a phone leaves each one narrower than the finger
-     picking it. Four is the same row of choices with room to choose. */
-  .avatar-grid {
-    grid-template-columns: repeat(4, 1fr);
-  }
-
   .hud-brand {
     top: 8px;
     left: 8px;
@@ -1269,6 +1281,27 @@ button {
   .settings-panel {
     padding: 16px;
   }
+
+  /* One unbroken line is right where it fits. Here it does not, and a
+     command scrolled off the side of a box is not an instruction — least of
+     all on the one device that cannot run it. */
+  .share-cmd {
+    white-space: normal;
+    word-break: break-all;
+  }
+}
+
+/*
+ * Where six faces across stops fitting. The card is 400px at most and 40px
+ * of padding inside that, so six columns and their gaps leave each face
+ * about 44px — a finger — down to roughly here, and less below it. Twelve
+ * avatars, so the next tidy grid down is four; five would fit but would
+ * leave a ragged last row where there is presently a block.
+ */
+@media (max-width: 400px) {
+  .avatar-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
 }
 
 @media (max-width: 720px) and (min-height: 500px) {
@@ -1313,9 +1346,7 @@ button {
   }
 
   /* Both panels come off the bottom edge as sheets, which is the edge a
-     thumb reaches. The member card is stacked over the board on purpose:
-     opening somebody's card is the more specific request, and closing it
-     puts the board back where it was. */
+     thumb reaches. */
   .leaderboard,
   .member-card {
     top: auto;
@@ -1326,6 +1357,15 @@ button {
     border-width: var(--border-px) 0 0;
     box-shadow: none;
     padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* One sheet at a time. They come off the same edge, and the taller of the
+     two showing a few pixels of itself over the top of the other reads as a
+     rendering fault rather than as a stack. Opening somebody's card is the
+     more specific request, so it wins outright — and closing it puts the
+     board back, because this is the card being on screen and nothing else. */
+  .app:has(.member-card) .leaderboard {
+    display: none;
   }
 
   .leaderboard-rows {
