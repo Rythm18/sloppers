@@ -37,8 +37,21 @@ export function loadIdentity(roomCode: string): StoredIdentity | null {
   }
 }
 
-function saveIdentity(roomCode: string, identity: StoredIdentity): void {
-  localStorage.setItem(identityKey(roomCode), JSON.stringify(identity));
+/**
+ * True when the identity is actually on disk. localStorage can refuse —
+ * quota, private windows, storage partitioning — and this runs inside
+ * `onmessage` on the resume path, where an escaping exception would hang the
+ * tab on "Stepping in…" with a live socket and no reconnect. A session that
+ * carries on un-saved (this visit works, the next reload re-asks for a name)
+ * is the honest degradation; a hang is not.
+ */
+function saveIdentity(roomCode: string, identity: StoredIdentity): boolean {
+  try {
+    localStorage.setItem(identityKey(roomCode), JSON.stringify(identity));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function clearIdentity(roomCode: string): void {
@@ -66,8 +79,11 @@ function refileIdentity(from: string, to: string): void {
   if (from === to) return;
   const identity = loadIdentity(from);
   if (!identity) return;
-  saveIdentity(to, identity);
-  clearIdentity(from);
+  // Clear only what was definitely re-saved. If storage refused the write,
+  // the old entry is the one copy of this seat's credentials — deleting it
+  // on the strength of a save that did not happen would finish rotation's
+  // old orphaning bug by hand.
+  if (saveIdentity(to, identity)) clearIdentity(from);
 }
 
 /** The three ways into an office, mirroring the join protocol. */
