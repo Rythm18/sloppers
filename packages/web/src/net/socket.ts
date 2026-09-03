@@ -191,7 +191,10 @@ export class OfficeSocket {
           // rather than the same refusal.
           clearIdentity(this.intent.roomCode);
         }
-        this.closed = true;
+        // Full teardown, not just the flag: leaving the move timer, the
+        // window listeners and the socket itself alive until the next join
+        // attempt is a leak on every refused door.
+        this.stop();
       }
       if (msg.type === 'removed') {
         // Terminal: the server is about to close this socket because the
@@ -199,8 +202,9 @@ export class OfficeSocket {
         // that close arrives, so `onclose`'s reconnect loop doesn't retry
         // with credentials that were just revoked — that would flash the
         // connection through 'reconnecting' and fail again with bad-join
-        // instead of leaving the store's 'removed' state alone.
-        this.closed = true;
+        // instead of leaving the store's 'removed' state alone. Same full
+        // teardown as a door refusal — this socket is finished.
+        this.stop();
       }
       useStore.getState().applyServer(msg);
     };
