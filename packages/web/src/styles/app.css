@@ -694,6 +694,13 @@ button {
   text-transform: uppercase;
 }
 
+/* A floor keeps the gold — it is real money, definitely spent — and takes the
+   dotted rule that marks a figure with an explanation behind it. The `≥` is
+   what says it is a floor; this only makes the cell look worth hovering. */
+.cost-floor {
+  border-bottom: 1px dotted var(--lamp);
+}
+
 /* An unknown cost is never gold and never a numeral: it must not be skimmed
    as a small amount. The dotted rule marks it as having an explanation. */
 .cost-unknown {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TokenTotals } from './core.js';
-import { estimateCostUsd, PRICING } from './index.js';
+import { estimateCostFloorUsd, estimateCostUsd, PRICING } from './index.js';
 
 const M = 1_000_000;
 
@@ -247,5 +247,110 @@ describe('pricing', () => {
 
   it('costs a day of zero-token buckets at nothing', () => {
     expect(dayCost([['claude-opus-5', only('input', 0)]])).toBe(0);
+  });
+});
+
+/**
+ * The floor beside the null. `estimateCostUsd`'s refusal to sum a partial day
+ * is right and is tested above; these pin the second answer that keeps that
+ * refusal from erasing the cost column on every Codex day.
+ */
+describe('cost floor', () => {
+  const day = (buckets: [string, TokenTotals][]) =>
+    estimateCostFloorUsd(Object.fromEntries(buckets));
+
+  it('is the exact total when every model in the day is priced', () => {
+    const floor = day([
+      ['claude-opus-5', only('input', M)],
+      ['gpt-5.6-sol', only('input', M)],
+    ]);
+    expect(floor.usd).toBe(5 + 4);
+    expect(floor.exact).toBe(true);
+    expect(floor.unpriced).toEqual([]);
+  });
+
+  it('sums only the priced share of the day that actually blanks in production', () => {
+    // The mixed Codex day: one automatic review request beside real work is
+    // enough to void the whole day's figure, and $4 of it is not in doubt.
+    const floor = day([
+      ['gpt-5.6-sol', only('input', M)],
+      ['codex-auto-review', only('input', M)],
+    ]);
+    expect(floor.usd).toBe(4);
+    expect(floor.exact).toBe(false);
+    expect(floor.unpriced).toEqual(['codex-auto-review']);
+    // And the exact total is still null. The floor is an addition, never a
+    // softening: a caller that renders this as "est. $4.00" is understating a
+    // day whose real bill nobody can name.
+    expect(
+      dayCost([
+        ['gpt-5.6-sol', only('input', M)],
+        ['codex-auto-review', only('input', M)],
+      ]),
+    ).toBeNull();
+  });
+
+  it('floors a day with nothing priceable at zero, and says it is not exact', () => {
+    // 0 here means "we can vouch for nothing", not "this day was free" — the
+    // two are told apart by `exact`, and callers must not print this as money.
+    const floor = day([
+      ['codex-auto-review', only('input', M)],
+      ['unknown', only('input', M)],
+    ]);
+    expect(floor.usd).toBe(0);
+    expect(floor.exact).toBe(false);
+  });
+
+  it('names the unpriced models heaviest first, counting cache reads as work', () => {
+    // Ordered so a tooltip that names one or two names the ones carrying most
+    // of the missing money. The heavier row here is pure cache reads, which
+    // input + output would have ranked as nothing.
+    const floor = day([
+      ['unknown', only('input', 1_000)],
+      ['codex-auto-review', only('cacheRead', 5_000_000)],
+      ['<synthetic>', only('input', 10_000)],
+    ]);
+    expect(floor.unpriced).toEqual(['codex-auto-review', '<synthetic>', 'unknown']);
+  });
+
+  it('costs an empty day at zero, exactly', () => {
+    expect(day([])).toEqual({ usd: 0, exact: true, unpriced: [] });
+  });
+
+  it('keeps a priced day of zero tokens exact rather than unknown', () => {
+    const floor = day([['claude-opus-5', only('input', 0)]]);
+    expect(floor.usd).toBe(0);
+    expect(floor.exact).toBe(true);
+  });
+
+  it('is exact on exactly the days the null contract keeps a total for', () => {
+    // One rule, two functions. Whenever `exact` disagrees with "the day has a
+    // total", something renders a floor as an estimate or an estimate as a
+    // floor — the two failures this pair exists to prevent.
+    const days: [string, TokenTotals][][] = [
+      [],
+      [['claude-opus-5', only('input', M)]],
+      [['codex-auto-review', only('input', M)]],
+      [
+        ['gpt-5.6-sol', only('input', M)],
+        ['unknown', only('cacheRead', M)],
+      ],
+      [
+        ['claude-haiku-4-5-20251001', only('output', M)],
+        ['claude-sonnet-5', only('cacheWrite', M)],
+      ],
+      [['claude-opus-5', only('input', 0)]],
+    ];
+    for (const buckets of days) {
+      expect(day(buckets).exact).toBe(dayCost(buckets) !== null);
+    }
+  });
+
+  it('never claims more than the exact total when there is one', () => {
+    const buckets: [string, TokenTotals][] = [
+      ['claude-opus-5', only('input', M)],
+      ['gpt-5.6-luna', only('output', M)],
+    ];
+    expect(day(buckets).usd).toBe(dayCost(buckets));
   });
 });

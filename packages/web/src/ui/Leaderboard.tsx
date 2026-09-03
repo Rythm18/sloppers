@@ -3,10 +3,9 @@ import { processedTokens } from '@sloppers/protocol';
 import { memo, useState } from 'react';
 import { useStore } from '../store.js';
 import {
-  COST_UNKNOWN,
-  COST_UNKNOWN_TITLE,
-  costTitle,
-  formatCostUsd,
+  COST_FLOOR_RANK_NOTE,
+  type CostView,
+  dayCostView,
   formatTokens,
   TOKENS_PRIVATE,
   TOKENS_PRIVATE_TITLE,
@@ -14,9 +13,20 @@ import {
 
 export type LeaderboardSort = 'tokens' | 'cost';
 
-/** Today's estimated spend, or null when some model in the day has no price. */
+/**
+ * What this row is ranked and metered by: today's estimate, or the floor under
+ * it when the estimate is unknowable but part of the day is priced. Null only
+ * when there is no number of any kind — the same value the row prints, so the
+ * column can never be sorted by one quantity and read as another.
+ */
 function costOf(row: LeaderboardRow): number | null {
-  return row.stats.estimatedCostUsd ?? null;
+  return dayCostView(row.stats).usd;
+}
+
+/** The hover sentence, plus what the ranking is doing, where ranking happens. */
+function titleFor(view: CostView, sort: LeaderboardSort): string {
+  if (view.kind !== 'floor' || sort !== 'cost') return view.title;
+  return `${view.title} ${COST_FLOOR_RANK_NOTE}`;
 }
 
 /**
@@ -35,12 +45,18 @@ export function isPrivate(row: LeaderboardRow): boolean {
 /**
  * Tokens by default; cost on request.
  *
- * Rows with no estimate sort last, below every priced row, however large their
- * token count. Ranking them anywhere else would be a claim we can't make —
- * treating unknown as zero buries a possibly-huge day at the bottom *as if we
- * knew*, and treating it as huge invents a leader. Last, with the reason on
- * the row, is the only honest place. Among themselves they keep token order,
- * so the section stays stable rather than shuffling per render.
+ * Rows with no number at all sort last, below every row that has one, however
+ * large their token count. Ranking them anywhere else would be a claim we
+ * can't make — treating unknown as zero buries a possibly-huge day at the
+ * bottom *as if we knew*, and treating it as huge invents a leader. Last, with
+ * the reason on the row, is the only honest place. Among themselves they keep
+ * token order, so the section stays stable rather than shuffling per render.
+ *
+ * A day with a floor is not one of those rows. It ranks on its floor, against
+ * exact totals and other floors alike: the priced share is money that was
+ * certainly spent, so the row's true place is *at least* here. That can seat a
+ * heavily unpriced day too low, which is the direction that understates rather
+ * than the one that invents — and the tooltip says so.
  */
 export function sortRows(rows: LeaderboardRow[], sort: LeaderboardSort): LeaderboardRow[] {
   const byTokens = (a: LeaderboardRow, b: LeaderboardRow) =>
@@ -115,21 +131,25 @@ export const Leaderboard = memo(function Leaderboard() {
         <div className="leaderboard-rows">
           {shown.map((row, i) => {
             const total = processedTokens(row.stats.tokens);
-            const cost = costOf(row);
+            const view = dayCostView(row.stats);
+            const cost = view.usd;
             const meter = sort === 'cost' ? (cost ?? 0) : total;
             return (
               <div className="lb-row" key={row.memberId}>
                 <span className="rank">{i + 1}</span>
                 <span className="who">{row.displayName}</span>
                 <span className="burn">{formatTokens(total)}</span>
-                {cost === null ? (
-                  <span className="cost cost-unknown" title={COST_UNKNOWN_TITLE}>
-                    {COST_UNKNOWN}
+                {view.kind === 'unknown' ? (
+                  <span className="cost cost-unknown" title={view.title}>
+                    {view.text}
                   </span>
                 ) : (
-                  <span className="cost" title={costTitle()}>
+                  <span
+                    className={view.kind === 'floor' ? 'cost cost-floor' : 'cost'}
+                    title={titleFor(view, sort)}
+                  >
                     <i className="cost-est">est.</i>
-                    {formatCostUsd(cost)}
+                    {view.text}
                   </span>
                 )}
                 <span className="lb-meter">

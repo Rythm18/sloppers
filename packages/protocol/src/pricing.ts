@@ -1,4 +1,4 @@
-import type { TokenTotals } from './core.js';
+import { processedTokens, type TokenTotals } from './core.js';
 
 /** USD per million tokens, one row of the published table. */
 export interface ModelRate {
@@ -118,4 +118,56 @@ export function estimateCostUsd(model: string, tokens: TokenTotals): number | nu
       tokens.cacheWrite * rate.cacheWrite) /
     1_000_000
   );
+}
+
+/** A day priced as far as it can be priced. See `estimateCostFloorUsd`. */
+export interface CostFloor {
+  /**
+   * The priced models' sum. A *lower bound* on the day when `exact` is false,
+   * and the day's whole cost when it is true. Never null: a day where nothing
+   * could be priced floors at 0, and 0 is not a claim about the total — it is
+   * the claim that we can vouch for nothing, which callers must not print as
+   * a dollar figure.
+   */
+  usd: number;
+  /** True when every model here had a price, and `usd` is therefore the total. */
+  exact: boolean;
+  /** The models with no published price, heaviest first. Empty when `exact`. */
+  unpriced: string[];
+}
+
+/**
+ * The same day as a floor, for when `estimateCostUsd`'s null is unusable.
+ *
+ * The null contract above is right and stays: a day containing one unpriced
+ * model has no knowable total, and a partial sum printed as "est. $12.40"
+ * would be a smaller number wearing a complete number's clothes. But on real
+ * data the null swallows almost everything — `codex-auto-review` (26.7% of the
+ * office's Codex tokens, deliberately unpriced) alone blanks 41 of 41 Codex
+ * days, while 0 of 44 Claude Code days blank. The cost column dies exactly
+ * where it is most worth having.
+ *
+ * A floor is the third answer. "At least $12.40" is not a partial total
+ * pretending to be whole — it makes the partiality the point, and it is the
+ * strongest honest statement available: the priced share is money that was
+ * definitely spent, and the unpriced share can only add. Callers get `exact`
+ * so a floor can be *rendered* as a floor; a floor rendered as an estimate
+ * would be the undercount this whole contract exists to prevent.
+ *
+ * Every entry given is counted, zero-token rows included, so `exact` is false
+ * on exactly the days `estimateCostUsd` would null — one rule, two functions,
+ * no daylight between them.
+ */
+export function estimateCostFloorUsd(byModel: Record<string, TokenTotals>): CostFloor {
+  let usd = 0;
+  // Heaviest first, so a caller naming one or two of these in a tooltip names
+  // the ones that account for most of the missing money.
+  const unpriced: { model: string; weight: number }[] = [];
+  for (const [model, tokens] of Object.entries(byModel)) {
+    const cost = estimateCostUsd(model, tokens);
+    if (cost === null) unpriced.push({ model, weight: processedTokens(tokens) });
+    else usd += cost;
+  }
+  unpriced.sort((a, b) => b.weight - a.weight);
+  return { usd, exact: unpriced.length === 0, unpriced: unpriced.map((u) => u.model) };
 }

@@ -5,11 +5,10 @@ import { AvatarThumb } from './AvatarThumb.js';
 import {
   activeMinutes,
   burned,
-  COST_UNKNOWN,
-  COST_UNKNOWN_TITLE,
-  costTitle,
-  formatCostUsd,
+  type CostView,
+  dayCostView,
   harnessLabel,
+  modelCostView,
   PRESENCE_LABEL,
   PRESENCE_VAR,
   SESSIONS_COARSE_TITLE,
@@ -68,24 +67,31 @@ function TodayLine({ today }: { today: DailyStats }) {
         {minutes.prefix}
         <b>{today.activeMinutes}</b> active min
       </span>
-      <Cost usd={today.estimatedCostUsd ?? null} />
+      <Cost view={dayCostView(today)} />
     </div>
   );
 }
 
-/** One number, rendered as a dollar estimate or as a named absence. */
-function Cost({ usd }: { usd: number | null }) {
-  if (usd === null) {
+/**
+ * One cost, as a dollar estimate, as a floor under one, or as a named absence.
+ *
+ * The day total is the only thing that can be a floor. A per-model row is
+ * already the finest grain there is — either that model has a price or it
+ * doesn't — so it keeps saying `no est.`, and stays the place a reader finds
+ * out *which* model put the `≥` on the line below.
+ */
+function Cost({ view }: { view: CostView }) {
+  if (view.kind === 'unknown') {
     return (
-      <span className="cost cost-unknown" title={COST_UNKNOWN_TITLE}>
-        {COST_UNKNOWN}
+      <span className="cost cost-unknown" title={view.title}>
+        {view.text}
       </span>
     );
   }
   return (
-    <span className="cost" title={costTitle()}>
+    <span className={view.kind === 'floor' ? 'cost cost-floor' : 'cost'} title={view.title}>
       <i className="cost-est">est.</i>
-      {formatCostUsd(usd)}
+      {view.text}
     </span>
   );
 }
@@ -158,7 +164,7 @@ export function MemberCard() {
                 {model}
               </span>
               <span className="model-tok">{burned(tokens)}</span>
-              <Cost usd={estimateCostUsd(model, tokens)} />
+              <Cost view={modelCostView(estimateCostUsd(model, tokens))} />
             </div>
           ))}
         </div>

@@ -5,6 +5,7 @@ import {
   dayOf,
   decodeMinutes,
   emptyTokens,
+  estimateCostFloorUsd,
   estimateCostUsd,
   MINUTES_PER_DAY,
   type SessionSnapshot,
@@ -775,6 +776,12 @@ export class TokenLedger {
       estimatedCostUsd =
         cost === null || estimatedCostUsd === null ? null : estimatedCostUsd + cost;
     }
+    // The same day priced as far as it can be. Computed from the breakdown
+    // just built rather than folded into the loop above, so the null contract
+    // on `estimatedCostUsd` keeps its own arithmetic and the floor keeps its
+    // one implementation, in `@sloppers/protocol`, where every consumer of
+    // this field reads the rule from.
+    const floor = estimateCostFloorUsd(byModel);
     // Sessions that worked this day, derived from the watermark rows filed
     // under it rather than counted, so it cannot drift from the usage.
     // Retired rows are included deliberately: a session whose attribution was
@@ -792,6 +799,7 @@ export class TokenLedger {
       activeMinutes: countMinutes(this.minuteBitmap(memberIdValue, day)),
       byModel,
       estimatedCostUsd,
+      estimatedCostFloorUsd: floor.usd,
       precision: precisionOf(sessions.flat ?? 0, sessions.bucketed ?? 0),
     };
   }

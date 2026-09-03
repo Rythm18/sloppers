@@ -127,6 +127,81 @@ describe('MemberCard', () => {
     expect(cell?.getAttribute('title')).toMatch(/no published price/i);
   });
 
+  it('shows the priced share as a floor when the day has no total', () => {
+    // The real mixed Codex day. The total is unknowable and $4 of it is not:
+    // the card used to say "no est." and throw the $4 away with the rest.
+    seed({
+      tokens: tok(2_000_000),
+      sessionsRun: 1,
+      activeMinutes: 5,
+      byModel: {
+        'gpt-5.6-sol': tok(1_000_000),
+        'codex-auto-review': tok(1_000_000),
+      },
+      estimatedCostUsd: null,
+      estimatedCostFloorUsd: 4,
+    });
+    render(<MemberCard />);
+
+    const cell = document.querySelector('.member-today .cost');
+    expect(cell?.textContent).toBe('est.≥$4.00');
+    expect(cell?.getAttribute('title')).toMatch(/at least/i);
+    expect(cell?.getAttribute('title')).toContain('codex-auto-review');
+  });
+
+  it('keeps the per-model rows saying which model did it', () => {
+    // The floor is about the day total. A model is priced or it is not, and
+    // this list is where a reader finds out which one put the ≥ on the line
+    // below it.
+    seed({
+      tokens: tok(2_000_000),
+      sessionsRun: 1,
+      activeMinutes: 5,
+      byModel: {
+        'gpt-5.6-sol': tok(1_000_000),
+        'codex-auto-review': tok(1_000_000),
+      },
+      estimatedCostUsd: null,
+      estimatedCostFloorUsd: 4,
+    });
+    render(<MemberCard />);
+
+    expect(modelRows()).toEqual([
+      ['gpt-5.6-sol', '1M', 'est.$4.00'],
+      ['codex-auto-review', '1M', 'no est.'],
+    ]);
+  });
+
+  it('says no est. when the day holds nothing that could be priced', () => {
+    seed({
+      tokens: tok(1_000_000),
+      sessionsRun: 1,
+      activeMinutes: 5,
+      byModel: { 'codex-auto-review': tok(1_000_000) },
+      estimatedCostUsd: null,
+      estimatedCostFloorUsd: 0,
+    });
+    render(<MemberCard />);
+
+    const cell = document.querySelector('.member-today .cost');
+    expect(cell?.textContent).toBe('no est.');
+    expect(cell?.textContent).not.toContain('≥');
+  });
+
+  it('does not put a floor mark on a day it can total exactly', () => {
+    seed({
+      tokens: tok(1_000_000),
+      sessionsRun: 1,
+      activeMinutes: 5,
+      byModel: { 'claude-opus-5': tok(1_000_000) },
+      estimatedCostUsd: 5,
+      estimatedCostFloorUsd: 5,
+    });
+    render(<MemberCard />);
+    expect(document.querySelector('.member-today .cost')?.textContent).toBe('est.$5.00');
+    expect(document.querySelector('.member-today .cost-floor')).toBeNull();
+  });
+
   it('prices the dated Haiku string the collector actually sends', () => {
     seed({
       tokens: tok(1_000_000),
@@ -248,6 +323,30 @@ describe('MemberCard', () => {
     });
     render(<MemberCard />);
     expect(screen.queryByText('Today by model')).toBeNull();
+  });
+
+  it('does not float a floor past the withheld state', () => {
+    // Rows banked before they switched sharing off can still produce a floor.
+    // Printing "≥ $9" beside "keeps their numbers to themselves" would publish
+    // the number and deny publishing it in the same line.
+    seed(
+      {
+        tokens: tok(1_000_000),
+        sessionsRun: 2,
+        activeMinutes: 30,
+        byModel: { 'gpt-5.6-sol': tok(1_000_000), 'codex-auto-review': tok(1_000_000) },
+        estimatedCostUsd: null,
+        estimatedCostFloorUsd: 9,
+        tokensShared: false,
+      },
+      LIVE_SESSION,
+    );
+    render(<MemberCard />);
+
+    expect(todayLine()).toContain('Keeps their numbers to themselves');
+    expect(todayLine()).not.toContain('≥');
+    expect(todayLine()).not.toContain('$9');
+    expect(document.querySelector('.cost-floor')).toBeNull();
   });
 
   it('still shows the numbers when the collector says nothing about sharing', () => {

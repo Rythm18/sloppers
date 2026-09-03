@@ -193,6 +193,18 @@ export const dailyStatsSchema = z.object({
   /** Null when any contributing model has no known price; see `estimateCostUsd`. */
   estimatedCostUsd: z.number().nullable().optional(),
   /**
+   * What the day's *priced* models add up to — a floor under the real spend,
+   * and equal to `estimatedCostUsd` whenever that is not null. See
+   * `estimateCostFloorUsd` for why a floor exists beside a contract that
+   * refuses partial totals.
+   *
+   * Not nullable, unlike its sibling: there is always a priced sum, and 0 says
+   * "nothing here could be priced" rather than "this day was free" — which is
+   * why a 0 floor must never be rendered as a dollar amount. Optional because
+   * a server older than this field cannot send one; absent means the same as 0.
+   */
+  estimatedCostFloorUsd: z.number().optional(),
+  /**
    * False when this member's collector says they keep their numbers to
    * themselves — `visibility.tokens` off, so `tokens`, `usage` and
    * `activeMinutes` never left their machine.

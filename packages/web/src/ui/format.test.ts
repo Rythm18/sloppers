@@ -3,13 +3,18 @@ import { describe, expect, it } from 'vitest';
 import {
   activeMinutes,
   burned,
+  COST_FLOOR_MARK,
+  COST_FLOOR_RANK_NOTE,
   COST_UNKNOWN,
   COST_UNKNOWN_TITLE,
+  costFloorTitle,
   costTitle,
   countdown,
+  dayCostView,
   formatCostUsd,
   formatTokens,
   MINUTES_COARSE_TITLE,
+  modelCostView,
   SESSIONS_COARSE_TITLE,
   sessionLine,
   sessionsLabel,
@@ -148,6 +153,106 @@ describe('cost wording', () => {
     // The three things it must not be mistaken for.
     expect(title).toMatch(/subscription/i);
     expect(title).toMatch(/discount/i);
+  });
+});
+
+/**
+ * The third answer, between a total and a blank. A floor has to *look* like a
+ * floor everywhere it appears: rendered as a plain estimate it becomes the
+ * silent undercount the null contract exists to prevent.
+ */
+describe('cost floors', () => {
+  const M = 1_000_000;
+  const tok = (input: number) => ({ input, output: 0, cacheRead: 0, cacheWrite: 0 });
+
+  it('marks a floor as a lower bound, never as a plain estimate', () => {
+    const view = dayCostView(
+      day({ estimatedCostUsd: null, estimatedCostFloorUsd: 12.4, byModel: {} }),
+    );
+    expect(view.kind).toBe('floor');
+    expect(view.text).toBe('≥$12');
+    expect(view.text).toContain(COST_FLOOR_MARK);
+    expect(view.text).not.toBe(formatCostUsd(12.4));
+  });
+
+  it('renders an exact estimate exactly as it always did', () => {
+    const view = dayCostView(day({ estimatedCostUsd: 5, estimatedCostFloorUsd: 5 }));
+    expect(view).toEqual({ kind: 'exact', text: '$5.00', title: costTitle(), usd: 5 });
+  });
+
+  it('still says no est. when nothing in the day could be priced', () => {
+    // A floor of $0.00 is not a small amount of information; it is none, and
+    // printed as money it reads as free.
+    const view = dayCostView(day({ estimatedCostUsd: null, estimatedCostFloorUsd: 0 }));
+    expect(view.kind).toBe('unknown');
+    expect(view.text).toBe(COST_UNKNOWN);
+    expect(view.usd).toBeNull();
+  });
+
+  it('says no est. for a floor too small to round to a cent', () => {
+    // "at least less than a cent" is a sentence with no content.
+    expect(dayCostView(day({ estimatedCostUsd: null, estimatedCostFloorUsd: 0.004 })).kind).toBe(
+      'unknown',
+    );
+  });
+
+  it('keeps a genuinely free priced day distinguishable from an unpriced one', () => {
+    expect(dayCostView(day({ estimatedCostUsd: 0, estimatedCostFloorUsd: 0 })).text).toBe('$0.00');
+    expect(dayCostView(day({ estimatedCostUsd: null, estimatedCostFloorUsd: 0 })).text).toBe(
+      COST_UNKNOWN,
+    );
+  });
+
+  it('leaves a server too old to send a floor exactly where it was', () => {
+    const view = dayCostView(day({ estimatedCostUsd: null }));
+    expect(view.kind).toBe('unknown');
+  });
+
+  it('ranks on the floor, so a floored day is not sorted as if it had nothing', () => {
+    expect(dayCostView(day({ estimatedCostUsd: null, estimatedCostFloorUsd: 12.4 })).usd).toBe(
+      12.4,
+    );
+  });
+
+  it('names the models that are missing from the number', () => {
+    const view = dayCostView(
+      day({
+        estimatedCostUsd: null,
+        estimatedCostFloorUsd: 4,
+        byModel: { 'gpt-5.6-sol': tok(M), 'codex-auto-review': tok(M) },
+      }),
+    );
+    expect(view.title).toContain('codex-auto-review');
+    expect(view.title).not.toContain('gpt-5.6-sol');
+  });
+
+  it('says what the number is and that the rest is unsayable', () => {
+    const title = costFloorTitle(['codex-auto-review']);
+    expect(title).toMatch(/at least/i);
+    expect(title).toMatch(/no published price/i);
+    expect(title).toMatch(/higher/i);
+    // Still an estimate, so it still carries the estimate's own caveat.
+    expect(title).toMatch(/not a bill/i);
+  });
+
+  it('keeps the tooltip short when a day is unpriced many ways over', () => {
+    const title = costFloorTitle(['a', 'b', 'c', 'd', 'e']);
+    expect(title).toContain('a, b, c and 2 more');
+  });
+
+  it('still explains itself when the breakdown never arrived', () => {
+    expect(costFloorTitle([])).toMatch(/no published price/i);
+  });
+
+  it('admits that ranking by a floor can seat a day too low', () => {
+    expect(COST_FLOOR_RANK_NOTE).toMatch(/lower/i);
+  });
+
+  it('gives one model row an estimate or a named absence, never a floor', () => {
+    // The finest grain there is: a model is priced or it is not.
+    expect(modelCostView(0.1).kind).toBe('exact');
+    expect(modelCostView(null).kind).toBe('unknown');
+    expect(modelCostView(null).text).toBe(COST_UNKNOWN);
   });
 });
 

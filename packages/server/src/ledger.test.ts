@@ -945,6 +945,62 @@ describe('TokenLedger', () => {
     expect(ledger.todayFor('m1', TODAY_19).estimatedCostUsd).toBe(0);
   });
 
+  // ------------------------------------------------------------- cost floors
+
+  it('reports the priced share of a day it cannot total', () => {
+    // The shape that blanks every Codex day in production: one unpriced model
+    // beside real, priced work. The total stays unknowable and the $1 that was
+    // definitely spent stops being thrown away with it.
+    ledger.ingest(
+      'm1',
+      [bucketed('s1', [bucket(D19, PRICED, 1_000_000), bucket(D19, 'mystery-model', 5_000_000)])],
+      TODAY_19,
+    );
+    const today = ledger.todayFor('m1', TODAY_19);
+    expect(today.estimatedCostUsd).toBeNull();
+    expect(today.estimatedCostFloorUsd).toBe(1);
+  });
+
+  it('floors a fully priced day at its exact total', () => {
+    ledger.ingest(
+      'm1',
+      [bucketed('s1', [bucket(D19, PRICED, 1_000_000), bucket(D19, 'claude-opus-5', 200_000)])],
+      TODAY_19,
+    );
+    const today = ledger.todayFor('m1', TODAY_19);
+    expect(today.estimatedCostFloorUsd).toBe(today.estimatedCostUsd);
+    expect(today.estimatedCostFloorUsd).toBe(2);
+  });
+
+  it('floors a day with nothing priceable at zero', () => {
+    // Zero because nothing could be priced, not because nothing was spent —
+    // the display tells the two apart and prints neither as a dollar figure.
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, 'mystery-model', 9_000_000)])], TODAY_19);
+    const today = ledger.todayFor('m1', TODAY_19);
+    expect(today.estimatedCostUsd).toBeNull();
+    expect(today.estimatedCostFloorUsd).toBe(0);
+  });
+
+  it('floors an empty day at zero without calling it unknown', () => {
+    const today = ledger.todayFor('m1', TODAY_19);
+    expect(today.estimatedCostFloorUsd).toBe(0);
+    expect(today.estimatedCostUsd).toBe(0);
+  });
+
+  it('does not let a migrated-away model hold the floor below the day', () => {
+    // Un-banking leaves the old model's row at zero, and `dayByModel` drops
+    // it. If it survived, an unpriced husk would keep the day off its own
+    // exact total forever — the floor has to follow the same rule the total
+    // does, or the two disagree about the same day.
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, 'unknown', 1_000_000)])], TODAY_19);
+    expect(ledger.todayFor('m1', TODAY_19).estimatedCostFloorUsd).toBe(0);
+
+    ledger.ingest('m1', [realistic('s1', [bucket(D19, PRICED, 1_000_000)])], TODAY_19 + 1000);
+    const today = ledger.todayFor('m1', TODAY_19);
+    expect(today.estimatedCostUsd).toBe(1);
+    expect(today.estimatedCostFloorUsd).toBe(1);
+  });
+
   // -------------------------------------------------------------- precision
 
   /**

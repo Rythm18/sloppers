@@ -59,6 +59,30 @@ function harnessRow(memberId: string, tokens: LeaderboardRow['stats']['tokens'])
   };
 }
 
+/**
+ * A day the office cannot total but can partly price — the shape 41 of 41
+ * Codex days have in production, and the one that used to rank last with an
+ * empty bar however much it burned.
+ */
+function flooredRow(memberId: string, tokens: number, floor: number): LeaderboardRow {
+  return {
+    memberId,
+    displayName: memberId,
+    avatar: 'pixel',
+    stats: {
+      tokens: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0 },
+      sessionsRun: 1,
+      activeMinutes: 1,
+      byModel: {
+        'gpt-5.6-sol': { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0 },
+        'codex-auto-review': { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+      estimatedCostUsd: null,
+      estimatedCostFloorUsd: floor,
+    },
+  };
+}
+
 /** A member whose collector says they keep their numbers to themselves. */
 function privateRow(memberId: string): LeaderboardRow {
   return {
@@ -138,6 +162,42 @@ describe('sortRows', () => {
     expect(billed(CODEX_DAY)).toBeGreaterThan(billed(CLAUDE_DAY));
   });
 
+  it('ranks a floored day by its floor, not below everything', () => {
+    // The inversion this fixes: the heaviest burner in the office sorted under
+    // a $2 day because one of its models has no published price.
+    const rows = [row('small', 10, 2), flooredRow('codex', 9_000_000, 40)];
+    expect(sortRows(rows, 'cost').map((r) => r.memberId)).toEqual(['codex', 'small']);
+  });
+
+  it('seats a floor under an exact total that beats it', () => {
+    // A floor is a lower bound, so it can only claim the place its priced
+    // share earns — never one above it.
+    const rows = [flooredRow('codex', 9_000_000, 40), row('spender', 10, 90)];
+    expect(sortRows(rows, 'cost').map((r) => r.memberId)).toEqual(['spender', 'codex']);
+  });
+
+  it('compares two floors by their floors', () => {
+    const rows = [flooredRow('lighter', 9_000_000, 3), flooredRow('heavier', 10, 30)];
+    expect(sortRows(rows, 'cost').map((r) => r.memberId)).toEqual(['heavier', 'lighter']);
+  });
+
+  it('puts a real floor above a day with no number at all', () => {
+    const rows = [row('unknown', 9_000_000, null), flooredRow('floored', 10, 0.5)];
+    expect(sortRows(rows, 'cost').map((r) => r.memberId)).toEqual(['floored', 'unknown']);
+  });
+
+  it('sorts a day nothing could be priced in last, floor field or not', () => {
+    const rows = [flooredRow('nothing-priced', 9_000_000, 0), row('cheap', 10, 0.01)];
+    expect(sortRows(rows, 'cost').map((r) => r.memberId)).toEqual(['cheap', 'nothing-priced']);
+  });
+
+  it('leaves the token sort alone', () => {
+    // The floor is a cost-column repair. Ranked by tokens, the board must not
+    // notice it exists.
+    const rows = [flooredRow('floored', 10, 900), row('burner', 5_000, 1)];
+    expect(sortRows(rows, 'tokens').map((r) => r.memberId)).toEqual(['burner', 'floored']);
+  });
+
   it('breaks a cost tie on processed tokens too', () => {
     // The cost sort falls back to tokens for unknown and equal costs, so it
     // has to be ranking by the same quantity the tokens sort does.
@@ -211,6 +271,53 @@ describe('Leaderboard', () => {
     expect(bars[1]).toBe('0%');
   });
 
+  // ------------------------------------------------- a floor, not a blank
+
+  it('shows the priced share as a floor rather than nothing', () => {
+    seed([flooredRow('codex', 9_000_000, 12.4)]);
+    render(<Leaderboard />);
+
+    expect(document.querySelector('.lb-row .cost')?.textContent).toBe('est.≥$12');
+    expect(screen.queryByText(/no est/i)).toBeNull();
+  });
+
+  it('does not let a floor pass for an exact estimate', () => {
+    // The failure mode this whole shape exists to avoid: an undercount wearing
+    // a complete total's clothes.
+    seed([flooredRow('codex', 9_000_000, 12.4)]);
+    render(<Leaderboard />);
+    expect(screen.queryByText('$12')).toBeNull();
+    expect(document.querySelector('.cost-floor')).toBeTruthy();
+  });
+
+  it('says on hover what the number leaves out, and names it', () => {
+    seed([flooredRow('codex', 9_000_000, 12.4)]);
+    render(<Leaderboard />);
+    const title = document.querySelector('.cost-floor')?.getAttribute('title') ?? '';
+    expect(title).toMatch(/at least/i);
+    expect(title).toContain('codex-auto-review');
+  });
+
+  it('admits on hover that the ranking uses the floor, when it is doing the ranking', () => {
+    seed([flooredRow('codex', 9_000_000, 12.4)]);
+    render(<Leaderboard />);
+    expect(document.querySelector('.cost-floor')?.getAttribute('title')).not.toMatch(/ranked by/i);
+
+    fireEvent.click(screen.getByRole('button', { name: 'sort by estimated cost' }));
+    expect(document.querySelector('.cost-floor')?.getAttribute('title')).toMatch(/ranked by/i);
+  });
+
+  it('gives a floored day a meter, because it has a number to draw', () => {
+    seed([row('priced', 10, 20), flooredRow('codex', 9_000_000, 10)]);
+    render(<Leaderboard />);
+    fireEvent.click(screen.getByRole('button', { name: 'sort by estimated cost' }));
+
+    const bars = [...document.querySelectorAll('.lb-meter > i')].map(
+      (n) => (n as HTMLElement).style.width,
+    );
+    expect(bars).toEqual(['100%', '50%']);
+  });
+
   it('still ranks by tokens when no row has a cost at all', () => {
     seed([row('a', 10, null), row('b', 900, null)]);
     render(<Leaderboard />);
@@ -260,6 +367,35 @@ describe('Leaderboard', () => {
     seed([privateRow('quiet')]);
     render(<Leaderboard />);
     expect(screen.queryByText(/suspiciously quiet/i)).toBeNull();
+  });
+
+  it('never gives a withholding member a floor, whatever the wire carries', () => {
+    // The withheld state outranks every other reading of the row. A member who
+    // turned sharing off midday still has real rows in the ledger, and a
+    // "≥ $9" beside their name would publish the number they declined to give.
+    const quiet = privateRow('quiet');
+    quiet.stats = { ...quiet.stats, estimatedCostUsd: null, estimatedCostFloorUsd: 9 };
+    seed([row('busy', 500, 1), quiet]);
+    render(<Leaderboard />);
+
+    expect(screen.queryByText(/≥/)).toBeNull();
+    expect(screen.getByText('private')).toBeTruthy();
+    expect([...document.querySelectorAll('.lb-row .rank')].map((n) => n.textContent)).toEqual([
+      '1',
+      '–',
+    ]);
+  });
+
+  it('keeps a withheld floor out of the cost ranking entirely', () => {
+    const quiet = privateRow('quiet');
+    quiet.stats = { ...quiet.stats, estimatedCostUsd: null, estimatedCostFloorUsd: 900 };
+    seed([quiet, row('busy', 500, 1)]);
+    render(<Leaderboard />);
+    fireEvent.click(screen.getByRole('button', { name: 'sort by estimated cost' }));
+
+    // Ranked rows first, withheld beneath them — never sorted to the top by a
+    // number they never agreed to publish.
+    expect(rendered()).toEqual(['busy', 'quiet']);
   });
 
   it('keeps the withheld row zeroes out of the ranking and the meter', () => {

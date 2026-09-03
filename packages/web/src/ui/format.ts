@@ -1,5 +1,5 @@
 import type { DailyStats, PresenceState, SessionSnapshot, TokenTotals } from '@sloppers/protocol';
-import { PRICING, processedTokens } from '@sloppers/protocol';
+import { estimateCostFloorUsd, PRICING, processedTokens } from '@sloppers/protocol';
 
 /**
  * 1234 → "1.2k", 5_400_000 → "5.4M", 2_800_000_000 → "2.8B" —
@@ -133,6 +133,94 @@ export function formatCostUsd(usd: number): string {
   if (rounded < 0.01) return '<$0.01';
   if (rounded < 10) return `$${rounded.toFixed(2)}`;
   return `$${Math.round(usd).toLocaleString('en-US')}`;
+}
+
+/**
+ * The mark that turns an amount into a lower bound: `≥$12.40`, "at least".
+ *
+ * Sits with the dollars in the mono face rather than in the Silkscreen `est.`
+ * slot, which has no glyph for it, and matches the `≈` that already hedges
+ * active minutes — the office has one small-symbol vocabulary for "this number
+ * is not the plain reading", and this is the second word in it.
+ */
+export const COST_FLOOR_MARK = '≥';
+
+/** Below this, a floor rounds to nothing and stops being worth printing. */
+const ONE_CENT = 0.005;
+
+/**
+ * The sentence a floor needs, which is not the one an estimate needs: what the
+ * number leaves out, and that nobody can say how much that is.
+ *
+ * It names the unpriced models rather than quoting a percentage of tokens.
+ * Tokens are not dollars — `codex-auto-review` is 26.7% of a Codex day's
+ * tokens and an unknown share of its bill — so "51% unpriced" would be a
+ * precise-sounding number about the wrong quantity. A name is something the
+ * reader can check against the per-model list on their own card.
+ */
+export function costFloorTitle(unpriced: readonly string[]): string {
+  const named = unpriced.slice(0, 3).join(', ');
+  const rest = unpriced.length > 3 ? ` and ${unpriced.length - 3} more` : '';
+  const which =
+    unpriced.length === 0
+      ? 'Something in it ran on a model with no published price'
+      : `${named}${rest} ${unpriced.length === 1 ? 'has' : 'have'} no published price`;
+  return `At least this much — the part of today we can price. ${which}, so the real total is higher by an amount nobody can state. ${costTitle()}`;
+}
+
+/**
+ * The caveat that only applies where floors are being ranked against exact
+ * numbers: a floor is placed by what we can vouch for, so a day carrying more
+ * unpriced work sits lower than its real spend. Added by the board when it is
+ * sorted by cost, and nowhere else — a member card ranks nothing.
+ */
+export const COST_FLOOR_RANK_NOTE =
+  'Ranked by that floor, so a day with more unpriced work can sit lower than it belongs.';
+
+/** How one cost renders: what to print, what to say on hover, what to rank by. */
+export interface CostView {
+  kind: 'exact' | 'floor' | 'unknown';
+  /** `$3.07`, `≥$12.40`, or `no est.` */
+  text: string;
+  title: string;
+  /** What sorting and meters use. Null when there is no number at all. */
+  usd: number | null;
+}
+
+/** One model's cost: a figure, or the named absence of one. */
+export function modelCostView(usd: number | null): CostView {
+  if (usd === null) return { kind: 'unknown', text: COST_UNKNOWN, title: COST_UNKNOWN_TITLE, usd };
+  return { kind: 'exact', text: formatCostUsd(usd), title: costTitle(), usd };
+}
+
+/**
+ * A whole day's cost, resolved once so the board, the card and the cost sort
+ * cannot disagree about it.
+ *
+ * Three outcomes, in the order they are preferred. An exact total renders as
+ * it always has. Failing that, a floor worth a cent renders as a floor: it
+ * ranks and it prints, because "≥ $12.40" is strictly more than the nothing
+ * this day used to show. Failing *that* — a day where nothing at all could be
+ * priced — it stays `no est.`, because a floor of $0.00 is not a small amount
+ * of information, it is none, and printing it would read as free.
+ *
+ * The floor comes off the wire rather than being recomputed from `byModel`, so
+ * the number the server ranked is the number the browser prints. `byModel` is
+ * used only to name the models in the tooltip.
+ */
+export function dayCostView(stats: DailyStats): CostView {
+  const exact = stats.estimatedCostUsd ?? null;
+  if (exact !== null) return modelCostView(exact);
+  const floor = stats.estimatedCostFloorUsd ?? 0;
+  // `!(>=)` rather than `<`: a NaN off a malformed wire falls to `no est.`
+  // instead of printing "≥$0.00".
+  if (!(floor >= ONE_CENT)) return modelCostView(null);
+  return {
+    kind: 'floor',
+    text: `${COST_FLOOR_MARK}${formatCostUsd(floor)}`,
+    title: costFloorTitle(estimateCostFloorUsd(stats.byModel ?? {}).unpriced),
+    usd: floor,
+  };
 }
 
 /**

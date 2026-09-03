@@ -223,6 +223,31 @@ describe('daily stats', () => {
     const withNullCost = { ...withCost, estimatedCostUsd: null };
     expect(dailyStatsSchema.parse(withNullCost)).toEqual(withNullCost);
   });
+
+  it('round-trips a floor beside an unknowable total', () => {
+    // The wire shape of a mixed Codex day: no total, and a priced share that
+    // is worth showing. Dropping the floor silently would put the day back to
+    // "no est." with nothing to say it had been computed.
+    const floored = {
+      tokens,
+      sessionsRun: 3,
+      activeMinutes: 61,
+      byModel: { 'gpt-5.6-sol': tokens, 'codex-auto-review': tokens },
+      estimatedCostUsd: null,
+      estimatedCostFloorUsd: 4.2,
+    };
+    expect(dailyStatsSchema.parse(floored)).toEqual(floored);
+  });
+
+  it('parses stats from a server too old to send a floor', () => {
+    const parsed = dailyStatsSchema.parse({
+      tokens,
+      sessionsRun: 3,
+      activeMinutes: 61,
+      estimatedCostUsd: null,
+    });
+    expect(parsed.estimatedCostFloorUsd).toBeUndefined();
+  });
 });
 
 describe('time helpers', () => {
