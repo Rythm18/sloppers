@@ -52,6 +52,16 @@ interface MemberRuntime {
   displayName: string;
   avatar: string;
   role: MemberRole;
+  /**
+   * Whether a collector is attached for this member **right now**.
+   *
+   * It used to mean "has ever paired a device" — read once off the `devices`
+   * table, raised on the first attach and never lowered again. So an office
+   * went on saying "Sharing on" over a member card reading "no live agent
+   * sessions right now" for as long as the row survived: two sentences, each
+   * true on its own, telling one lie together. The wire field keeps its name
+   * and its shape; what it claims is now something the room can actually see.
+   */
   sharing: boolean;
   position: Position;
   webClients: Set<WebClient>;
@@ -111,15 +121,16 @@ export class Room {
   private ensureRuntime(row: MemberRow): MemberRuntime {
     let runtime = this.members.get(row.id);
     if (!runtime) {
-      const shared = this.db
-        .prepare('SELECT 1 FROM devices WHERE member_id = ? LIMIT 1')
-        .get(row.id);
       runtime = {
         id: row.id,
         displayName: row.display_name,
         avatar: row.avatar,
         role: row.role,
-        sharing: shared !== undefined,
+        // Nothing is attached to a runtime that did not exist a line ago, and
+        // that is the whole claim now. Reading the `devices` table here is
+        // what made a restarted server greet everyone who had ever paired
+        // with "Sharing on", collectors or no collectors.
+        sharing: false,
         position: {
           x: SPAWN.x + (Math.random() - 0.5) * 96,
           y: SPAWN.y + (Math.random() - 0.5) * 48,
@@ -205,8 +216,8 @@ export class Room {
     // and today's totals, none of which need have changed when a collector
     // with no live session attaches — so without this the browser that just
     // handed somebody the pairing command learns nothing at all until it is
-    // reloaded. Sent only on the edge: a reconnecting collector, or a second
-    // machine taking over, is not news to anybody.
+    // reloaded. Sent only on the edge: a second machine taking over from one
+    // that has not detached yet changes nothing anybody can see.
     const becameSharing = !runtime.sharing;
     runtime.sharing = true;
     if (becameSharing) this.broadcastMember(memberId);
@@ -214,12 +225,26 @@ export class Room {
     return true;
   }
 
+  /**
+   * A collector's socket went away: the daemon stopped, the laptop shut, the
+   * heartbeat reaped a half-open connection. Nothing is sharing from that
+   * machine any more, and the `sharing` flag has to come back down and say
+   * so — otherwise the HUD reads "Sharing on" over an office that has not
+   * heard from the machine in a week.
+   *
+   * On the edge, like the attach, so a member with no collector is not
+   * re-announced every time a stray socket drops. The `ws` guard is what
+   * keeps a superseded collector — which detaches *after* its replacement
+   * attached — from lowering a flag the new machine just raised.
+   */
   detachCollector(memberId: string, ws: WebSocket): void {
     const runtime = this.members.get(memberId);
-    if (runtime?.collector?.ws === ws) {
-      runtime.collector = null;
-      this.refreshPresence(memberId);
-    }
+    if (runtime?.collector?.ws !== ws) return;
+    runtime.collector = null;
+    const wasSharing = runtime.sharing;
+    runtime.sharing = false;
+    if (wasSharing) this.broadcastMember(memberId);
+    this.refreshPresence(memberId);
   }
 
   ingestSnapshot(memberId: string, ws: WebSocket, snapshot: CollectorSnapshot, now: number): void {

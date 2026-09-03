@@ -157,9 +157,15 @@ export function JoinScreen({
                 : '.'}
             </p>
           ) : deadInvite ? (
+            /* Rotating the invite is the ordinary way a link dies, and it does
+               not take anybody's seat with it — so this says what happened and
+               what is still recoverable, rather than leaving a member to read
+               a dead link as a deleted office. */
             <p className="join-tagline">
-              This invite doesn&rsquo;t point to an office anymore. Ask for a fresh link, or start
-              your own below.
+              This invite doesn&rsquo;t point to an office anymore &mdash; usually that means the
+              link was rotated. Ask for the new one. If you already had a seat in there it is still
+              yours: the browser you last used gets you back in, even on an old link. Or start your
+              own below.
             </p>
           ) : (
             <p className="join-tagline">
@@ -246,8 +252,9 @@ export function JoinScreen({
             {joinError.includes('already called') ? (
               <span className="join-hint">
                 {' '}
-                Was that you? On the machine where your agents share from, run{' '}
-                <code>sloppers relink</code> to sign back in.
+                Was that you? Your seat is still in there. The browser you last used gets you
+                straight back in, even on the old link &mdash; otherwise, on the machine where your
+                agents share from, run <code>sloppers relink</code>.
               </span>
             ) : null}
           </p>

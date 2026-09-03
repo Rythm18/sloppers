@@ -47,6 +47,11 @@ export function HUD() {
    * An empty avatar is a thing worth mentioning once. It is not worth
    * mentioning to somebody who has already answered — so sharing settles it
    * for good, and so does saying "not now".
+   *
+   * `sharing` is "a collector is connected right now", which falls again when
+   * a laptop shuts. That is the honest thing for the button beside it to read,
+   * and exactly the wrong thing to re-nag on: `nudgeDone` is what remembers
+   * that this person has already been told, and it never comes back down.
    */
   const showNudge = you !== null && !sharing && !nudgeDone;
 

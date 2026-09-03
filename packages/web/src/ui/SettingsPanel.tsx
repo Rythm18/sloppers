@@ -32,11 +32,17 @@ const JOIN_MODES: { value: WorkspaceSettings['joinMode']; label: string; consequ
 type Removal = Extract<AdminOp, { kind: 'kick' | 'ban' }>;
 
 /**
- * The ops this panel asks about before it sends them. Two take somebody out
- * of the office; the third takes the door key off everybody at once,
- * including the person clicking.
+ * The ops a person's own row asks about before sending. Two take them out of
+ * the office; the third gives them the whole thing.
  */
-type Confirmable = Removal | Extract<AdminOp, { kind: 'rotate-invite' }>;
+type PersonAsk = Removal | Extract<AdminOp, { kind: 'transfer' }>;
+
+/**
+ * The ops this panel asks about before it sends them: the three above, plus
+ * the one that takes the door key off everybody at once, including the person
+ * clicking.
+ */
+type Confirmable = PersonAsk | Extract<AdminOp, { kind: 'rotate-invite' }>;
 
 /**
  * Which control is waiting on an answer. The office refuses an op with a
@@ -61,6 +67,16 @@ function outranks(viewer: MemberRole | null, target: MemberRole): boolean {
 /** Whether this viewer could remove this person right now. */
 function removable(viewer: MemberRole | null, target: RosterEntry | undefined): boolean {
   return target !== undefined && target.status === 'active' && outranks(viewer, target.role);
+}
+
+/**
+ * Whether the keys could go to this person. Mirrors the server's `transfer`,
+ * which resolves an *active* member and refuses the owner their own keys —
+ * and unlike a removal, rank is no bar: a moderator is the likeliest heir
+ * there is, which is the whole reason the owner made one.
+ */
+function inheritable(target: RosterEntry | undefined): boolean {
+  return target !== undefined && target.status === 'active' && target.role !== 'owner';
 }
 
 /**
@@ -132,15 +148,14 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
   // question sat open, or the keys may have changed hands under a half-armed
   // rotation. Take the question away rather than leave it asking about
   // something that already happened.
-  const stillAskable = (op: Confirmable): boolean =>
-    op.kind === 'rotate-invite'
-      ? isOwner
-      : removable(
-          role,
-          roster.find((entry) => entry.id === op.memberId),
-        );
+  const stillAskable = (op: Confirmable): boolean => {
+    if (op.kind === 'rotate-invite') return isOwner;
+    const target = roster.find((entry) => entry.id === op.memberId);
+    if (op.kind === 'transfer') return isOwner && inheritable(target);
+    return removable(role, target);
+  };
   const armed = pending && stillAskable(pending) ? pending : null;
-  const armedRemoval = armed && armed.kind !== 'rotate-invite' ? armed : null;
+  const armedPerson = armed && armed.kind !== 'rotate-invite' ? armed : null;
   const armedRotate = armed?.kind === 'rotate-invite';
   useEffect(() => {
     if (!armed) setPending(null);
@@ -266,7 +281,9 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
             )}
             <p className="settings-note">
               Rotating makes a brand new link. Every link you have already shared stops working,
-              including the one in your own address bar.
+              including the one in your own address bar. Nobody loses their seat — everyone here
+              moves across with the office, and so does anyone offline whose browser still has the
+              old link. Send the new one to the rest, or they come back strangers.
             </p>
             {refusalAt('office')}
           </section>
@@ -323,16 +340,23 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
                 key={member.id}
                 member={member}
                 role={role}
-                armed={armedRemoval?.memberId === member.id ? armedRemoval : null}
+                armed={armedPerson?.memberId === member.id ? armedPerson : null}
                 refusal={refusalAt(`person:${member.id}`)}
                 onArm={setPending}
                 onDisarm={() => setPending(null)}
                 onAct={(op) => act(`person:${member.id}`, op)}
               />
             ))}
+            {/* Rotating the link and changing the door are the owner's alone,
+                so only the owner is told to reach for them. A moderator being
+                sent after two controls that are not in their panel is the one
+                sentence in here that read like a different product. */}
             <p className="settings-note">
               Banning stops that person coming back as themselves. Someone determined can still
-              return under a new name, so pair it with rotating the link or asking people to knock.
+              return under a new name
+              {isOwner
+                ? ', so pair it with rotating the link or asking people to knock.'
+                : ' — the owner can rotate the link or switch the door to knocking if that starts happening.'}
             </p>
           </section>
         ) : null}
@@ -354,8 +378,8 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
           <h3 className="settings-title">Leave for good</h3>
           {isOwner ? (
             <p className="settings-note">
-              You are holding the keys. Hand the office to somebody else before you delete yourself,
-              or there is nobody left to open the door.
+              You are holding the keys. Hand the office over first — there is a button on everyone's
+              row up in People — or there is nobody left to open the door.
             </p>
           ) : (
             <>
@@ -395,6 +419,12 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
  * not obvious from the button. Every link already handed out stops working
  * — the one in the owner's own address bar included, so the tab asking the
  * question is one of the things the answer breaks.
+ *
+ * What it does *not* cost is anybody's seat: connected browsers re-file their
+ * credentials under the new code as the change arrives, and an offline one
+ * does it on the way back in through the old link. The people at risk are the
+ * ones who are away and will next reach for a link somebody sent them, which
+ * is why the question ends by pointing at them rather than at the link.
  */
 function RotateQuestion({
   onConfirm,
@@ -414,7 +444,8 @@ function RotateQuestion({
     <div className="settings-row settings-row-asking">
       <span className="settings-note">
         Rotate the invite link? Every link you have already shared stops working — including the one
-        in this tab's address bar. Anyone using an old one has to be sent the new link.
+        in this tab's address bar. Nobody in the office loses their seat, but anyone who is away
+        right now needs the new link from you before they can get back to theirs.
       </span>
       <span className="settings-actions">
         <button type="button" className="btn btn-danger" ref={confirmRef} onClick={onConfirm}>
@@ -429,16 +460,43 @@ function RotateQuestion({
 }
 
 /**
- * One person on the roster. Kicking and banning arm first and fire second:
- * the row itself asks, because a misplaced click here costs somebody their
- * seat — and an unbanned person comes back a stranger, stats and all gone.
- * Which row is armed belongs to the panel, not to the row, so arming one
- * question puts any other away.
+ * One person on the roster. Kicking, banning and handing the office over arm
+ * first and fire second: the row itself asks, because a misplaced click here
+ * costs somebody their seat — or costs the owner the office, which only the
+ * person they just gave it to can give back. An unbanned person comes back a
+ * stranger, stats and all gone. Which row is armed belongs to the panel, not
+ * to the row, so arming one question puts any other away.
  *
  * Every action carries `label: name` as its accessible name. A list of
  * identical "Remove" buttons is unusable read aloud, and the visible label
  * still leads, so speaking the button by name works too.
  */
+/**
+ * What an armed question says, and what its answer is called. Three ops with
+ * three different costs; one shared "Are you sure?" would be the panel
+ * declining to say which of them is about to happen — and the one that hands
+ * over the office is not a bigger removal, it is a different thing entirely.
+ */
+function askAbout(op: PersonAsk, name: string): { question: string; confirm: string } {
+  switch (op.kind) {
+    case 'kick':
+      return {
+        question: `Remove ${name}? The link still works, so they can walk back in.`,
+        confirm: 'Yes, remove',
+      };
+    case 'ban':
+      return {
+        question: `Ban ${name}? Unbanning later brings them back a stranger, with none of their stats.`,
+        confirm: 'Yes, ban',
+      };
+    case 'transfer':
+      return {
+        question: `Hand the whole office to ${name}? They get the invite link, the door, everybody's roles and the last word on all of it. You stay on as a moderator, and only they can hand it back.`,
+        confirm: 'Yes, hand it over',
+      };
+  }
+}
+
 function PersonRow({
   member,
   role,
@@ -450,11 +508,11 @@ function PersonRow({
 }: {
   member: RosterEntry;
   role: MemberRole | null;
-  /** The removal this row is asking about, or null when it is just a row. */
-  armed: Removal | null;
+  /** The question this row is asking, or null when it is just a row. */
+  armed: PersonAsk | null;
   /** The office's answer to this row's last op, if it refused one. */
   refusal: ReactNode;
-  onArm: (op: Removal) => void;
+  onArm: (op: PersonAsk) => void;
   onDisarm: () => void;
   onAct: (op: AdminOp) => void;
 }) {
@@ -470,26 +528,23 @@ function PersonRow({
   const canRemove = removable(role, member);
 
   if (armed) {
+    const asking = askAbout(armed, member.displayName);
     return (
       <>
         <div className="settings-row settings-row-asking">
-          <span className="settings-note">
-            {armed.kind === 'kick'
-              ? `Remove ${member.displayName}? The link still works, so they can walk back in.`
-              : `Ban ${member.displayName}? Unbanning later brings them back a stranger, with none of their stats.`}
-          </span>
+          <span className="settings-note">{asking.question}</span>
           <span className="settings-actions">
             <button
               type="button"
               className="btn btn-danger"
               ref={confirmRef}
-              aria-label={`${armed.kind === 'kick' ? 'Yes, remove' : 'Yes, ban'}: ${member.displayName}`}
+              aria-label={`${asking.confirm}: ${member.displayName}`}
               onClick={() => {
                 onAct(armed);
                 onDisarm();
               }}
             >
-              {armed.kind === 'kick' ? 'Yes, remove' : 'Yes, ban'}
+              {asking.confirm}
             </button>
             <button
               type="button"
@@ -535,6 +590,22 @@ function PersonRow({
               onClick={() => onAct({ kind: 'demote', memberId: member.id })}
             >
               Step down
+            </button>
+          ) : null}
+          {/* The one control in this panel that ends the owner's own authority
+              over the office — the server has always taken the op, and the
+              panel spent a release telling people to use a button that was
+              never built. Offered on moderators as readily as on members: the
+              owner picked them, which is the closest thing to a nomination
+              the office keeps. */}
+          {isOwner && inheritable(member) ? (
+            <button
+              type="button"
+              className="btn btn-quiet"
+              aria-label={`Hand over office: ${member.displayName}`}
+              onClick={() => onArm({ kind: 'transfer', memberId: member.id })}
+            >
+              Hand over office
             </button>
           ) : null}
           {canRemove ? (

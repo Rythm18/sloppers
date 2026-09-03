@@ -3,18 +3,20 @@
  *
  * Keyed by member id, deliberately. The other thing this browser keeps is an
  * identity filed under the office's invite code (`net/socket.ts`), and that
- * key does not survive a rotation — the member id inside it does, and travels
- * intact through `sloppers relink` onto a second browser as well. Keying the
- * dismissal by the room would bring the nudge back on the day the invite is
- * rotated, to somebody who has been sharing for a month.
+ * key moves when the invite is rotated. The member id inside it never moves,
+ * and travels intact through `sloppers relink` onto a second browser as well
+ * — so the dismissal follows the person rather than the door they came in by.
  *
  * Clearing site data is the one thing that does bring it back, and that is
  * right: the identity went with it, so the office is meeting a stranger.
  *
  * Two ways to get here, and both are permanent. Dismissing it says "I know,
  * and I am not going to" — a perfectly good answer that must not be asked
- * again. Actually sharing settles it too, so a collector that stops later
- * never turns the office back into a leaflet.
+ * again. Actually sharing settles it too, and that is the half `sharing` on
+ * the wire can no longer carry on its own: it means a collector is connected
+ * *now*, so it falls again the moment a laptop shuts. Whether somebody has
+ * ever answered the question is a different fact from whether their machine
+ * is awake, and only the first one belongs here.
  */
 
 const KEY = 'sloppers:share-nudge:';

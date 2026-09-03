@@ -45,6 +45,31 @@ export function clearIdentity(roomCode: string): void {
   localStorage.removeItem(identityKey(roomCode));
 }
 
+/**
+ * Move a stored identity from one invite code to another.
+ *
+ * The invite code is the only name this browser has for an office, so it is
+ * what credentials are filed under — and an owner can change it. Rotation
+ * moves everybody to the new code and rewrites the address bar to match,
+ * which used to leave the credentials sitting under a code nothing looks up
+ * again: on the next reload the office met a stranger, offered them their own
+ * name, and refused it as taken. A member with a paired collector could climb
+ * back in with `sloppers relink`; everybody else lost their seat and their
+ * history to a click they did not make.
+ *
+ * The server never needed the code to let them in — `memberId` and
+ * `memberSecret` name the office by themselves — so this is only ever about
+ * where the browser goes looking. Moved rather than copied: two entries for
+ * one seat is one of them going stale, filed under a dead code.
+ */
+function refileIdentity(from: string, to: string): void {
+  if (from === to) return;
+  const identity = loadIdentity(from);
+  if (!identity) return;
+  saveIdentity(to, identity);
+  clearIdentity(from);
+}
+
 /** The three ways into an office, mirroring the join protocol. */
 export type JoinIntent =
   | { kind: 'resume'; roomCode: string }
@@ -165,6 +190,14 @@ export class OfficeSocket {
             memberId: msg.you.memberId,
             memberSecret: msg.you.memberSecret,
           });
+        } else if (this.intent.kind === 'resume') {
+          // Resumed on credentials we already held, and the office answers
+          // with the code it has *now*. It may have rotated while this tab was
+          // shut: the old link still got us in — the credentials name the
+          // office, the code never did — and this is the one moment the
+          // browser learns where to file them, before the address bar is
+          // rewritten to a code nothing is stored under.
+          refileIdentity(this.intent.roomCode, msg.roomCode);
         }
         // From here this connection *is* somebody, somewhere: a member id and
         // an office. Every reconnect from now on has to put that member back
@@ -172,11 +205,21 @@ export class OfficeSocket {
         // it would mint a second office ('create'), or offer the office a
         // name it already gave us and be told it is taken ('invited'), or
         // stand us back in a queue we have already been let out of ('knock').
-        // The room code is the one identity is filed under — deliberately not
-        // updated when the invite rotates, because localStorage is not either.
+        // The room code it carries is the one identity is filed under, and it
+        // follows the office from here — see the `workspace` branch below.
         this.intent = { kind: 'resume', roomCode: msg.roomCode };
         this.lastPresent = null;
         this.reportPresence();
+      }
+      if (msg.type === 'workspace' && this.intent.kind === 'resume') {
+        // The office's own state, pushed whenever it changes — which includes
+        // the owner rotating the invite out from under everybody inside.
+        // Nobody loses their seat; the drawer their credentials sit in is
+        // renamed, and this browser is the only thing that can move them. A
+        // no-op on the copy that arrives with every arrival, when the code is
+        // the one we came in on.
+        refileIdentity(this.intent.roomCode, msg.roomCode);
+        this.intent = { kind: 'resume', roomCode: msg.roomCode };
       }
       if (msg.type === 'error' && !entered) {
         // The door refused this connection: a locked office, a taken name, a
@@ -292,8 +335,9 @@ export async function fetchRoomPreview(
  * Why a pairing code could not be minted. The two are not the same problem
  * and do not have the same fix, and for a while they shared one sentence
  * blaming the network: a 403 is the office looking at this browser's
- * credentials and not recognising them (the invite was rotated, storage was
- * cleared, the member was removed), which no amount of trying again resolves.
+ * credentials and not recognising them (storage was cleared, the member was
+ * removed, this browser never had a seat here), which no amount of trying
+ * again resolves.
  */
 export type MintFailure =
   /** Nothing answered, or the office answered badly. Trying again may work. */
