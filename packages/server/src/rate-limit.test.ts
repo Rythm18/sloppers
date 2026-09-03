@@ -41,6 +41,23 @@ describe('createMessageLimiter', () => {
     expect(limiter.allow('admin', t0)).toBe(false);
   });
 
+  it('gives history a budget of its own, and a small one', () => {
+    const limiter = createMessageLimiter();
+    const t0 = 3_000_000;
+    // The widest read a browser can ask for: three queries per member of the
+    // office. A person clicking through the board and a few teammates' weeks
+    // spends one, because the client caches the answer. A loop spends five and
+    // is then refused.
+    for (let i = 0; i < 5; i++) expect(limiter.allow('history', t0)).toBe(true);
+    expect(limiter.allow('history', t0)).toBe(false);
+    // Ten seconds at 6/min earns exactly one back — not a fresh burst.
+    expect(limiter.allow('history', t0 + 10_000)).toBe(true);
+    expect(limiter.allow('history', t0 + 10_000)).toBe(false);
+    // And spending it did not touch anybody else's: a socket that drained its
+    // history budget can still walk its avatar around.
+    expect(limiter.allow('move', t0 + 10_000)).toBe(true);
+  });
+
   it('governs activity and join with their own budgets', () => {
     const limiter = createMessageLimiter();
     const t0 = 4_000_000;

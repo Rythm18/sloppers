@@ -1,5 +1,5 @@
 import type { SessionSnapshot, TokenTotals, UsageBucket } from '@sloppers/protocol';
-import { encodeMinutes, PRICING } from '@sloppers/protocol';
+import { encodeMinutes, MAX_HISTORY_DAYS, PRICING, processedTokens } from '@sloppers/protocol';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type Db, openDb } from './db/index.js';
 import { TokenLedger } from './ledger.js';
@@ -9,13 +9,16 @@ import { TokenLedger } from './ledger.js';
  * `dayOf`, which reads the local calendar, so a UTC instant would file work
  * under the wrong date for anyone not on UTC.
  */
+const DAY_17 = new Date(2026, 7, 17, 12, 0).getTime();
 const DAY_18 = new Date(2026, 7, 18, 12, 0).getTime();
 const TODAY_19 = new Date(2026, 7, 19, 12, 0).getTime();
+const D17 = '2026-08-17';
 const D18 = '2026-08-18';
 const D19 = '2026-08-19';
 const D20 = '2026-08-20';
 
 /** A minute before each day's noon: a session that plainly started that day. */
+const STARTED_17 = DAY_17 - 60_000;
 const STARTED_18 = DAY_18 - 60_000;
 const STARTED_19 = TODAY_19 - 60_000;
 
@@ -1066,6 +1069,133 @@ describe('TokenLedger', () => {
     ledger.ingest('m1', [legacy('s1', tokens(100))], TODAY_19);
     ledger.ingest('m1', [realistic('s1', [bucket(D19, 'claude-opus-5', 100)])], TODAY_19);
     expect(ledger.todayFor('m1', TODAY_19).precision).toBe('coarse');
+  });
+
+  // ---------------------------------------------------------------- history
+
+  it('serves the day the caller names, not the day the clock says', () => {
+    ledger.ingest('m1', [bucketed('s1', [bucket(D18, PRICED, 60)], STARTED_18)], DAY_18);
+    ledger.ingest('m1', [bucketed('s2', [bucket(D19, PRICED, 25)])], TODAY_19);
+    // The whole point of the day switch: yesterday's board must show
+    // yesterday's numbers under yesterday's label, and today's under today's.
+    // Reading `dayFor` and getting today's data back for a past day is the one
+    // bug a day switch can have that nobody looking at it can see.
+    expect(ledger.dayFor('m1', D18).tokens.input).toBe(60);
+    expect(ledger.dayFor('m1', D19).tokens.input).toBe(25);
+    expect(ledger.dayFor('m1', D18)).not.toEqual(ledger.dayFor('m1', D19));
+  });
+
+  it('reads today through the same path a past day is read through', () => {
+    ledger.ingest(
+      'm1',
+      [realistic('s1', [bucket(D19, PRICED, 10, 20)], { minutes: { day: D19, minutes: [1, 2] } })],
+      TODAY_19,
+    );
+    // `todayFor` is `dayFor` with the server's own day supplied. If the two
+    // ever grow separate arithmetic, the board and the history strip start
+    // disagreeing about the same day and nobody can tell which is right.
+    expect(ledger.todayFor('m1', TODAY_19)).toEqual(ledger.dayFor('m1', D19));
+  });
+
+  it('reads a week the same way it reads each of its days', () => {
+    ledger.ingest(
+      'm1',
+      [
+        realistic('s1', [bucket(D18, PRICED, 60), bucket(D19, 'no-such-price', 25)], {
+          minutes: { day: D18, minutes: [10, 11, 12] },
+          startedAt: STARTED_18,
+        }),
+      ],
+      DAY_18,
+    );
+    ledger.ingest('m1', [legacy('s2', tokens(5))], TODAY_19);
+    const week = ledger.recentFor('m1', D19, 7);
+    // Every field, not a spot check: the range queries are a second
+    // implementation of the same three reads, and the only guarantee worth
+    // having is that a day cannot come out different depending on which one
+    // fetched it — cost, floor, precision, minutes and session count included.
+    for (const entry of week) {
+      expect(entry.stats).toEqual(ledger.dayFor('m1', entry.day));
+    }
+  });
+
+  it('gives a week seven days, newest first, rest days included', () => {
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, PRICED, 25)])], TODAY_19);
+    const week = ledger.recentFor('m1', D19, 7);
+    expect(week.map((d) => d.day)).toEqual([
+      '2026-08-19',
+      '2026-08-18',
+      '2026-08-17',
+      '2026-08-16',
+      '2026-08-15',
+      '2026-08-14',
+      '2026-08-13',
+    ]);
+    // A day nobody worked is a zero, not a gap. Dropping it would slide every
+    // later bar one place along and quietly turn a rest day into a busy one.
+    expect(week[1]?.stats.tokens.input).toBe(0);
+    expect(week[1]?.stats.sessionsRun).toBe(0);
+    expect(week[1]?.stats.precision).toBeUndefined();
+  });
+
+  it('gives a member who arrived yesterday a week of honest zeroes', () => {
+    // Nothing before they turned up, and no apology for it either: the days
+    // exist, they are empty, and the strip reads as somebody who has just
+    // started rather than as a member with a broken card.
+    ledger.ingest('m1', [bucketed('s1', [bucket(D19, PRICED, 25)])], TODAY_19);
+    const week = ledger.recentFor('m1', D19, 7);
+    expect(week).toHaveLength(7);
+    expect(week.filter((d) => processedTokens(d.stats.tokens) > 0)).toHaveLength(1);
+  });
+
+  it('prices, floors and hedges each day on its own terms', () => {
+    // Three days, three different answers to the same three questions — which
+    // is the whole reason history carries `DailyStats` rather than a number.
+    ledger.ingest('m1', [bucketed('s1', [bucket(D17, PRICED, 1_000_000)], STARTED_17)], DAY_17);
+    ledger.ingest(
+      'm1',
+      [
+        bucketed(
+          's2',
+          [bucket(D18, PRICED, 1_000_000), bucket(D18, 'no-such-price', 5)],
+          STARTED_18,
+        ),
+      ],
+      DAY_18,
+    );
+    ledger.ingest('m1', [legacy('s3', tokens(100))], TODAY_19);
+    const [today, yesterday, before] = ledger.recentFor('m1', D19, 3);
+
+    // A fully priced day totals exactly, and says so.
+    expect(before?.stats.estimatedCostUsd).toBe(1);
+    expect(before?.stats.precision).toBe('measured');
+    // One unpriced model makes the day's bill unknowable, and leaves a floor
+    // under it that is still real money.
+    expect(yesterday?.stats.estimatedCostUsd).toBeNull();
+    expect(yesterday?.stats.estimatedCostFloorUsd).toBe(1);
+    expect(yesterday?.stats.precision).toBe('measured');
+    // And a flat 0.1.x day is coarse all week, not just on the day it landed.
+    expect(today?.stats.precision).toBe('coarse');
+  });
+
+  it('caps a week however many days are asked for', () => {
+    // The wire schema caps this too, and this is the cap standing next to the
+    // query — the table it reads grows forever, and a `days` that got past the
+    // schema by any route must not become an unbounded scan.
+    expect(ledger.recentFor('m1', D19, 9999)).toHaveLength(MAX_HISTORY_DAYS);
+    expect(ledger.recentFor('m1', D19, 0)).toEqual([]);
+    expect(ledger.recentFor('m1', D19, -3)).toEqual([]);
+  });
+
+  it('keeps one week out of another member’s', () => {
+    db.prepare(
+      `INSERT INTO members
+         (id, workspace_id, secret, display_name, avatar, role, status, created_at, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run('m2', 'w1', 's', 'Other', 'mochi', 'member', 'active', DAY_18, DAY_18);
+    ledger.ingest('m1', [bucketed('s1', [bucket(D18, PRICED, 60)], STARTED_18)], DAY_18);
+    const week = ledger.recentFor('m2', D19, 7);
+    expect(week.every((d) => processedTokens(d.stats.tokens) === 0)).toBe(true);
   });
 
   // ---------------------------------------------------------------- hygiene

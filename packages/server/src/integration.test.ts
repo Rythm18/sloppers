@@ -1,4 +1,5 @@
 import {
+  dayOf,
   type KnockView,
   type PairRedeemResponse,
   type ServerToWeb,
@@ -985,6 +986,191 @@ describe('server integration', () => {
     expect(leaderboard.rows[0]?.stats.tokensShared).toBe(false);
 
     collector.close();
+  });
+
+  /**
+   * Pair a collector to a member and get a live socket for it — the four-step
+   * mint/redeem/hello dance the tests around this one write out longhand.
+   */
+  async function pairCollector(world: WebWorld, collectorVersion = '0.2.0'): Promise<WebSocket> {
+    const base = `http://127.0.0.1:${server.port}`;
+    const mint = await fetch(`${base}/api/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        memberId: world.you.memberId,
+        memberSecret: world.you.memberSecret,
+      }),
+    });
+    const { pairingCode } = (await mint.json()) as { pairingCode: string };
+    const redeem = await fetch(`${base}/api/pair/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pairingCode }),
+    });
+    const paired = (await redeem.json()) as PairRedeemResponse;
+    const collector = new WebSocket(`ws://127.0.0.1:${server.port}/ws/collector`);
+    await new Promise<void>((resolve) => collector.on('open', () => resolve()));
+    collector.send(
+      JSON.stringify({ type: 'hello', deviceKey: paired.deviceKey, collectorVersion }),
+    );
+    await new Promise<void>((resolve) => collector.once('message', () => resolve()));
+    return collector;
+  }
+
+  it('answers a history request with the office’s recent days', async () => {
+    const { client, world } = await join('ridham');
+    const collector = await pairCollector(world);
+    const today = dayOf(Date.now());
+    collector.send(
+      JSON.stringify({
+        type: 'snapshot',
+        sessions: [
+          {
+            id: 'sess-1',
+            harness: 'claude-code',
+            state: 'working',
+            usage: [
+              {
+                day: today,
+                model: 'claude-fable-5',
+                input: 900,
+                output: 100,
+                cacheRead: 0,
+                cacheWrite: 0,
+              },
+            ],
+            tokens: { input: 900, output: 100, cacheRead: 0, cacheWrite: 0 },
+            startedAt: Date.now() - 60_000,
+            lastActivityAt: Date.now(),
+          },
+        ],
+        machine: {},
+      }),
+    );
+    await client.next((m) => m.type === 'presence');
+
+    client.send({ type: 'history' });
+    const history = await client.next((m) => m.type === 'history');
+    if (history.type !== 'history') throw new Error('unreachable');
+    // A week by default, newest first, and the newest key is the day the live
+    // board is already calling today — one definition of today per panel.
+    expect(history.days).toHaveLength(7);
+    expect(history.days[0]).toBe(today);
+    const mine = history.members.find((m) => m.memberId === world.you.memberId);
+    expect(mine?.days).toHaveLength(7);
+    expect(mine?.days[0]?.day).toBe(today);
+    expect(mine?.days[0]?.stats.tokens.input).toBe(900);
+    // Every other day is a real zero rather than a missing entry — this office
+    // opened a minute ago and its strip should say so by being flat.
+    expect(mine?.days[1]?.stats.tokens.input).toBe(0);
+
+    collector.close();
+  });
+
+  /**
+   * Withholding governs the past tense too, and from the present.
+   *
+   * Somebody who turns sharing off at lunch is not asking the office to keep
+   * quiet from lunchtime on — they are asking it to stop talking about their
+   * numbers, and this morning's are still their numbers. The rows are still in
+   * the ledger (they were shared when they were written, and turning sharing
+   * off does not unsend them), so the guard has to be on the read.
+   *
+   * Both halves are asserted on purpose: the first proves the days are really
+   * there to be leaked, so the second cannot pass by accident.
+   */
+  it('withholds a member’s history the moment they withhold their numbers', async () => {
+    const { client, world } = await join('ridham');
+    const collector = await pairCollector(world);
+    const today = dayOf(Date.now());
+    const session = {
+      id: 'sess-1',
+      harness: 'claude-code',
+      state: 'working',
+      usage: [
+        {
+          day: today,
+          model: 'claude-fable-5',
+          input: 4242,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        },
+      ],
+      tokens: { input: 4242, output: 0, cacheRead: 0, cacheWrite: 0 },
+      startedAt: Date.now() - 60_000,
+      lastActivityAt: Date.now(),
+    };
+    collector.send(JSON.stringify({ type: 'snapshot', sessions: [session], machine: {} }));
+    await client.next((m) => m.type === 'presence');
+
+    client.send({ type: 'history' });
+    const shared = await client.next((m) => m.type === 'history');
+    if (shared.type !== 'history') throw new Error('unreachable');
+    expect(shared.members[0]?.days[0]?.stats.tokens.input).toBe(4242);
+    expect(shared.members[0]?.tokensShared).toBeUndefined();
+
+    // Sharing off. Same session, same rows in the table, nothing deleted.
+    collector.send(
+      JSON.stringify({
+        type: 'snapshot',
+        sessions: [
+          {
+            id: 'sess-1',
+            harness: 'claude-code',
+            state: 'working',
+            startedAt: session.startedAt,
+            lastActivityAt: Date.now(),
+          },
+        ],
+        machine: {},
+        sharesTokens: false,
+      }),
+    );
+    await client.next((m) => m.type === 'presence' && m.today.tokensShared === false);
+
+    client.send({ type: 'history' });
+    const withheld = await client.next((m) => m.type === 'history');
+    if (withheld.type !== 'history') throw new Error('unreachable');
+    expect(withheld.members[0]?.tokensShared).toBe(false);
+    expect(withheld.members[0]?.days).toEqual([]);
+    // Not "sent and flagged": the number does not leave the server at all.
+    expect(JSON.stringify(withheld)).not.toContain('4242');
+
+    collector.close();
+  });
+
+  it('refuses a history request that has spent its budget', async () => {
+    const { client } = await join('ridham');
+    // Five in a burst is the whole budget; a client that caches its answer
+    // spends one per connection, so anything past this is a loop.
+    for (let i = 0; i < 5; i++) {
+      client.send({ type: 'history' });
+      await client.next((m) => m.type === 'history');
+    }
+    client.send({ type: 'history' });
+    const refused = await client.next((m) => m.type === 'history' || m.type === 'error');
+    expect(refused.type).toBe('error');
+    if (refused.type !== 'error') throw new Error('unreachable');
+    expect(refused.message).toBe('slow down');
+  });
+
+  it('leaves a member who is gone out of the office’s history', async () => {
+    const { client: owner, world: ownerWorld } = await join('ridham');
+    const { world: samWorld } = await join('sam');
+    await owner.next((m) => m.type === 'member');
+
+    owner.send({ type: 'admin', op: { kind: 'kick', memberId: samWorld.you.memberId } });
+    await owner.next((m) => m.type === 'member-left');
+
+    owner.send({ type: 'history' });
+    const history = await owner.next((m) => m.type === 'history');
+    if (history.type !== 'history') throw new Error('unreachable');
+    // History is the room's, and the room no longer contains them. Their rows
+    // survive in the tables for attribution; nothing asks the office to keep
+    // showing a week for somebody who is not in it.
+    expect(history.members.map((m) => m.memberId)).toEqual([ownerWorld.you.memberId]);
   });
 
   it('reads silence from a 0.1.x collector as sharing, never as withholding', async () => {

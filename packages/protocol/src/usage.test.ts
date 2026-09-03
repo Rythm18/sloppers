@@ -9,6 +9,7 @@ import {
   minuteOfDay,
   minuteReportSchema,
   PRICING,
+  recentDays,
   sessionSnapshotSchema,
   usageBucketSchema,
 } from './index.js';
@@ -255,5 +256,49 @@ describe('time helpers', () => {
     const t = new Date(2026, 7, 19, 3, 25).getTime();
     expect(dayOf(t)).toBe('2026-08-19');
     expect(minuteOfDay(t)).toBe(3 * 60 + 25);
+  });
+});
+
+describe('recentDays', () => {
+  it('walks back from a day, newest first', () => {
+    expect(recentDays('2026-09-04', 3)).toEqual(['2026-09-04', '2026-09-03', '2026-09-02']);
+  });
+
+  it('crosses months and years the way a calendar does', () => {
+    expect(recentDays('2026-09-01', 2)).toEqual(['2026-09-01', '2026-08-31']);
+    expect(recentDays('2026-01-01', 2)).toEqual(['2026-01-01', '2025-12-31']);
+    // A leap day is a day; a week over one has seven distinct labels.
+    expect(recentDays('2028-03-01', 2)).toEqual(['2028-03-01', '2028-02-29']);
+  });
+
+  it('never repeats or skips a day, whatever the machine’s clock does', () => {
+    // The reason this is UTC arithmetic. A local `Date` stepped by 24h across
+    // a DST transition lands on the same calendar date twice in autumn and
+    // skips one in spring — which in a week strip is a bar drawn over its
+    // neighbour, or a worked day with nowhere to go.
+    const week = recentDays('2026-11-02', 7);
+    expect(new Set(week).size).toBe(7);
+    expect(week).toEqual([
+      '2026-11-02',
+      '2026-11-01',
+      '2026-10-31',
+      '2026-10-30',
+      '2026-10-29',
+      '2026-10-28',
+      '2026-10-27',
+    ]);
+  });
+
+  it('asks for nothing and gets nothing', () => {
+    expect(recentDays('2026-09-04', 0)).toEqual([]);
+    expect(recentDays('2026-09-04', -1)).toEqual([]);
+  });
+
+  it('refuses to invent labels for a day it cannot read', () => {
+    // A run of `NaN-NaN-NaN` cells is worse than an empty strip: it looks like
+    // data. Callers pass `dayOf`'s own output, so this is a guard, not a path.
+    expect(recentDays('not-a-day', 3)).toEqual([]);
+    expect(recentDays('', 3)).toEqual([]);
+    expect(recentDays('2026-9-4', 3)).toEqual([]);
   });
 });

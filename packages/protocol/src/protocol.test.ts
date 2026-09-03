@@ -6,6 +6,7 @@ import {
   collectorToServerSchema,
   dailyStatsSchema,
   emptyTokens,
+  MAX_HISTORY_DAYS,
   processedTokens,
   serverToCollectorSchema,
   serverToWebSchema,
@@ -155,6 +156,71 @@ describe('web messages', () => {
       leaderboard: [],
     };
     expect(serverToWebSchema.parse(world)).toEqual(world);
+  });
+
+  it('parses a history request, with or without a day count', () => {
+    expect(webToServerSchema.parse({ type: 'history' })).toEqual({ type: 'history' });
+    const week = { type: 'history', days: 7 };
+    expect(webToServerSchema.parse(week)).toEqual(week);
+  });
+
+  it('refuses a history request for more days than the office serves', () => {
+    // The cheaper of the two places to say no; the ledger clamps as well.
+    expect(webToServerSchema.safeParse({ type: 'history', days: 400 }).success).toBe(false);
+    expect(webToServerSchema.safeParse({ type: 'history', days: 0 }).success).toBe(false);
+    expect(webToServerSchema.safeParse({ type: 'history', days: 1.5 }).success).toBe(false);
+    expect(webToServerSchema.safeParse({ type: 'history', days: MAX_HISTORY_DAYS }).success).toBe(
+      true,
+    );
+  });
+
+  it('parses a history answer, withheld members included', () => {
+    const history = {
+      type: 'history',
+      days: ['2026-09-04', '2026-09-03'],
+      members: [
+        {
+          memberId: 'm1',
+          displayName: 'Ridham',
+          avatar: 'clementine',
+          days: [
+            {
+              day: '2026-09-04',
+              stats: {
+                tokens: { input: 5000, output: 800, cacheRead: 90000, cacheWrite: 0 },
+                sessionsRun: 3,
+                activeMinutes: 61,
+                byModel: {
+                  'claude-fable-5': { input: 5000, output: 800, cacheRead: 90000, cacheWrite: 0 },
+                },
+                estimatedCostUsd: null,
+                estimatedCostFloorUsd: 1.5,
+                precision: 'measured',
+              },
+            },
+            // A rest day, carried rather than dropped: zero is a value.
+            {
+              day: '2026-09-03',
+              stats: {
+                tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                sessionsRun: 0,
+                activeMinutes: 0,
+              },
+            },
+          ],
+        },
+        // Withheld: no days at all, and the reason on the entry rather than a
+        // flag pinned to numbers that were sent anyway.
+        {
+          memberId: 'm2',
+          displayName: 'Sam',
+          avatar: 'mochi',
+          days: [],
+          tokensShared: false,
+        },
+      ],
+    };
+    expect(serverToWebSchema.parse(history)).toEqual(history);
   });
 });
 
