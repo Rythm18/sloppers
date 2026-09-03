@@ -33,8 +33,9 @@ function MintFailureNote({ reason }: { reason: MintFailure }) {
         The office does not recognise this browser — that happens when the invite was rotated, or
         when this browser&rsquo;s storage was cleared.{' '}
         <span className="join-hint">
-          On the machine where your agents share from, run <code>sloppers relink</code> to sign back
-          in.
+          If your agents already share from a machine, run <code>sloppers relink</code> there. If
+          you were just getting started, reload and step into the office again — the code will mint
+          fine on a fresh entry.
         </span>
       </p>
     );

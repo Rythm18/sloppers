@@ -221,10 +221,10 @@ describe('HUD', () => {
       expect(nudge()).toBeNull();
     });
 
-    it('takes "not now" for an answer, and keeps taking it', () => {
+    it(`takes "don't ask again" at its word, and keeps it`, () => {
       seed('member');
       const first = render(<HUD />);
-      fireEvent.click(screen.getByRole('button', { name: 'not now' }));
+      fireEvent.click(screen.getByRole('button', { name: "don't ask again" }));
       expect(nudge()).toBeNull();
 
       // A reload: same member, same browser, nothing in the store about it.
@@ -254,7 +254,7 @@ describe('HUD', () => {
     it('is still owed to a different member on the same browser', () => {
       seed('member');
       const first = render(<HUD />);
-      fireEvent.click(screen.getByRole('button', { name: 'not now' }));
+      fireEvent.click(screen.getByRole('button', { name: "don't ask again" }));
       first.unmount();
 
       seed('member', [], { me: 'someone-else' });

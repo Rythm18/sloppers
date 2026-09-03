@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { promisify } from 'node:util';
 import { pidPath } from '../config.js';
 import { LAUNCHD_LABEL, SYSTEMD_UNIT, serviceSupported } from './install.js';
@@ -59,12 +60,35 @@ export function readPidfile(home?: string): number | null {
   }
 }
 
-/** Called by the daemon on the way up. Best effort — never fatal. */
+/**
+ * Called by the daemon on the way up. Best effort — never fatal — but not
+ * silent either: a daemon that could not leave its pidfile is a daemon
+ * `sloppers status` cannot see, and the person who can fix that is the one
+ * watching this process's log.
+ */
 export function writePidfile(home?: string): void {
   try {
     writeFileSync(pidPath(home), `${process.pid}\n`);
+  } catch (error) {
+    console.error(
+      `could not write ${pidPath(home)} (${(error as NodeJS.ErrnoException).code ?? 'unknown'})` +
+        ' — sharing works, but `sloppers status` cannot see this daemon',
+    );
+  }
+}
+
+/**
+ * Whether a running daemon *could* have left a pidfile here. When the
+ * directory is unwritable, the file's absence carries no information — a
+ * daemon may be running right now, unable to say so — and treating silence
+ * as "stopped" would be this module's founding mistake, repeated.
+ */
+function pidfileCouldExist(home?: string): boolean {
+  try {
+    accessSync(dirname(pidPath(home)), constants.W_OK);
+    return true;
   } catch {
-    // A home directory we cannot write to is not a reason to refuse to share.
+    return false;
   }
 }
 
@@ -91,6 +115,21 @@ export function readLaunchctlList(stdout: string): Liveness {
 }
 
 /**
+ * What a failed `launchctl list` actually said. A non-zero exit is launchctl
+ * answering — the label is not loaded, nothing installed, nothing running. A
+ * spawn failure is launchctl not answering at all, and the docstring above
+ * promises that becomes `unknown`, not a confident "no". Node marks the
+ * difference for us: a child that ran and exited carries its numeric exit
+ * status in `code`; only spawn failures carry ENOENT-style strings.
+ */
+export function classifyLaunchctlFailure(error: Error): Liveness {
+  const code: unknown = (error as NodeJS.ErrnoException).code;
+  return typeof code === 'number'
+    ? { state: 'stopped' }
+    : { state: 'unknown', why: `launchctl would not answer (${String(code ?? 'spawn failed')})` };
+}
+
+/**
  * `systemctl --user is-active <unit>`, which prints one word and exits
  * non-zero for most of them. `activating` is a unit on its way up — true
  * either way within a second or two, and reported as running rather than as
@@ -112,9 +151,16 @@ export async function serviceLiveness(): Promise<Liveness> {
   }
   if (process.platform === 'darwin') {
     // `launchctl list` exits non-zero when the label is not loaded at all,
-    // which is a real answer: nothing installed, nothing running.
-    const listed = await execFileAsync('launchctl', ['list', LAUNCHD_LABEL]).catch(() => null);
-    if (!listed) return { state: 'stopped' };
+    // which is a real answer: nothing installed, nothing running. But that is
+    // only true when launchctl *ran*. A spawn failure — no binary, no
+    // permission — is launchctl not answering, which the docstring above
+    // promises to report as such rather than rounding to a confident "no".
+    // Node marks the difference for us: a non-zero exit carries a numeric
+    // `code`, a spawn failure a string one (ENOENT and friends).
+    const listed = await execFileAsync('launchctl', ['list', LAUNCHD_LABEL]).catch(
+      (error: Error) => error,
+    );
+    if (listed instanceof Error) return classifyLaunchctlFailure(listed);
     return readLaunchctlList(listed.stdout);
   }
   // systemd exits 3 for an inactive unit and still prints the word, so the
@@ -150,6 +196,14 @@ export async function daemonLiveness(
   // A stale pidfile beside a service manager that says nothing useful is
   // still evidence: something wrote it and is no longer answering.
   if (pid !== null || existsSync(pidPath(home))) return { state: 'stopped' };
+  // No pidfile — but if nothing could have written one, that silence is not
+  // evidence of anything, and the service manager's answer is all there is.
+  if (service.state === 'stopped' && !pidfileCouldExist(home)) {
+    return {
+      state: 'unknown',
+      why: `${dirname(pidPath(home))} is not writable, so a running daemon could not say so`,
+    };
+  }
   return service;
 }
 

@@ -7,9 +7,9 @@ import {
   relinkRedeemRequestSchema,
 } from '@sloppers/protocol';
 import { type Context, Hono } from 'hono';
-import { isSafeHost, isSafeProto, trustsProxy } from './proxy.js';
 import type { Db } from './db/index.js';
 import { deviceKey, pairingCode, relinkToken } from './ids.js';
+import { isSafeHost, isSafeProto, trustsProxy } from './proxy.js';
 import type { WorkspaceManager } from './workspace/manager.js';
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;

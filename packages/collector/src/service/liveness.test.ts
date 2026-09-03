@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { configDir, pidPath } from '../config.js';
 import {
   awaitDaemon,
+  classifyLaunchctlFailure,
   clearPidfile,
   daemonLiveness,
   type Liveness,
@@ -73,6 +74,17 @@ describe('reading a service manager', () => {
   it('treats silence as uncertainty rather than as a no', () => {
     expect(readSystemctlIsActive('')).toMatchObject({ state: 'unknown' });
   });
+
+  it('tells a launchctl that said no from a launchctl that could not speak', () => {
+    // A non-zero exit is an answer: the label is not loaded. A spawn failure
+    // is no answer at all, and the module's own promise is that no-answer
+    // never rounds down to a confident "stopped".
+    const exited = Object.assign(new Error('exit 113'), { code: 113 });
+    expect(classifyLaunchctlFailure(exited)).toEqual({ state: 'stopped' });
+
+    const missing = Object.assign(new Error('spawn launchctl ENOENT'), { code: 'ENOENT' });
+    expect(classifyLaunchctlFailure(missing)).toMatchObject({ state: 'unknown' });
+  });
 });
 
 describe('the daemon’s own pidfile', () => {
@@ -122,6 +134,25 @@ describe('the daemon’s own pidfile', () => {
     const dunno = async (): Promise<Liveness> => ({ state: 'unknown', why: 'no auto-start here' });
 
     await expect(daemonLiveness(home, dunno)).resolves.toMatchObject({ state: 'unknown' });
+  });
+
+  it('refuses to call a missing pidfile "stopped" when nothing could have written one', async () => {
+    // A readable-but-unwritable ~/.sloppers: the daemon runs, cannot leave
+    // its pidfile, and `status` sees only silence. Silence from a place
+    // nothing can write is not evidence — say unknown, not a red "no"
+    // against a daemon that is sharing right now.
+    const home = tempHome();
+    const { chmodSync } = await import('node:fs');
+    const { configDir } = await import('../config.js');
+    chmodSync(configDir(home), 0o555);
+    try {
+      await expect(daemonLiveness(home, noService)).resolves.toMatchObject({
+        state: 'unknown',
+        why: expect.stringContaining('not writable'),
+      });
+    } finally {
+      chmodSync(configDir(home), 0o755);
+    }
   });
 
   /**

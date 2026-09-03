@@ -121,7 +121,7 @@ export function HUD() {
               setNudgeDone(true);
             }}
           >
-            not now
+            don't ask again
           </button>
         </div>
       ) : null}
