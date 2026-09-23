@@ -486,6 +486,48 @@ describe('WorkspaceManager', () => {
       );
     });
 
+    /**
+     * What a member's card and the board rows are about.
+     *
+     * 20:30Z is still the 19th in the container and already the 20th in
+     * Kolkata, so an office that serves the server's day shows this member
+     * nothing at all — which is the bug, in the direction that is merely
+     * confusing. Westward it is the one that deletes work.
+     */
+    it('shows a member the day their office is in, not the one the server is', () => {
+      const eveningUtc = Date.parse('2026-08-19T20:30:00Z');
+      const room = manager.createRoom('the lab', 'Asia/Kolkata');
+      if (!room) throw new Error('room not created');
+      const me = join(room, 'ridham');
+      room.memberJoined(me);
+      manager.ledger.ingest(
+        me.id,
+        [
+          {
+            id: 's1',
+            harness: 'claude-code',
+            state: 'working',
+            usage: [
+              {
+                day: '2026-08-20',
+                model: 'claude-fable-5',
+                input: 77,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+              },
+            ],
+            startedAt: eveningUtc,
+            lastActivityAt: eveningUtc,
+          },
+        ],
+        eveningUtc,
+        room.settings.timezone,
+      );
+
+      expect(room.memberView(me.id, eveningUtc).today.tokens.input).toBe(77);
+    });
+
     it('re-reads the board when the owner moves the day boundary', () => {
       const room = office();
       const refreshed = vi.spyOn(room, 'refreshDayWindow');

@@ -187,11 +187,42 @@ describe('the day an office is in', () => {
    * cannot send. Two o'clock in the morning in Kolkata is minute 120 of the
    * Kolkata day, not minute 1230 of the UTC one.
    */
-  it('marks the fallback minute on the office’s clock', () => {
+  it('marks the fallback minute on the office’s day', () => {
     ledger.ingest('m1', [flat('s1', 10, EVENING_UTC)], EVENING_UTC, KOLKATA);
 
     expect(ledger.dayFor('m1', KOLKATA_DAY).activeMinutes).toBe(1);
     expect(ledger.dayFor('m1', UTC_DAY).activeMinutes).toBe(0);
+  });
+
+  /**
+   * ...and at the office's own hour, which is a second question and has caught
+   * a second mistake: the day key can be right while the bit inside it is an
+   * offset from somebody else's midnight.
+   *
+   * Two offices, one instant, and the mark located by ORing the office's own
+   * bitmap for the minute it should be on — `activeMinutes` is a count, so a
+   * bit landing beside the expected one reads as two rather than one. It is
+   * half past one in the afternoon in California and two in the morning in
+   * Kolkata, and no server clock is both, so a mark taken from the machine
+   * fails one of these two wherever it runs.
+   */
+  it('marks the fallback minute at the office’s own hour', () => {
+    const minutes = (day: string, list: number[]): SessionSnapshot => ({
+      id: 's2',
+      harness: 'claude-code',
+      state: 'working',
+      startedAt: EVENING_UTC,
+      lastActivityAt: EVENING_UTC,
+      activeMinutes: [{ day, minutes: encodeMinutes(list) }],
+    });
+
+    ledger.ingest('la', [flat('s1', 10, EVENING_UTC)], EVENING_UTC, CALIFORNIA);
+    ledger.ingest('kol', [flat('s1', 10, EVENING_UTC)], EVENING_UTC, KOLKATA);
+    ledger.ingest('la', [minutes(UTC_DAY, [13 * 60 + 30])], EVENING_UTC, CALIFORNIA);
+    ledger.ingest('kol', [minutes(KOLKATA_DAY, [2 * 60])], EVENING_UTC, KOLKATA);
+
+    expect(ledger.dayFor('la', UTC_DAY).activeMinutes).toBe(1);
+    expect(ledger.dayFor('kol', KOLKATA_DAY).activeMinutes).toBe(1);
   });
 
   /**
