@@ -52,7 +52,8 @@ describe('what happened while you were away', () => {
     expect(report?.days).toEqual(['2026-09-24']);
     expect(report?.mine).toBe(100);
     expect(report?.top).toEqual({ displayName: 'lodo', total: 400 });
-    expect(report?.office).toBe(500);
+    // Everyone else's — never including mine, which has its own line.
+    expect(report?.others).toBe(400);
   });
 
   it('adds up a longer absence across every day of it', () => {
@@ -85,7 +86,31 @@ describe('what happened while you were away', () => {
 
     expect(report?.top).toEqual({ displayName: 'nina', total: 900 });
     expect(report?.movers).toBe(2);
-    expect(report?.office).toBe(1_200);
+    expect(report?.others).toBe(1_200);
+  });
+
+  it('never crowns a smaller number under the returner’s own bigger one', () => {
+    // The panel's own premise: your agents ran all night, so the returner is
+    // exactly the member likely to top the window. The first draft summed the
+    // returner into the room's total while excluding them from the contest,
+    // and read "the office burned 2.9B — lodo out front with 500M" one line
+    // under their own 2.1B. Yours and everyone else's are disjoint sums.
+    const report = awayReport(
+      history([
+        member('me', { '2026-09-24': 2_100_000 }),
+        member('lodo', { '2026-09-24': 500_000 }),
+        member('nina', { '2026-09-24': 300_000 }),
+      ]),
+      '2026-09-23',
+      'me',
+    );
+
+    expect(report?.mine).toBe(2_100_000);
+    expect(report?.others).toBe(800_000);
+    expect(report?.top).toEqual({ displayName: 'lodo', total: 500_000 });
+    // The returner never competes in the room's line, and their own total
+    // never inflates it.
+    expect(report?.others).toBeLessThan(report?.mine ?? 0);
   });
 
   /**
@@ -108,7 +133,7 @@ describe('what happened while you were away', () => {
     expect(report?.movers).toBe(1);
     // Not in the room's total either — a sum they are absent from is the only
     // sum that does not quietly restate what they declined to say.
-    expect(report?.office).toBe(60);
+    expect(report?.others).toBe(10);
   });
 
   /**
@@ -129,7 +154,7 @@ describe('what happened while you were away', () => {
     );
 
     expect(report?.top).toEqual({ displayName: 'nina', total: 5 });
-    expect(report?.office).toBe(5);
+    expect(report?.others).toBe(5);
   });
 
   /**
@@ -155,7 +180,7 @@ describe('what happened while you were away', () => {
     expect(report).not.toBeNull();
     expect(report?.mine).toBe(0);
     expect(report?.top).toBeNull();
-    expect(report?.office).toBe(0);
+    expect(report?.others).toBe(0);
   });
 
   it('has nothing to report when the served days do not reach past the absence', () => {

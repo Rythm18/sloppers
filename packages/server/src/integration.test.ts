@@ -1723,6 +1723,44 @@ describe('server integration', () => {
       expect((await resume(world)).lastHereDay).toBeUndefined();
     });
 
+    /**
+     * The write-through is throttled, not run every sweep. A second sweep
+     * inside the interval must leave the row where the first put it — deleting
+     * the interval guard would write every member every sweep, invisible to
+     * the test above because the value only ever grows.
+     */
+    it('leaves the clock alone between write-through intervals', async () => {
+      const { world } = await join('ridham');
+      lastHere(world.you.memberId, 14 * 60 * 60 * 1000);
+
+      const sweepAt = Date.now() + 61_000;
+      server.rooms.sweep(sweepAt);
+      expect(presentAt(world.you.memberId)).toBe(sweepAt);
+
+      // Thirty seconds on, still inside the sixty-second interval: no write.
+      server.rooms.sweep(sweepAt + 30_000);
+      expect(presentAt(world.you.memberId)).toBe(sweepAt);
+    });
+
+    /**
+     * The other single-line deletion that used to leave every test green:
+     * dropping the connected-tab guard stamps *everyone* present on every
+     * sweep, which quietly disables the whole feature — nobody is ever away.
+     */
+    it('does not keep a row warm for a member with no tab in the office', async () => {
+      const { client, world } = await join('ridham');
+      lastHere(world.you.memberId, 14 * 60 * 60 * 1000);
+      const before = presentAt(world.you.memberId);
+      await leave(client);
+      const stamped = presentAt(world.you.memberId);
+      expect(stamped).toBeGreaterThanOrEqual(before);
+
+      // Gone for a minute-plus; the sweep must leave their row exactly where
+      // the close stamped it.
+      server.rooms.sweep(Date.now() + 61_000);
+      expect(presentAt(world.you.memberId)).toBe(stamped);
+    });
+
     /** And the close stamps it, so a tab shut and reopened is no absence. */
     it('stamps the moment the last tab closes', async () => {
       const { client, world } = await join('ridham');

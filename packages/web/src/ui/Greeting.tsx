@@ -47,15 +47,27 @@ function lines(report: AwayReport): React.ReactNode[] {
   if (report.top && report.movers === 1) {
     out.push(
       <>
-        <b>{report.top.displayName}</b> burned <b>{formatTokens(report.top.total)}</b>.
+        <b>{report.top.displayName}</b> burned <b>{formatTokens(report.top.total)}</b> tok.
       </>,
     );
   } else if (report.top) {
+    const rest = formatTokens(report.others);
+    const front = formatTokens(report.top.total);
+    // `others` and the leader's figure round to 2-3 significant digits, and
+    // when both print the same the sentence's structure collapses — "burned
+    // 1M, out front with 1M". One number is enough there; the leader's is
+    // the one with a name on it.
     out.push(
-      <>
-        The office burned <b>{formatTokens(report.office)}</b> — <b>{report.top.displayName}</b> out
-        front with <b>{formatTokens(report.top.total)}</b>.
-      </>,
+      rest === front ? (
+        <>
+          <b>{report.top.displayName}</b> led the rest with <b>{front}</b> tok.
+        </>
+      ) : (
+        <>
+          The rest of the office burned <b>{rest}</b> tok — <b>{report.top.displayName}</b> out
+          front with <b>{front}</b>.
+        </>
+      ),
     );
   }
   if (out.length === 0) out.push(<>Nothing burned in that time — the office has been quiet.</>);

@@ -34,8 +34,8 @@ export interface AwayReport {
   top: Mover | null;
   /** How many other members burned anything at all. */
   movers: number;
-  /** Everybody's burn across the window, this member included. */
-  office: number;
+  /** Everyone *else's* burn across the window — disjoint from `mine`. */
+  others: number;
 }
 
 /**
@@ -81,16 +81,22 @@ export function awayReport(
   const window = new Set(days);
 
   let mine = 0;
-  let office = 0;
+  let others = 0;
   let movers = 0;
   let top: Mover | null = null;
   for (const member of history.members) {
     const total = burnAcross(member, window);
-    office += total;
     if (member.memberId === you) {
+      // Yours and everyone else's stay disjoint sums. The first draft added
+      // the returner into the room's total while excluding them from the
+      // `top` contest — so somebody whose agents burned 2.1B overnight read
+      // "the office burned 2.9B — lodo out front with 500M" one line under
+      // their own bigger number, with the smaller one crowned. Line one is
+      // you; line two is the others; neither ever contradicts the other.
       mine = total;
       continue;
     }
+    others += total;
     if (total <= 0) continue;
     movers += 1;
     if (!top || total > top.total) top = { displayName: member.displayName, total };
@@ -102,7 +108,7 @@ export function awayReport(
     mine,
     top,
     movers,
-    office,
+    others,
   };
 }
 
