@@ -263,7 +263,19 @@ export const useStore = create<SloppersStore>((set) => ({
       case 'workspace':
         // roomCode/roomName are frozen wire names; the office's invite code
         // or display name may have just changed (rename, rotate-invite).
-        set({ roomCode: msg.roomCode, roomName: msg.roomName, settings: msg.settings });
+        set((s) => ({
+          roomCode: msg.roomCode,
+          roomName: msg.roomName,
+          // A settings change can move the office's midnight, and a cached
+          // history keeps the old anchor — leaving "Yesterday" able to label
+          // the office's current today until a reconnect. Dropping the cache
+          // costs one re-request (the board's effect re-asks) and keeps one
+          // definition of today in the panel.
+          history: s.settings?.timezone === msg.settings.timezone ? s.history : null,
+          historyFetchedDay:
+            s.settings?.timezone === msg.settings.timezone ? s.historyFetchedDay : null,
+          settings: msg.settings,
+        }));
         break;
       case 'roster':
         set({ roster: msg.members });

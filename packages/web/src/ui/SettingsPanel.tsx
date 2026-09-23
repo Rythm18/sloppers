@@ -64,6 +64,20 @@ function regionOf(zone: string): string {
 }
 
 /**
+ * `Asia/Kolkata` → `Kolkata`, `America/Argentina/Buenos_Aires` →
+ * `Buenos Aires, Argentina`. The `<option>`'s *value* stays the IANA name —
+ * this is only what a person reads and types against.
+ */
+function cityLabel(zone: string): string {
+  const parts = zone.split('/');
+  if (parts.length === 1) return zone;
+  const city = (parts.at(-1) ?? zone).replaceAll('_', ' ');
+  // A middle segment (America/Argentina/…, America/Indiana/…) is a state or
+  // country worth keeping — two zones can share a city name.
+  return parts.length > 2 ? `${city}, ${parts[1]?.replaceAll('_', ' ')}` : city;
+}
+
+/**
  * The offset this zone is on *right now*, as `UTC+05:30`.
  *
  * Right now and not in general, deliberately: half the world's zones change
@@ -124,7 +138,11 @@ function TimezoneField({ zone, onPick }: { zone: string; onPick: (zone: string) 
               .filter((candidate) => regionOf(candidate) === region)
               .map((candidate) => (
                 <option key={candidate} value={candidate}>
-                  {candidate}
+                  {/* City first: a native select's type-ahead matches from
+                      the start of the text, and nobody types "Asia/" to find
+                      Kolkata. iOS's wheel has no type-ahead at all, where the
+                      city-first reading is simply the easier scan. */}
+                  {cityLabel(candidate)}
                 </option>
               ))}
           </optgroup>
