@@ -11,6 +11,7 @@ import type {
   WebRemoved,
   WorkspaceSettings,
 } from '@sloppers/protocol';
+import { dayOf } from '@sloppers/protocol';
 import { create } from 'zustand';
 import { routeServerMessage } from './game/bridge.js';
 import { isStackedLayout } from './ui/viewport.js';
@@ -55,6 +56,15 @@ const initialState = {
   history: null as WebHistoryResult | null,
   /** A history request is out and unanswered. Keeps a click from becoming a flood. */
   historyPending: false,
+  /**
+   * The client-local day the answer landed on. Not a second definition of
+   * "today" — never compared against `history.days` — only against *itself
+   * later*: when this browser's date is no longer the one the answer arrived
+   * on, a night has passed and every cached label ("Yesterday") is off by
+   * one. A reconnect already clears the cache; this catches the connection
+   * that quietly outlives midnight.
+   */
+  historyFetchedDay: null as string | null,
   /**
    * Which day the board is showing: 0 today, 1 yesterday — an index into
    * `history.days`, not a date this browser worked out for itself. The days
@@ -101,6 +111,8 @@ interface SloppersStore extends State {
   setLeaderboardOpen(open: boolean): void;
   setBoardDay(offset: number): void;
   setHistoryPending(pending: boolean): void;
+  /** Drop a history answer fetched on an earlier local day; see `historyFetchedDay`. */
+  expireStaleHistory(): void;
   setJoinError(error: string | null): void;
   setSettingsOpen(open: boolean): void;
   setAdminError(message: string | null): void;
@@ -138,6 +150,12 @@ export const useStore = create<SloppersStore>((set) => ({
   setLeaderboardOpen: (leaderboardOpen) => set({ leaderboardOpen }),
   setBoardDay: (boardDay) => set({ boardDay }),
   setHistoryPending: (historyPending) => set({ historyPending }),
+  expireStaleHistory: () =>
+    set((s) =>
+      s.history && s.historyFetchedDay !== dayOf(Date.now())
+        ? { history: null, historyFetchedDay: null }
+        : s,
+    ),
   setJoinError: (joinError) => set({ joinError }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   setAdminError: (adminError) => set({ adminError }),
@@ -173,6 +191,7 @@ export const useStore = create<SloppersStore>((set) => ({
           // one and "yesterday" would be labelling the day before it.
           history: null,
           historyPending: false,
+          historyFetchedDay: null,
           boardDay: 0,
         });
         break;
@@ -224,7 +243,7 @@ export const useStore = create<SloppersStore>((set) => ({
         set({ leaderboard: msg.rows });
         break;
       case 'history':
-        set({ history: msg, historyPending: false });
+        set({ history: msg, historyPending: false, historyFetchedDay: dayOf(Date.now()) });
         break;
       case 'knocking':
         // Waiting on an owner/moderator decision at a knock-mode door. Sent

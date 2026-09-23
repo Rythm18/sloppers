@@ -123,9 +123,27 @@ export const Leaderboard = memo(function Leaderboard() {
   // in hand is the difference between a switch that flips and a switch that
   // waits. `requestHistory` is idempotent, so this costs one request however
   // many times the board is shown and hidden.
+  //
+  // `history` is a dependency on purpose. A reconnect's `world` clears it
+  // while the board sits open, and an effect keyed on `open` alone never
+  // refires — leaving the switch showing "try again" while unable to ask.
+  // A cleared cache refires this and re-asks; a *refused* request leaves
+  // `history` null without changing it, so a refusal cannot loop.
   useEffect(() => {
-    if (open) requestHistory();
-  }, [open]);
+    if (open && !history) requestHistory();
+  }, [open, history]);
+
+  // A connection can quietly outlive midnight, after which every cached
+  // label is off by one — "Yesterday" showing two days ago. The store
+  // compares the answer's fetch-day against the calendar and drops a stale
+  // one; the effect above then re-asks. Checked on every render because the
+  // board re-renders on each leaderboard broadcast, so the first activity
+  // after midnight corrects it. (The button's title always carries the true
+  // date either way.)
+  const expireStaleHistory = useStore((s) => s.expireStaleHistory);
+  useEffect(() => {
+    if (open) expireStaleHistory();
+  });
 
   if (!open) return null;
 
@@ -200,7 +218,13 @@ export const Leaderboard = memo(function Leaderboard() {
           className="lb-day-btn"
           aria-pressed={boardDay === 1}
           title={yesterdayKey ? dayLabel(yesterdayKey) : undefined}
-          onClick={() => setBoardDay(1)}
+          onClick={() => {
+            setBoardDay(1);
+            // The empty-state copy says "try the switch again" — so the
+            // switch asks. Idempotent: with an answer cached or a request
+            // out, this line is a no-op.
+            requestHistory();
+          }}
         >
           Yesterday
         </button>

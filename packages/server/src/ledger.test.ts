@@ -1119,6 +1119,32 @@ describe('TokenLedger', () => {
     }
   });
 
+  it('agrees about a day that holds retired watermarks', () => {
+    // The one row shape the plain fixture never makes: a flat-era session
+    // that upgrades to buckets mid-life retires its flat watermark on D18,
+    // and `daySessions` deliberately counts retired rows (the session DID
+    // run that day) while every measuring read ignores them. A range query
+    // that quietly filters `retired = 0` in the wrong clause passes every
+    // other test in this file and diverges exactly here — a history day
+    // disagreeing with what the board showed live.
+    ledger.ingest('m1', [legacy('s3', tokens(1000), STARTED_18)], DAY_18);
+    ledger.ingest(
+      'm1',
+      [
+        realistic('s3', [bucket(D18, PRICED, 1000), bucket(D19, PRICED, 1200)], {
+          startedAt: STARTED_18,
+        }),
+      ],
+      TODAY_19,
+    );
+    const week = ledger.recentFor('m1', D19, 7);
+    for (const entry of week) {
+      expect(entry.stats).toEqual(ledger.dayFor('m1', entry.day));
+    }
+    // And the retired day genuinely still counts its session.
+    expect(ledger.dayFor('m1', D18).sessionsRun).toBe(1);
+  });
+
   it('gives a week seven days, newest first, rest days included', () => {
     ledger.ingest('m1', [bucketed('s1', [bucket(D19, PRICED, 25)])], TODAY_19);
     const week = ledger.recentFor('m1', D19, 7);

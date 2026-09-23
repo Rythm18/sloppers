@@ -162,7 +162,9 @@ function WeekStrip({ memberId }: { memberId: string }) {
       {/* Counted from what arrived rather than written out, so the heading
           cannot outlive the window the office actually serves. */}
       <h3 className="member-week-title">Last {days.length} days</h3>
-      <div className="week-strip">
+      {/* Columns from the data, like the heading: the CSS default is seven,
+          and a window of any other length would silently wrap under it. */}
+      <div className="week-strip" style={{ gridTemplateColumns: `repeat(${days.length}, 1fr)` }}>
         {days.map((entry) => {
           const total = processedTokens(entry.stats.tokens);
           const height =
