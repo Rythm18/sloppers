@@ -78,6 +78,19 @@ const initialState = {
    * staleness hint and never a label.
    */
   boardDay: 0,
+  /**
+   * The office day this browser's member was last here on, when the office
+   * judged this arrival a return from a real absence — and null on every other
+   * connection, which is most of them.
+   *
+   * The server's field, kept under the server's name and never computed here:
+   * what counts as "away" is policy, the clock it is measured on is the
+   * office's, and a browser that worked either of them out for itself would
+   * greet somebody for a reload it slept through. Cleared by dismissal and by
+   * any `world` that does not carry one, so nothing can outlive the arrival it
+   * describes.
+   */
+  lastHereDay: null as string | null,
   joinError: null as string | null,
   settings: null as WorkspaceSettings | null,
   myRole: null as MemberRole | null,
@@ -119,6 +132,8 @@ interface SloppersStore extends State {
   setHistoryPending(pending: boolean): void;
   /** Drop a history answer fetched on an earlier local day; see `historyFetchedDay`. */
   expireStaleHistory(): void;
+  /** Put the "while you were away" panel away; see `lastHereDay`. */
+  dismissGreeting(): void;
   setJoinError(error: string | null): void;
   setSettingsOpen(open: boolean): void;
   setAdminError(message: string | null): void;
@@ -162,6 +177,7 @@ export const useStore = create<SloppersStore>((set) => ({
         ? { history: null, historyFetchedDay: null }
         : s,
     ),
+  dismissGreeting: () => set({ lastHereDay: null }),
   setJoinError: (joinError) => set({ joinError }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   setAdminError: (adminError) => set({ adminError }),
@@ -199,6 +215,12 @@ export const useStore = create<SloppersStore>((set) => ({
           historyPending: false,
           historyFetchedDay: null,
           boardDay: 0,
+          // Set from the arrival rather than carried across it. A reconnect a
+          // few seconds after this one gets a `world` with no `lastHereDay` on
+          // it — the office stamped this browser present the moment it walked
+          // in — and that absence of a field has to *clear* the greeting, or a
+          // dropped socket would re-open a panel somebody already read.
+          lastHereDay: msg.lastHereDay ?? null,
         });
         break;
       }

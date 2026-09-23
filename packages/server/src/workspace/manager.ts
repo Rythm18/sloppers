@@ -273,7 +273,7 @@ export class WorkspaceManager {
     try {
       this.db
         .prepare(
-          'INSERT INTO members (id, workspace_id, secret, display_name, avatar, role, status, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO members (id, workspace_id, secret, display_name, avatar, role, status, created_at, last_seen_at, last_present_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         )
         .run(
           record.id,
@@ -284,6 +284,13 @@ export class WorkspaceManager {
           record.role,
           record.status,
           Date.now(),
+          Date.now(),
+          // Somebody is standing here right now — a member is only ever minted
+          // by a browser walking in. Seeding this with the present rather than
+          // with zero is what makes a first-ever arrival not a return: there is
+          // no "away" before you exist, and an office that greeted a stranger
+          // with what they missed would be greeting them for missing the years
+          // before they had heard of it.
           Date.now(),
         );
     } catch {
@@ -341,10 +348,41 @@ export class WorkspaceManager {
     return heir.id;
   }
 
+  /**
+   * "Something spoke for this member just now" — a browser resuming, a relink
+   * redeemed, a collector saying hello.
+   *
+   * Deliberately that broad, because what reads it is the stale sweep: a member
+   * whose laptop has been reporting all week is plainly not a stray join, and
+   * erasing them would take their history with it. It is *not* "they were in
+   * the office", and nothing that needs that meaning may use it — see
+   * `markPresent`.
+   */
   touchMember(memberIdValue: string): void {
     this.db
       .prepare('UPDATE members SET last_seen_at = ? WHERE id = ?')
       .run(Date.now(), memberIdValue);
+  }
+
+  /**
+   * "A browser of theirs has the office open" — the honest source for absence,
+   * and the narrow half of `touchMember`.
+   *
+   * Written on arrival, refreshed while somebody is actually here, and stamped
+   * again when their last tab goes. A collector never touches it: a machine
+   * reporting tokens overnight is the *subject* of the greeting, not evidence
+   * that anybody was reading it.
+   */
+  markPresent(memberIdValue: string, now: number = Date.now()): void {
+    this.db.prepare('UPDATE members SET last_present_at = ? WHERE id = ?').run(now, memberIdValue);
+  }
+
+  /** When a browser of theirs was last here; 0 for a member who never has been. */
+  lastPresentAt(memberIdValue: string): number {
+    const row = this.db
+      .prepare('SELECT last_present_at FROM members WHERE id = ?')
+      .get(memberIdValue) as { last_present_at: number } | undefined;
+    return row?.last_present_at ?? 0;
   }
 
   /**

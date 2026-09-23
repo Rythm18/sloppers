@@ -35,6 +35,15 @@ const DEFAULT_HISTORY_DAYS = 7;
 const SPAWN = { x: 256, y: 240 };
 /** Long enough to walk to the other device, short enough to be worth stealing. */
 const DEVICE_LINK_TTL_MS = 10 * 60 * 1000;
+/**
+ * How often somebody who is *here* has their presence written through.
+ *
+ * A minute, against a sweep that runs every fifteen seconds — so it is one
+ * UPDATE per member per minute rather than four, and the worst staleness a
+ * crash can leave behind is a minute. Far below `AWAY_MS`, which is the only
+ * thing that reads it, so the gap can never be mistaken for an absence.
+ */
+const PRESENT_STAMP_MS = 60_000;
 
 /** Why a seat emptied, told to the person who lost it before their socket goes. */
 type RemovalReason = WebRemoved['reason'];
@@ -88,6 +97,12 @@ interface MemberRuntime {
   collector: CollectorLink | null;
   /** Serialized last presence broadcast, for change detection. */
   lastPresenceKey: string;
+  /**
+   * When this room last wrote `last_present_at` for them. In memory only —
+   * it exists to keep the sweep from issuing the same UPDATE four times a
+   * minute, and a process that restarts simply writes one row early.
+   */
+  presentStampedAt: number;
 }
 
 interface MemberRow {
@@ -161,6 +176,7 @@ export class Room {
         webClients: new Set(),
         collector: null,
         lastPresenceKey: '',
+        presentStampedAt: 0,
       };
       this.members.set(row.id, runtime);
     }
@@ -190,6 +206,10 @@ export class Room {
     this.refreshPresence(client.memberId);
     this.tellKnockersWhoIsHome();
     const now = Date.now();
+    // After the caller has read the old value — `enterAs` asks what it was
+    // before it hands the socket over, because this is the line that ends the
+    // absence it is about to describe.
+    this.markPresent(client.memberId, now);
     return {
       type: 'world',
       you: { memberId: client.memberId },
@@ -204,6 +224,11 @@ export class Room {
     const runtime = this.members.get(client.memberId);
     if (!runtime) return;
     runtime.webClients.delete(client);
+    // The moment the office stops being able to see them, stamped even though
+    // the sweep would catch it within the minute: this is the value their next
+    // arrival measures from, and a tab closed and reopened straight away must
+    // read as no absence at all rather than as however long it had been open.
+    if (runtime.webClients.size === 0) this.markPresent(client.memberId, Date.now());
     this.refreshPresence(client.memberId);
     this.tellKnockersWhoIsHome();
   }
@@ -560,7 +585,28 @@ export class Room {
 
   /** Recompute time-driven presence (timeouts, idle drift) for everyone. */
   sweep(now: number): void {
-    for (const id of this.members.keys()) this.refreshPresence(id, now);
+    for (const [id, runtime] of this.members) {
+      // Somebody sitting in the office is here *continuously*, and the row has
+      // to keep saying so. Without this, a tab left open all day would leave a
+      // value stale by all of it — so a second tab opened at six would be
+      // greeted for an absence spent in the room, and a deploy or a restart
+      // would greet everybody who had been here since morning.
+      if (runtime.webClients.size > 0 && now - runtime.presentStampedAt >= PRESENT_STAMP_MS) {
+        this.markPresent(id, now);
+      }
+      this.refreshPresence(id, now);
+    }
+  }
+
+  /**
+   * Write "a browser of theirs is in the office" through to the row, and
+   * remember when, so the sweep can leave it alone for a while.
+   */
+  private markPresent(memberId: string, now: number): void {
+    const runtime = this.members.get(memberId);
+    if (!runtime) return;
+    runtime.presentStampedAt = now;
+    this.manager.markPresent(memberId, now);
   }
 
   /**

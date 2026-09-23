@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useStore } from '../store.js';
+import { Greeting } from './Greeting.js';
 import { nudgeSettled, settleNudge } from './nudge.js';
 import { useTouchSession } from './viewport.js';
 
@@ -110,7 +111,16 @@ export function HUD() {
           matters, to the one person for whom exactly one of them does. Said
           once, in words rather than by pointing — the buttons sit in a row on
           a laptop and in a wrapped column on a phone, and "the lit one" is
-          true in both. Never said again after an answer either way. */}
+          true in both. Never said again after an answer either way.
+
+          The nudge outranks the greeting, and they share this corner rather
+          than stacking in it: two panels over somebody's first four seconds is
+          the office talking over itself. The nudge wins because it is the
+          blocking problem — an avatar with nothing behind it — and because it
+          is asked once ever, where a greeting comes back on the next real
+          absence. And for exactly this person the greeting is its weakest: with
+          nothing sharing there are no numbers of their own to hand back, which
+          is the line that makes it worth reading. */}
       {showNudge ? (
         <div className="hud-nudge panel" role="status">
           <p>
@@ -129,7 +139,9 @@ export function HUD() {
             don't ask again
           </button>
         </div>
-      ) : null}
+      ) : (
+        <Greeting />
+      )}
 
       <div className="hud-hint">{hintFor(touch, alone)}</div>
 

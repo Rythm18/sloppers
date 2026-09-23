@@ -436,7 +436,8 @@ button {
  * on top of the leaderboard, so it names the button in words instead
  * (`--lamp` is the one button here that is lit; the other three are quiet).
  */
-.hud-nudge {
+.hud-nudge,
+.hud-greeting {
   position: absolute;
   top: 62px;
   left: 14px;
@@ -451,6 +452,78 @@ button {
 
 .hud-nudge strong {
   color: var(--lamp);
+}
+
+/*
+ * "While you were away." The nudge's corner, its geometry and its manners —
+ * they are never on screen together (the HUD picks one), so sharing the slot
+ * is the layout saying what the code already decided.
+ *
+ * Text left, unlike the nudge's one right-aligned link: this is two sentences
+ * to read rather than a control to answer, and the dismiss is the whole panel.
+ */
+.hud-greeting {
+  justify-items: stretch;
+  gap: 6px;
+  animation: greet-in 0.2s steps(3) both;
+}
+
+.greeting-leaving {
+  animation: greet-out 0.32s steps(4) both;
+}
+
+@keyframes greet-in {
+  from {
+    opacity: 0;
+    translate: 0 -5px;
+  }
+}
+
+@keyframes greet-out {
+  to {
+    opacity: 0;
+    translate: 0 -5px;
+  }
+}
+
+.greet-title {
+  color: var(--lamp);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.greet-span {
+  color: var(--wire);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.greet-line b {
+  color: var(--parchment);
+}
+
+/*
+ * The dismiss, drawn as a × in the corner and sized as the whole panel — so a
+ * click lands wherever somebody aims it, and there is still exactly one
+ * focusable control with one name.
+ */
+.greet-dismiss {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 6px 8px;
+  background: none;
+  border: none;
+  color: var(--wire);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.greet-dismiss:hover {
+  color: var(--parchment);
 }
 
 .nudge-dismiss {
@@ -1512,7 +1585,8 @@ button {
     font-size: 10px;
   }
 
-  .hud-nudge {
+  .hud-nudge,
+  .hud-greeting {
     top: 50px;
     left: 8px;
     width: min(290px, calc(100% - 16px));
@@ -1600,7 +1674,8 @@ button {
 
   /* In the column, directly under the buttons it is about — which is a better
      place for it than the corner it takes on a laptop. */
-  .hud-nudge {
+  .hud-nudge,
+  .hud-greeting {
     position: static;
     width: 100%;
   }
@@ -1669,7 +1744,8 @@ button {
     right: 10px;
   }
 
-  .hud-nudge {
+  .hud-nudge,
+  .hud-greeting {
     top: 52px;
     left: 10px;
   }
@@ -1715,7 +1791,13 @@ button {
   .knock-dot,
   .knock-wait i,
   .share-paired-mark,
-  .presence-attention .presence-dot {
+  .presence-attention .presence-dot,
+  /* The greeting still arrives and still leaves on its own — only the sliding
+     and the fade are dropped. Its timers live in JavaScript, so it appears and
+     disappears at exactly the same moments either way; what changes is whether
+     the pixels move on the way. */
+  .hud-greeting,
+  .greeting-leaving {
     animation: none;
   }
   .btn:hover {

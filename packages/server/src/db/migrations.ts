@@ -313,6 +313,35 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 6,
+    name: 'browser-presence-clock',
+    up(db) {
+      // When a *browser* of this member's last had the office open — which is
+      // not what `last_seen_at` has ever meant, and the difference is the whole
+      // reason this column exists.
+      //
+      // `last_seen_at` is written by anything that resolves this identity: a
+      // browser resume, a relink redemption, and — the one that breaks it — a
+      // collector saying hello. A member whose laptop runs the daemon all week
+      // therefore looks "seen" every time it reconnects, whether or not a human
+      // has opened the office since Tuesday. It is also only ever stamped on
+      // *arrival*, never while somebody is here and never when they leave, so a
+      // tab held open for eight hours leaves a value eight hours stale the
+      // moment it closes. Both readings are fine for what `last_seen_at` is
+      // actually used for — the stale-member sweep and the roster's "last seen"
+      // — and both are wrong for "were you away".
+      //
+      // Seeded from `last_seen_at` rather than from zero. It over-estimates
+      // presence for anybody whose value came from a collector, and that is the
+      // direction to be wrong in: an over-estimate means somebody misses one
+      // greeting, where zero would mean every member on the server is greeted
+      // as returning from an absence of fifty-six years the first time they
+      // reload after this ships.
+      db.exec('ALTER TABLE members ADD COLUMN last_present_at INTEGER NOT NULL DEFAULT 0');
+      db.exec('UPDATE members SET last_present_at = last_seen_at');
+    },
+  },
 ];
 
 /**

@@ -131,6 +131,33 @@ export const webWorldSchema = z.object({
   roomName: z.string(),
   members: z.array(memberViewSchema),
   leaderboard: z.array(leaderboardRowSchema),
+  /**
+   * The office day this member was last here on — present **only** when the
+   * server has judged this arrival a return from a real absence, and absent on
+   * every other join in the world.
+   *
+   * On `world` because this is the one message addressed to a single socket
+   * rather than to the room: it already carries that socket's own credentials,
+   * and this is the second fact on it about the person arriving rather than
+   * about the office. It costs no round trip and spends none of the history
+   * budget — a browser that wants to say something about those days asks for
+   * them through the same cached `history` answer the board and the week strips
+   * already share.
+   *
+   * A day key and not a timestamp, deliberately. A moment would make the
+   * browser re-derive the office's calendar to use it, and the office's
+   * calendar is server-side knowledge — the timezone setting — that nothing on
+   * this wire lets a client guess at (see `boardDay`, which is an index into
+   * server-served days for exactly this reason). Serving the day keeps one
+   * definition of a day in the client: the same one every key in the history
+   * answer is cut on, so "the days since you were last here" is a string
+   * comparison rather than arithmetic that could disagree with the labels.
+   *
+   * Always strictly older than the office's current day when present, because
+   * a day that began after somebody left is the finest thing a ledger bucketed
+   * by day can honestly say about "since you left".
+   */
+  lastHereDay: daySchema.optional(),
 });
 export type WebWorld = z.infer<typeof webWorldSchema>;
 

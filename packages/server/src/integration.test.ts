@@ -1561,4 +1561,176 @@ describe('server integration', () => {
     expect((JSON.parse(oldReply) as { code: string }).code).toBe('superseded');
     old.close();
   });
+
+  /**
+   * Arriving after being away. The office decides, off its own record of who
+   * was in the room — never off the browser's clock, and never off
+   * `last_seen_at`, which a collector keeps warm for a laptop nobody is
+   * looking at.
+   */
+  describe('while you were away', () => {
+    /** Rewrite when the office last saw a browser of theirs, as the past. */
+    function lastHere(memberId: string, msAgo: number): void {
+      server.db
+        .prepare('UPDATE members SET last_present_at = ? WHERE id = ?')
+        .run(Date.now() - msAgo, memberId);
+    }
+
+    function presentAt(memberId: string): number {
+      return (
+        server.db
+          .prepare('SELECT last_present_at AS at FROM members WHERE id = ?')
+          .get(memberId) as {
+          at: number;
+        }
+      ).at;
+    }
+
+    /**
+     * Shut a tab and let the office notice. The close handler — which stamps
+     * the presence clock — runs a tick or two later, so a test that rewound the
+     * clock straight after `close()` would have its rewind written back over.
+     */
+    async function leave(client: WebClientHarness): Promise<void> {
+      client.close();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    /** Resume an identity on a fresh socket, the way a reopened tab does. */
+    async function resume(world: WebWorld): Promise<WebWorld> {
+      const back = new WebClientHarness(server.port);
+      clients.push(back);
+      await back.open();
+      back.send({
+        type: 'join',
+        memberId: world.you.memberId,
+        memberSecret: world.you.memberSecret,
+      });
+      return (await back.next((m) => m.type === 'world')) as WebWorld;
+    }
+
+    it('names the day a returning member was last here', async () => {
+      const { client, world } = await join('ridham');
+      await leave(client);
+      // A night: long enough, and across the office's midnight.
+      lastHere(world.you.memberId, 14 * 60 * 60 * 1000);
+
+      const back = await resume(world);
+      expect(back.lastHereDay).toBe(
+        dayIn(Date.now() - 14 * 60 * 60 * 1000, Intl.DateTimeFormat().resolvedOptions().timeZone),
+      );
+      expect(
+        back.lastHereDay < dayIn(Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone),
+      ).toBe(true);
+    });
+
+    it('says nothing to somebody whose tab blipped ninety seconds ago', async () => {
+      const { client, world } = await join('ridham');
+      await leave(client);
+      lastHere(world.you.memberId, 90_000);
+
+      expect((await resume(world)).lastHereDay).toBeUndefined();
+    });
+
+    it('says nothing to somebody arriving for the first time', async () => {
+      // Nothing is rewritten here: a member minted seconds ago is stamped with
+      // the present by `createMember`, so the first join is never a return.
+      const { world } = await join('ridham');
+      expect(world.lastHereDay).toBeUndefined();
+    });
+
+    /**
+     * The duplicate the panel must never be. Greeted once, then the socket
+     * drops and comes back — the office stamped them present on the way in, so
+     * the second `world` carries nothing and the browser clears what it had.
+     */
+    it('greets a return once, and not again on the reconnect behind it', async () => {
+      const { client, world } = await join('ridham');
+      await leave(client);
+      lastHere(world.you.memberId, 14 * 60 * 60 * 1000);
+
+      const greeted = await resume(world);
+      expect(greeted.lastHereDay).toBeTruthy();
+      expect((await resume(world)).lastHereDay).toBeUndefined();
+    });
+
+    /**
+     * The reason this needed a column of its own. `last_seen_at` is written by
+     * a collector saying hello, so a member whose laptop reports all night
+     * looks "seen" every few minutes — and would never be greeted for the one
+     * absence the panel is best at describing.
+     */
+    it('is not fooled by a collector reporting through the night', async () => {
+      const { client, world } = await join('ridham');
+      const base = `http://127.0.0.1:${server.port}`;
+      const mint = await fetch(`${base}/api/pair`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          memberId: world.you.memberId,
+          memberSecret: world.you.memberSecret,
+        }),
+      });
+      const { pairingCode } = (await mint.json()) as { pairingCode: string };
+      const redeem = await fetch(`${base}/api/pair/redeem`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ pairingCode }),
+      });
+      const paired = (await redeem.json()) as PairRedeemResponse;
+
+      await leave(client);
+      lastHere(world.you.memberId, 14 * 60 * 60 * 1000);
+      server.db
+        .prepare('UPDATE members SET last_seen_at = ? WHERE id = ?')
+        .run(Date.now() - 14 * 60 * 60 * 1000, world.you.memberId);
+
+      const collector = new WebSocket(`ws://127.0.0.1:${server.port}/ws/collector`);
+      await new Promise<void>((resolve) => collector.on('open', () => resolve()));
+      collector.send(
+        JSON.stringify({ type: 'hello', deviceKey: paired.deviceKey, collectorVersion: '0.2.0' }),
+      );
+      await new Promise<void>((resolve) => collector.once('message', () => resolve()));
+
+      // The hello moved `last_seen_at` to now and left the presence clock
+      // where it was — so the office still knows nobody has been in the room.
+      const row = server.db
+        .prepare('SELECT last_seen_at, last_present_at FROM members WHERE id = ?')
+        .get(world.you.memberId) as { last_seen_at: number; last_present_at: number };
+      expect(row.last_seen_at).toBeGreaterThan(row.last_present_at);
+      expect((await resume(world)).lastHereDay).toBeTruthy();
+      collector.close();
+    });
+
+    /**
+     * A tab held open all day is somebody who is *here*, continuously. Without
+     * the sweep writing that through, opening a second tab at six would be
+     * greeted for an absence spent sitting in the room.
+     */
+    it('keeps the clock warm while a browser is actually in the office', async () => {
+      const { world } = await join('ridham');
+      lastHere(world.you.memberId, 14 * 60 * 60 * 1000);
+
+      // The sweep a minute from now — the first one past the write-through
+      // interval, with this tab still sitting in the office. Named as a moment
+      // rather than waiting for one, because the alternative is a test that
+      // takes a real minute.
+      const sweepAt = Date.now() + 61_000;
+      server.rooms.sweep(sweepAt);
+      expect(presentAt(world.you.memberId)).toBe(sweepAt);
+
+      // Which is what a second tab opening measures against: no absence.
+      expect((await resume(world)).lastHereDay).toBeUndefined();
+    });
+
+    /** And the close stamps it, so a tab shut and reopened is no absence. */
+    it('stamps the moment the last tab closes', async () => {
+      const { client, world } = await join('ridham');
+      lastHere(world.you.memberId, 14 * 60 * 60 * 1000);
+      await leave(client);
+
+      expect(presentAt(world.you.memberId)).toBeGreaterThan(Date.now() - 5_000);
+      expect((await resume(world)).lastHereDay).toBeUndefined();
+    });
+  });
 });

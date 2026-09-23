@@ -158,6 +158,31 @@ describe('web messages', () => {
     expect(serverToWebSchema.parse(world)).toEqual(world);
   });
 
+  /**
+   * The arrival field, and the compatibility it has to keep: a world message
+   * from a server that predates it is still a world message, and the greeting
+   * simply never fires against one.
+   */
+  it('carries the day a returning member was last here, and does not require it', () => {
+    const world = {
+      type: 'world',
+      you: { memberId: 'm1' },
+      roomCode: 'the-lab-k4xp2q',
+      roomName: 'the lab',
+      members: [],
+      leaderboard: [],
+    };
+    expect(serverToWebSchema.parse(world)).toEqual(world);
+    const returning = { ...world, lastHereDay: '2026-09-23' };
+    expect(serverToWebSchema.parse(returning)).toEqual(returning);
+    // A day key, checked as one — the browser compares it against the history
+    // answer's own keys, and anything else would compare as garbage.
+    expect(serverToWebSchema.safeParse({ ...world, lastHereDay: 'yesterday' }).success).toBe(false);
+    expect(serverToWebSchema.safeParse({ ...world, lastHereDay: 1_759_000_000 }).success).toBe(
+      false,
+    );
+  });
+
   it('parses a history request, with or without a day count', () => {
     expect(webToServerSchema.parse({ type: 'history' })).toEqual({ type: 'history' });
     const week = { type: 'history', days: 7 };

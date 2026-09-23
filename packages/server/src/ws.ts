@@ -11,6 +11,7 @@ import { type WebSocket, WebSocketServer } from 'ws';
 import type { Db } from './db/index.js';
 import { randomAvatar } from './ids.js';
 import { createMessageLimiter } from './rate-limit.js';
+import { lastHereDay } from './workspace/absence.js';
 import { type AdminResult, handleAdminOp } from './workspace/admin.js';
 import type { Room, WebClient } from './workspace/live.js';
 import type { MemberRecord, WorkspaceManager } from './workspace/manager.js';
@@ -248,9 +249,21 @@ function handleWeb(
     knockingAt = null;
     const joined: WebClient = { ws, memberId: member.id, present: true };
     client = joined;
+    // Read before `addWebClient` writes: this is the value the absence is
+    // measured from, and a line later it is the present. Asked here rather than
+    // on each of the three ways in, so a resume, a fresh name and a knock that
+    // was answered all get the same answer to the same question — and the two
+    // that mint a member are stamped with the present, so a first-ever arrival
+    // is never a return.
+    const lastPresent = deps.rooms.lastPresentAt(member.id);
     const world = entered.addWebClient(joined);
     if (!world) return;
-    sendWeb(ws, secret ? { ...world, you: { ...world.you, memberSecret: secret } } : world);
+    const away = lastHereDay(lastPresent, Date.now(), entered.settings.timezone);
+    sendWeb(ws, {
+      ...world,
+      ...(secret ? { you: { ...world.you, memberSecret: secret } } : {}),
+      ...(away ? { lastHereDay: away } : {}),
+    });
     // Settings ride their own message, and it is only sent when they change —
     // so an office that has been left alone would never tell anyone how its
     // door is set.
