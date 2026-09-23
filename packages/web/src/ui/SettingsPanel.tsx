@@ -28,6 +28,116 @@ const JOIN_MODES: { value: WorkspaceSettings['joinMode']; label: string; consequ
   },
 ];
 
+/**
+ * Every zone this runtime knows, for the picker's list.
+ *
+ * `Intl.supportedValuesOf` is the canonical set — about four hundred entries —
+ * and it is the right source for a *list*, where the tz database's aliases
+ * would only be duplicates under different spellings. It is emphatically not
+ * what *validates* a zone: which of an alias pair counts as canonical differs
+ * between engines and moves between releases (this Node calls it
+ * `Asia/Calcutta`; plenty of browsers report `Asia/Kolkata`), and `UTC` itself
+ * is absent. So the list is a convenience, the server validates by
+ * construction, and the office's own zone is folded in below — whichever
+ * spelling it is stored under, the select shows where the office actually
+ * stands rather than falling back to whatever sorts first.
+ *
+ * Computed once. Four hundred strings out of ICU on every render of a panel
+ * that reopens on every visit is the kind of cost that does not show up until
+ * somebody opens it on a phone.
+ */
+const KNOWN_ZONES: string[] = (() => {
+  try {
+    return [...(Intl.supportedValuesOf?.('timeZone') ?? [])];
+  } catch {
+    // An engine without it still gets a working picker, just a short one: the
+    // office's own zone and UTC, which is the whole of what this owner needs
+    // to see where they stand and get back to the default.
+    return [];
+  }
+})();
+
+/** `Asia/Kolkata` → `Asia`. Zones with no region (`UTC`) group together. */
+function regionOf(zone: string): string {
+  const slash = zone.indexOf('/');
+  return slash === -1 ? 'Other' : zone.slice(0, slash);
+}
+
+/**
+ * The offset this zone is on *right now*, as `UTC+05:30`.
+ *
+ * Right now and not in general, deliberately: half the world's zones change
+ * offset twice a year, and the number an owner needs in order to recognise
+ * their own zone is the one their clock is keeping today. `longOffset` renders
+ * UTC itself as a bare `GMT`, which would read as a missing value rather than
+ * as zero.
+ */
+function utcOffsetLabel(zone: string, at: number): string {
+  try {
+    const rendered = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      timeZoneName: 'longOffset',
+    })
+      .formatToParts(at)
+      .find((part) => part.type === 'timeZoneName')?.value;
+    if (!rendered) return '';
+    return rendered === 'GMT' ? 'UTC+00:00' : rendered.replace('GMT', 'UTC');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Which clock the office's day is cut on.
+ *
+ * A native `<select>`: four hundred entries, grouped by region, with the
+ * browser's own type-to-search doing the finding. A combobox library would
+ * search a little better and cost a dependency, a bundle and a set of keyboard
+ * behaviours to get right — for a control most offices touch once.
+ *
+ * Changing it rewrites nothing. The day keys in the ledger are the days people
+ * did the work; this only moves the window the office reads them through, so
+ * the board re-reads and that is the whole of it. The note says the one
+ * consequence that is not obvious from the control: where midnight falls.
+ */
+function TimezoneField({ zone, onPick }: { zone: string; onPick: (zone: string) => void }) {
+  // The office's own zone always appears, even if this browser's ICU does not
+  // list it — otherwise the select would silently render as blank, or worse,
+  // as somebody else's zone.
+  const zones = [...new Set([...KNOWN_ZONES, 'UTC', zone])].sort();
+  const regions = [...new Set(zones.map(regionOf))].sort((a, b) =>
+    a === 'Other' ? 1 : b === 'Other' ? -1 : a.localeCompare(b),
+  );
+  const offset = utcOffsetLabel(zone, Date.now());
+
+  return (
+    <>
+      <select
+        className="input settings-select"
+        aria-label="office timezone"
+        value={zone}
+        onChange={(e) => onPick(e.target.value)}
+      >
+        {regions.map((region) => (
+          <optgroup key={region} label={region}>
+            {zones
+              .filter((candidate) => regionOf(candidate) === region)
+              .map((candidate) => (
+                <option key={candidate} value={candidate}>
+                  {candidate}
+                </option>
+              ))}
+          </optgroup>
+        ))}
+      </select>
+      <p className="settings-note">
+        The board&rsquo;s day starts at midnight in this zone. Right now that is {zone}
+        {offset ? `, ${offset}` : ''}.
+      </p>
+    </>
+  );
+}
+
 /** The two ops that take somebody out of the office; both ask first. */
 type Removal = Extract<AdminOp, { kind: 'kick' | 'ban' }>;
 
@@ -50,7 +160,15 @@ type Confirmable = PersonAsk | Extract<AdminOp, { kind: 'rotate-invite' }>;
  * answer back beside the button that asked instead of in a banner at the top
  * of a long panel, describing something three sections down.
  */
-type Spot = 'knocks' | 'office' | 'door' | 'board' | 'device' | 'leave' | `person:${string}`;
+type Spot =
+  | 'knocks'
+  | 'office'
+  | 'clock'
+  | 'door'
+  | 'board'
+  | 'device'
+  | 'leave'
+  | `person:${string}`;
 
 const RANK: Record<MemberRole, number> = { owner: 2, moderator: 1, member: 0 };
 
@@ -259,6 +377,11 @@ function SettingsBody({ settings }: { settings: WorkspaceSettings }) {
                 Rename
               </button>
             </div>
+            <TimezoneField
+              zone={settings.timezone}
+              onPick={(timezone) => update('clock', { timezone })}
+            />
+            {refusalAt('clock')}
             <p className="settings-note">
               Invite link: <code>{inviteUrl}</code>
             </p>

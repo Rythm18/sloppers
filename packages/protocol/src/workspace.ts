@@ -1,5 +1,33 @@
 import { z } from 'zod';
 import { avatarIdSchema, displayNameSchema, roleSchema, roomNameSchema } from './core.js';
+import { isKnownTimeZone } from './usage.js';
+
+/**
+ * The zone an office keeps when nobody has said otherwise.
+ *
+ * UTC, because that is what the production server's clock already is
+ * (`node:22-alpine`, no `TZ` set anywhere; `primary_region` is geography, not
+ * a clock) — so every office that existed before this field did goes on
+ * cutting its day at exactly the moment it always has. The default is a
+ * promise not to move anybody's midnight until their owner asks.
+ */
+export const DEFAULT_TIMEZONE = 'UTC';
+
+/**
+ * An IANA zone name the runtime can actually use — `Asia/Kolkata`, `UTC`,
+ * `America/Los_Angeles`.
+ *
+ * Checked by construction (see `isKnownTimeZone`), which is the check that
+ * matches what the value is *for*: the server hands it to
+ * `Intl.DateTimeFormat`, so "will that work" is the whole question. Bounded at
+ * 64 characters because the longest real zone name is 32 and a settings blob
+ * is stored as JSON.
+ */
+export const timeZoneSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .refine(isKnownTimeZone, { message: 'unknown timezone' });
 
 /**
  * Everything configurable about a workspace, in one validated blob. Adding a
@@ -11,6 +39,17 @@ export const workspaceSettingsSchema = z.object({
   joinMode: z.enum(['link', 'knock', 'locked']).default('link'),
   /** Consent for the cross-workspace leaderboard. Off until someone opts in. */
   publicLeaderboard: z.boolean().default(false),
+  /**
+   * Which clock the office's day is cut on: the board's "today", the anchor
+   * history counts back from, and the moment every score returns to zero.
+   *
+   * Not where anybody *is*. Members keep filing their work under their own
+   * local day — that is theirs, and a Kolkata member's Tuesday is a Kolkata
+   * Tuesday however the office is set. This says only which 24 hours the
+   * office calls a day when it reads those back, so that one board compares
+   * one window rather than each member a different one.
+   */
+  timezone: timeZoneSchema.default(DEFAULT_TIMEZONE),
 });
 export type WorkspaceSettings = z.infer<typeof workspaceSettingsSchema>;
 

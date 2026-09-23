@@ -96,9 +96,22 @@ function entryMs(entry: Record<string, unknown>, acc: SessionAccumulator): numbe
  * between the two halves of a same-day resume pair and retire the claim that
  * pair depends on. A window anchored to the newest timestamp seen has no such
  * moment. It is also never *less* retentive than the day rule — a session
- * starting at time T is protected by the server from the next midnight, which
- * is at most 24h after T, and claims are made at or after T — so it covers the
- * day rule's window and then some.
+ * starting at time T is protected by the server from the next midnight, and
+ * claims are made at or after T — so it covers the day rule's window and then
+ * some.
+ *
+ * "The next midnight is at most 24h after T" is what makes that last sentence
+ * true, and it is no longer unconditional. Offices now cut their day in a
+ * timezone their owner picks (`workspaceSettingsSchema.timezone`), and a zone
+ * that observes DST has one 25-hour day a year — so for an office on such a
+ * zone the server's protection can outlast this window by the size of the
+ * transition, on that one day, for a session that started inside its first
+ * hour and is resumed more than 24h later while the date has not changed.
+ * That request's tokens would count twice. Offices on fixed offsets (UTC, the
+ * default, and `Asia/Kolkata`) keep the original bound exactly. Stated rather
+ * than fixed here, with the other half of the reasoning at `startedEarlier` in
+ * the server's `foldUsage`; raising this constant past the longest day any
+ * office might keep is the cheap half of closing it.
  */
 const CLAIM_RETENTION_MS = 24 * 60 * 60 * 1000;
 

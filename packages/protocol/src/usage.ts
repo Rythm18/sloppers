@@ -57,6 +57,11 @@ export type MinuteReport = z.infer<typeof minuteReportSchema>;
  * runs in Singapore), so a day computed on the server would silently file
  * activity under the wrong date for everyone else. Every caller of this
  * function must run on the collector, not the server.
+ *
+ * The server has its own question — "which day is the *office* in?" — and its
+ * own answer, `dayIn` below. The two are different questions on purpose: a
+ * member's work is filed under the day they did it, and read back under the
+ * window their office keeps.
  */
 export function dayOf(ms: number): string {
   const d = new Date(ms);
@@ -65,6 +70,117 @@ export function dayOf(ms: number): string {
 
 function pad(n: number): string {
   return String(n).padStart(2, '0');
+}
+
+/**
+ * The wall-clock fields of an instant, in a named IANA zone.
+ *
+ * `formatToParts` rather than a formatted string, so nothing here depends on
+ * what a locale decides a date looks like: the parts are named, and we
+ * assemble the one shape this codebase uses. `hourCycle: 'h23'` because a
+ * plain `hour12: false` renders midnight as `24` under some ICU builds, which
+ * would make `minuteOfDayIn` return 1440 for the first minute of the day.
+ *
+ * Formatters are cached per zone. Constructing one is the expensive part of
+ * `Intl`, and the ledger asks these questions on every snapshot from every
+ * collector in every office.
+ */
+const zoneFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function zoneFormatter(timeZone: string): Intl.DateTimeFormat {
+  const cached = zoneFormatters.get(timeZone);
+  if (cached) return cached;
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  });
+  zoneFormatters.set(timeZone, formatter);
+  return formatter;
+}
+
+interface ZoneParts {
+  year: string;
+  month: string;
+  day: string;
+  hour: string;
+  minute: string;
+}
+
+function partsIn(ms: number, timeZone: string): ZoneParts {
+  const out: ZoneParts = { year: '', month: '', day: '', hour: '', minute: '' };
+  for (const part of zoneFormatter(timeZone).formatToParts(ms)) {
+    if (part.type in out) out[part.type as keyof ZoneParts] = part.value;
+  }
+  return out;
+}
+
+/**
+ * Calendar day, YYYY-MM-DD, as it reads in a named IANA zone — `Asia/Kolkata`,
+ * `America/Los_Angeles`, `UTC`.
+ *
+ * This is how the server decides which day an *office* is in. Days are cut on
+ * each collector's own clock at write time (`dayOf`), and an office has one
+ * window it reads them back through: the day it is currently serving as
+ * "today", and the anchor every history answer counts backwards from. Before
+ * this existed the server used `dayOf` on its own clock, which is UTC in
+ * production — so a member west of UTC banked their evening under a day the
+ * board had already closed and never showed again.
+ *
+ * `Intl` and no library. A day-string for an instant in a zone is the whole of
+ * what is needed, `Intl.DateTimeFormat` has the zone database behind it, and
+ * every runtime this ships to — Node 22 on the server, browsers for the
+ * picker — has had it for years.
+ *
+ * Nothing is converted. The string that comes back is a *label*, compared
+ * against labels the collectors wrote, and `recentDays` steps it as calendar
+ * arithmetic. An unknown zone throws, which is why `isKnownTimeZone` guards
+ * every path a zone can arrive on.
+ */
+export function dayIn(ms: number, timeZone: string): string {
+  const { year, month, day } = partsIn(ms, timeZone);
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Minute-of-day index (0-1439) in a named IANA zone — the same number
+ * `minuteOfDay` produces on a collector, for the server's coarse fallback
+ * mark.
+ *
+ * Read off the wall clock rather than as an offset from midnight, which is
+ * what makes it right across a DST transition: a spring-forward day is 23
+ * hours long, so `(now - midnight) / 60000` would run 60 minutes ahead of the
+ * clock on the wall for the rest of it, and an autumn day would run past 1439.
+ */
+export function minuteOfDayIn(ms: number, timeZone: string): number {
+  const { hour, minute } = partsIn(ms, timeZone);
+  return Number(hour) * 60 + Number(minute);
+}
+
+/**
+ * Whether this runtime knows the zone — the only validation worth doing.
+ *
+ * By construction rather than against `Intl.supportedValuesOf('timeZone')`,
+ * deliberately. That list is the *canonical* zones (418 of them here) and
+ * leaves out every alias the tz database keeps for compatibility, so a browser
+ * reporting `Asia/Calcutta` or `US/Pacific` — both of which `Intl` handles
+ * perfectly — would be refused a zone it genuinely lives in. The constructor
+ * answers the question that actually matters: will `dayIn` work with this.
+ *
+ * Never throws: an unknown zone is a `RangeError`, which is exactly the
+ * outcome being turned into a boolean here.
+ */
+export function isKnownTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Whole days, in milliseconds — the step `recentDays` walks backwards by. */

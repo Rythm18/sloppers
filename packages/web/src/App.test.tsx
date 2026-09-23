@@ -95,7 +95,7 @@ describe('App', () => {
         type: 'workspace',
         roomCode: 'the-lab-k4xp2q',
         roomName: 'the lab',
-        settings: { joinMode: 'link', publicLeaderboard: false },
+        settings: { joinMode: 'link', publicLeaderboard: false, timezone: 'UTC' },
       });
     });
     render(<App />);

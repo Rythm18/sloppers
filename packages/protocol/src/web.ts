@@ -41,6 +41,19 @@ export const webJoinSchema = z.object({
   memberSecret: z.string().optional(),
   displayName: displayNameSchema.optional(),
   avatar: avatarIdSchema.optional(),
+  /**
+   * The creating browser's own zone, as the new office's day boundary. Read
+   * only alongside `createRoom`; an office already exists and already has one.
+   *
+   * Bounded but deliberately *not* checked against the zone database here, the
+   * one place in this file where a field is looser than the value it carries.
+   * This is a hint nobody typed — `Intl.DateTimeFormat().resolvedOptions()`
+   * off whatever runtime the visitor has — and refusing the whole join over it
+   * would cost somebody their first office to make a point about a default.
+   * The server falls back to UTC for anything it does not recognize; the
+   * settings op, where an owner chooses on purpose, refuses it instead.
+   */
+  timezone: z.string().max(64).optional(),
 });
 export type WebJoin = z.infer<typeof webJoinSchema>;
 
@@ -256,13 +269,15 @@ export type MemberHistory = z.infer<typeof memberHistorySchema>;
  * what the office actually served rather than from date arithmetic of its own —
  * including for a member whose own entry has nothing in it.
  *
- * Those keys are cut on the server's clock, the same one the live board already
- * calls "today". The days *inside* each member's entry are their collector's
- * own local days, unconverted, which is what makes the label honest: it is the
- * date that person did the work, on their calendar. Two members in different
- * timezones therefore describe genuinely different 24-hour spans under one
- * label, which is the intended reading and the only one available — nothing on
- * the wire carries a collector's offset.
+ * Those keys are cut in the office's timezone, the same one the live board
+ * already calls "today". The days *inside* each member's entry are their
+ * collector's own local days, unconverted, which is what makes the label
+ * honest: it is the date that person did the work, on their calendar. Two
+ * members in different timezones therefore describe genuinely different
+ * 24-hour spans under one label, which is the intended reading and the only
+ * one available — nothing on the wire carries a collector's offset. What the
+ * office's own zone decides is only which of those labels it counts back from,
+ * so that everybody is being read over the same window.
  */
 export const webHistoryResultSchema = z.object({
   type: z.literal('history'),

@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   dailyStatsSchema,
+  dayIn,
   dayOf,
   decodeMinutes,
   encodeMinutes,
   estimateCostUsd,
+  isKnownTimeZone,
   MINUTES_PER_DAY,
   minuteOfDay,
+  minuteOfDayIn,
   minuteReportSchema,
   PRICING,
   recentDays,
@@ -256,6 +259,83 @@ describe('time helpers', () => {
     const t = new Date(2026, 7, 19, 3, 25).getTime();
     expect(dayOf(t)).toBe('2026-08-19');
     expect(minuteOfDay(t)).toBe(3 * 60 + 25);
+  });
+});
+
+/**
+ * The office's side of the clock: one instant, and what day it is in each
+ * place somebody might be sitting.
+ *
+ * 2026-08-19T20:30:00Z is chosen because it is the case the whole feature
+ * exists for — three offices reading the same moment as three different dates,
+ * and two of them not the server's.
+ */
+describe('dayIn', () => {
+  const AT = Date.parse('2026-08-19T20:30:00Z');
+
+  it('cuts the day in the zone it was asked about', () => {
+    expect(dayIn(AT, 'UTC')).toBe('2026-08-19');
+    // 02:00 the next morning in Kolkata...
+    expect(dayIn(AT, 'Asia/Kolkata')).toBe('2026-08-20');
+    // ...and still early afternoon in California.
+    expect(dayIn(AT, 'America/Los_Angeles')).toBe('2026-08-19');
+  });
+
+  it('reads the boundary itself from the right side', () => {
+    // One minute either side of midnight in Kolkata (18:29:59Z / 18:30:01Z).
+    expect(dayIn(Date.parse('2026-08-19T18:29:59Z'), 'Asia/Kolkata')).toBe('2026-08-19');
+    expect(dayIn(Date.parse('2026-08-19T18:30:01Z'), 'Asia/Kolkata')).toBe('2026-08-20');
+  });
+
+  it('sorts as a calendar, which is what BETWEEN in the ledger relies on', () => {
+    expect(dayIn(AT, 'UTC') < dayIn(AT, 'Asia/Kolkata')).toBe(true);
+  });
+
+  it('survives a DST transition without repeating or skipping a date', () => {
+    // 2026-11-01 is the autumn fall-back in US zones: a 25-hour local day.
+    const day = 'America/Los_Angeles';
+    expect(dayIn(Date.parse('2026-11-01T07:30:00Z'), day)).toBe('2026-11-01'); // 00:30 PDT
+    expect(dayIn(Date.parse('2026-11-01T09:30:00Z'), day)).toBe('2026-11-01'); // 01:30 PST
+    expect(dayIn(Date.parse('2026-11-02T07:59:00Z'), day)).toBe('2026-11-01'); // 23:59 PST
+    expect(dayIn(Date.parse('2026-11-02T08:01:00Z'), day)).toBe('2026-11-02');
+  });
+
+  it('throws on a zone nobody knows, which is why callers validate first', () => {
+    expect(() => dayIn(AT, 'Mars/Olympus')).toThrow();
+  });
+});
+
+describe('minuteOfDayIn', () => {
+  it('reads the wall clock in the zone, not an offset from midnight', () => {
+    const at = Date.parse('2026-08-19T20:30:00Z');
+    expect(minuteOfDayIn(at, 'UTC')).toBe(20 * 60 + 30);
+    expect(minuteOfDayIn(at, 'Asia/Kolkata')).toBe(2 * 60);
+  });
+
+  it('renders the first minute of the day as 0, not 1440', () => {
+    expect(minuteOfDayIn(Date.parse('2026-08-19T18:30:30Z'), 'Asia/Kolkata')).toBe(0);
+  });
+
+  it('stays inside the day on the 25-hour one', () => {
+    // 01:30 PST, an hour after the fall-back repeated it. An offset from
+    // midnight would say 150; the clock on the wall says 90, and that is the
+    // bit the bitmap has room for.
+    expect(minuteOfDayIn(Date.parse('2026-11-01T09:30:00Z'), 'America/Los_Angeles')).toBe(90);
+  });
+});
+
+describe('isKnownTimeZone', () => {
+  it('takes what Intl takes, aliases included', () => {
+    expect(isKnownTimeZone('UTC')).toBe(true);
+    expect(isKnownTimeZone('Asia/Kolkata')).toBe(true);
+    expect(isKnownTimeZone('Asia/Calcutta')).toBe(true);
+    expect(isKnownTimeZone('America/Los_Angeles')).toBe(true);
+  });
+
+  it('answers false rather than throwing, whatever arrives', () => {
+    expect(isKnownTimeZone('Mars/Olympus')).toBe(false);
+    expect(isKnownTimeZone('')).toBe(false);
+    expect(isKnownTimeZone('../../etc/passwd')).toBe(false);
   });
 });
 

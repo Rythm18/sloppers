@@ -20,8 +20,8 @@ import type { WebSocket } from 'ws';
 import type { Db } from '../db/index.js';
 import { can } from '../domain/permissions.js';
 import { relinkToken } from '../ids.js';
-// A value import, not a type-only one: `TokenLedger.dayOf` is the server's one
-// answer to "which day is it here", and `history` below has to serve the same
+// A value import, not a type-only one: `TokenLedger.dayIn` is the one answer
+// to "which day is this office in", and `history` below has to serve the same
 // day the live board is serving.
 import { TokenLedger } from '../ledger.js';
 import { derivePresence } from '../presence.js';
@@ -279,7 +279,7 @@ export class Room {
     // Absent means "0.1.x, which cannot tell us", not "off": treating silence
     // as withholding would relabel every member who has not upgraded.
     runtime.sharesTokens = snapshot.sharesTokens ?? true;
-    if (this.ledger.ingest(memberId, snapshot.sessions, now)) {
+    if (this.ledger.ingest(memberId, snapshot.sessions, now, this.settings.timezone)) {
       this.scheduleLeaderboard();
     }
     this.refreshPresence(memberId);
@@ -515,12 +515,12 @@ export class Room {
    * The office's recent days, as one answer to one browser that asked.
    *
    * Anchored on the same clock the live board calls "today" — `TokenLedger`'s
-   * own `dayOf`, at the server. A browser cannot name the day, and that is the
-   * point: the board's day switch puts "Today" and "Yesterday" side by side,
-   * and two definitions of today inside one panel is a bug nobody would ever
-   * be able to see. What each day *label* then means per member is their own
-   * collector's local day, unconverted, which is the honest reading — the date
-   * they did the work, on their calendar.
+   * own `dayIn`, in this office's timezone. A browser cannot name the day, and
+   * that is the point: the board's day switch puts "Today" and "Yesterday"
+   * side by side, and two definitions of today inside one panel is a bug
+   * nobody would ever be able to see. What each day *label* then means per
+   * member is their own collector's local day, unconverted, which is the
+   * honest reading — the date they did the work, on their calendar.
    *
    * Withholding governs from the present tense. A member whose collector says
    * `visibility.tokens` is off gets an empty `days` and `tokensShared: false`,
@@ -531,7 +531,7 @@ export class Room {
    * `TokenLedger.recentFor`. An eight-person office is 24 reads for a week.
    */
   history(requestedDays: number | undefined, now: number): WebHistoryResult {
-    const endDay = TokenLedger.dayOf(now);
+    const endDay = TokenLedger.dayIn(now, this.settings.timezone);
     const wanted = Math.min(Math.max(requestedDays ?? DEFAULT_HISTORY_DAYS, 1), MAX_HISTORY_DAYS);
     // Served from the same helper the ledger reads with, so the labels and the
     // rows under them cannot come apart.
@@ -563,6 +563,25 @@ export class Room {
     for (const id of this.members.keys()) this.refreshPresence(id, now);
   }
 
+  /**
+   * The office's day window moved — its owner changed the timezone — so every
+   * number on screen is now about a different 24 hours.
+   *
+   * Nothing is written and nothing is migrated: the stored days are the days
+   * members did the work, and only the window this office reads them through
+   * has changed. What has to happen is that the room says so, immediately,
+   * rather than leaving yesterday's totals under a heading that now means
+   * something else until the next collector happens to report. `refreshPresence`
+   * keys on the stats it is about to send, so the ones that genuinely did not
+   * move stay quiet; the board is pushed unconditionally, because its rows are
+   * ordered against each other and a partial re-read would be a board with two
+   * definitions of today in it.
+   */
+  refreshDayWindow(now: number = Date.now()): void {
+    this.sweep(now);
+    this.broadcast({ type: 'leaderboard', rows: this.leaderboardRows(now) });
+  }
+
   memberView(memberId: string, now: number): MemberView {
     const runtime = this.members.get(memberId);
     if (!runtime) throw new Error(`unknown member ${memberId}`);
@@ -590,7 +609,7 @@ export class Room {
    * zero about a person, and only the snapshot envelope can say which.
    */
   private statsFor(runtime: MemberRuntime, now: number): DailyStats {
-    const stats = this.ledger.todayFor(runtime.id, now);
+    const stats = this.ledger.todayFor(runtime.id, now, this.settings.timezone);
     return runtime.sharesTokens ? stats : { ...stats, tokensShared: false };
   }
 

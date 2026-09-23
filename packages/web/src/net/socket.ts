@@ -86,6 +86,28 @@ function refileIdentity(from: string, to: string): void {
   if (saveIdentity(to, identity)) clearIdentity(from);
 }
 
+/**
+ * This browser's own timezone, offered as a new office's day boundary.
+ *
+ * Only on the create path. Somebody opening an office is almost always going
+ * to keep their own midnight, and asking them to pick a zone out of four
+ * hundred before they have seen the room would be a worse first screen than
+ * any default is worth. The owner can change it afterwards in Settings, and
+ * the server treats this as a hint — anything it does not recognize becomes
+ * UTC rather than a refused join.
+ *
+ * Guarded because this is the only line in the app that assumes `Intl`
+ * resolves anything at all; an empty answer simply sends nothing, and the
+ * office takes the default.
+ */
+function browserTimeZone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The three ways into an office, mirroring the join protocol. */
 export type JoinIntent =
   | { kind: 'resume'; roomCode: string }
@@ -181,11 +203,13 @@ export class OfficeSocket {
           avatar: intent.avatar,
         });
       } else {
+        const timezone = browserTimeZone();
         this.send({
           type: 'join',
           createRoom: intent.roomName,
           displayName: intent.displayName,
           avatar: intent.avatar,
+          ...(timezone ? { timezone } : {}),
         });
       }
     };

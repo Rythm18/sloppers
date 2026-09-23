@@ -315,7 +315,7 @@ function handleWeb(
 
     let target: Room | null;
     if (msg.createRoom) {
-      target = rooms.createRoom(msg.createRoom);
+      target = rooms.createRoom(msg.createRoom, msg.timezone);
       if (!target) {
         return sendWeb(ws, {
           type: 'error',

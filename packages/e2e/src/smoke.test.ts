@@ -264,7 +264,18 @@ class WebProbe {
       this.ws.on('open', resolve);
       this.ws.on('error', reject);
     });
-    this.ws.send(JSON.stringify({ type: 'join', createRoom: officeName, displayName: name }));
+    // A browser sends its own zone when it opens an office, and this probe is
+    // standing in for one. Without it the office would keep UTC while the
+    // collector under test cuts days on this machine's clock, and every
+    // assertion about "today" would be about two different days.
+    this.ws.send(
+      JSON.stringify({
+        type: 'join',
+        createRoom: officeName,
+        displayName: name,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      }),
+    );
     return (await this.next((m) => m.type === 'world')) as WebWorld;
   }
 

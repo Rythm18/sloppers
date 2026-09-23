@@ -29,7 +29,11 @@ const ops = (): AdminOp[] => sendAdminMock.mock.calls.map(([op]) => op);
 const opsAfterOpening = (): AdminOp[] => ops().filter((op) => op.kind !== 'roster');
 
 const ROOM = 'the-lab-k4xp2q';
-const OPEN_DOOR: WorkspaceSettings = { joinMode: 'link', publicLeaderboard: false };
+const OPEN_DOOR: WorkspaceSettings = {
+  joinMode: 'link',
+  publicLeaderboard: false,
+  timezone: 'UTC',
+};
 
 function memberView(id: string, displayName: string, role: MemberRole) {
   return {
@@ -184,25 +188,100 @@ describe('SettingsPanel', () => {
 
   describe('the ops each control sends', () => {
     it('sends the door mode the person picked, leaving the rest of the settings alone', () => {
-      seed({ role: 'owner', settings: { joinMode: 'link', publicLeaderboard: true } });
+      seed({
+        role: 'owner',
+        settings: { joinMode: 'link', publicLeaderboard: true, timezone: 'UTC' },
+      });
       render(<SettingsPanel />);
 
       fireEvent.click(screen.getByRole('radio', { name: /Ask to join/ }));
 
       expect(opsAfterOpening()).toEqual([
-        { kind: 'settings', settings: { joinMode: 'knock', publicLeaderboard: true } },
+        {
+          kind: 'settings',
+          settings: { joinMode: 'knock', publicLeaderboard: true, timezone: 'UTC' },
+        },
       ]);
     });
 
     it('sends the leaderboard consent, leaving the door alone', () => {
-      seed({ role: 'owner', settings: { joinMode: 'locked', publicLeaderboard: false } });
+      seed({
+        role: 'owner',
+        settings: { joinMode: 'locked', publicLeaderboard: false, timezone: 'UTC' },
+      });
       render(<SettingsPanel />);
 
       fireEvent.click(screen.getByRole('checkbox'));
 
       expect(opsAfterOpening()).toEqual([
-        { kind: 'settings', settings: { joinMode: 'locked', publicLeaderboard: true } },
+        {
+          kind: 'settings',
+          settings: { joinMode: 'locked', publicLeaderboard: true, timezone: 'UTC' },
+        },
       ]);
+    });
+
+    /**
+     * The office's clock. One control, one op, and the same whole-blob rule
+     * every other setting follows — so picking a zone cannot quietly reopen a
+     * door somebody locked.
+     */
+    it('sends the zone the owner picked, leaving the rest of the settings alone', () => {
+      seed({
+        role: 'owner',
+        settings: { joinMode: 'locked', publicLeaderboard: true, timezone: 'UTC' },
+      });
+      render(<SettingsPanel />);
+
+      fireEvent.change(screen.getByLabelText('office timezone'), {
+        target: { value: 'Europe/Paris' },
+      });
+
+      expect(opsAfterOpening()).toEqual([
+        {
+          kind: 'settings',
+          settings: { joinMode: 'locked', publicLeaderboard: true, timezone: 'Europe/Paris' },
+        },
+      ]);
+    });
+
+    /**
+     * What the control has to show before anybody can trust it: the zone the
+     * office is actually on, the offset that zone is keeping right now — the
+     * half of it a person recognises — and the one consequence that is not
+     * obvious from a list of place names.
+     */
+    it('shows the office’s zone, its current offset, and what changing it does', () => {
+      seed({
+        role: 'owner',
+        settings: { joinMode: 'link', publicLeaderboard: false, timezone: 'Asia/Kolkata' },
+      });
+      render(<SettingsPanel />);
+
+      const picker = screen.getByLabelText('office timezone') as HTMLSelectElement;
+      expect(picker.value).toBe('Asia/Kolkata');
+      expect(screen.getByText(/The board.s day starts at midnight in this zone/)).toBeTruthy();
+      expect(screen.getByText(/Asia\/Kolkata, UTC\+05:30/)).toBeTruthy();
+    });
+
+    /**
+     * A zone the office is on but this runtime's list leaves out. One half of
+     * every tz-database alias pair is in that position, and which half depends
+     * on the engine — `Asia/Kolkata` is the one missing here, and is exactly
+     * what a browser would have reported when the office was created. `UTC`
+     * itself is missing too. The select has to show where the office stands
+     * rather than rendering blank or, worse, as whatever sorts first.
+     */
+    it('shows a zone even when the runtime’s list does not have it', () => {
+      for (const zone of ['Asia/Kolkata', 'UTC']) {
+        seed({
+          role: 'owner',
+          settings: { joinMode: 'link', publicLeaderboard: false, timezone: zone },
+        });
+        const view = render(<SettingsPanel />);
+        expect((screen.getByLabelText('office timezone') as HTMLSelectElement).value).toBe(zone);
+        view.unmount();
+      }
     });
 
     it('renames and rotates from the office section', () => {
@@ -702,6 +781,9 @@ describe('SettingsPanel', () => {
       expect(screen.queryByText('The door')).toBeNull();
       expect(screen.queryByText('Leaderboard')).toBeNull();
       expect(screen.queryByRole('button', { name: 'Rotate invite link' })).toBeNull();
+      // The office's clock moves everybody's day at once, so it is the
+      // owner's, like the door and the link.
+      expect(screen.queryByLabelText('office timezone')).toBeNull();
       expect(screen.queryByRole('button', { name: 'Make moderator: sam' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Step down: lee' })).toBeNull();
       // Moderating is still theirs to do.

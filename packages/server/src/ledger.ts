@@ -2,13 +2,15 @@ import {
   addTokens,
   countMinutes,
   type DailyStats,
-  dayOf,
+  DEFAULT_TIMEZONE,
+  dayIn,
   decodeMinutes,
   emptyTokens,
   estimateCostFloorUsd,
   estimateCostUsd,
   MAX_HISTORY_DAYS,
   MINUTES_PER_DAY,
+  minuteOfDayIn,
   recentDays,
   type SessionSnapshot,
   type StatsPrecision,
@@ -445,12 +447,20 @@ function composeDay(
 
 export class TokenLedger {
   /**
-   * Local calendar day, YYYY-MM-DD — the protocol's own `dayOf`, so the
-   * server cuts days exactly the way collectors do. The server uses it only
-   * to decide which day *it* is serving as "today"; work is filed under the
-   * day the collector stamped on the bucket, never under this one.
+   * Which calendar day an office is in, YYYY-MM-DD — the protocol's own
+   * `dayIn`, so the room and the ledger cannot disagree about it.
+   *
+   * It decides only which day is served as "today" and which day a history
+   * answer counts back from. Work is still filed under the day the collector
+   * stamped on the bucket, never under this one: a member's days are their
+   * own, and this is the window the office reads them through.
+   *
+   * It used to be `dayOf` at the server, which meant the office's midnight was
+   * wherever the container happened to be — UTC in production, and so an
+   * office of friends in California had its board zero at five in the
+   * afternoon.
    */
-  static readonly dayOf = dayOf;
+  static readonly dayIn = dayIn;
 
   private readonly q: ReturnType<typeof prepare>;
 
@@ -461,24 +471,38 @@ export class TokenLedger {
   /**
    * Fold a snapshot into the ledger. Returns true if anything was recorded
    * (callers use this to know when to re-broadcast the leaderboard).
+   *
+   * `timeZone` is the office's, and governs only the three things the server
+   * has to name a day for itself: which day a pre-0.2 collector's flat total
+   * is filed under, which day recovered spend lands on, and whether a session
+   * started before today. A 0.2 collector's buckets carry their own days and
+   * this never touches them. It defaults to UTC so that a caller with no
+   * office in hand — every ledger unit test — gets exactly the day the
+   * production server was already cutting.
    */
-  ingest(memberIdValue: string, sessions: SessionSnapshot[], now: number): boolean {
-    const today = dayOf(now);
-    const startOfToday = new Date(now).setHours(0, 0, 0, 0);
+  ingest(
+    memberIdValue: string,
+    sessions: SessionSnapshot[],
+    now: number,
+    timeZone: string = DEFAULT_TIMEZONE,
+  ): boolean {
+    const today = dayIn(now, timeZone);
     let changed = false;
 
     // The server's coarse "something is working right now" mark is a fallback
     // for collectors too old to report bitmaps, and it files under the
-    // *server's* day at the server's minute-of-day, while a 0.2 collector
+    // *office's* day at the office's minute-of-day, while a 0.2 collector
     // files under its own local day at its own minute. Those two disagree for
-    // any member not on UTC, so they must never be mixed for one member.
+    // any member whose clock is not the office's, so they must never be mixed
+    // for one member.
     //
     // The gate is therefore "did this snapshot carry any bucketed data at
     // all", not "did it report minutes": a 0.2 collector whose sessions have
     // usage but no minutes yet would otherwise pick up a server-day mark. A
     // pure 0.1.1 snapshot has neither field, and everything about it — usage
-    // included — is already filed under the server's day, so it stays
-    // internally consistent. It cannot be made to *agree* with the collector's
+    // included — is already filed under the office's day, so it stays
+    // internally consistent, and now consistent with the day the board is
+    // actually serving. It cannot be made to *agree* with the collector's
     // clock, because the 0.1.1 wire carries no offset to agree with.
     //
     // A member sharing nothing (`tokens: false` strips both fields) lands in
@@ -489,7 +513,7 @@ export class TokenLedger {
 
     const tx = this.db.transaction(() => {
       for (const session of sessions) {
-        if (this.foldUsage(memberIdValue, session, today, startOfToday, now)) changed = true;
+        if (this.foldUsage(memberIdValue, session, today, timeZone, now)) changed = true;
         for (const report of session.activeMinutes ?? []) {
           if (this.mergeMinutes(memberIdValue, report.day, decodeMinutes(report.minutes))) {
             changed = true;
@@ -497,7 +521,11 @@ export class TokenLedger {
         }
       }
       if (!speaksBuckets && sessions.some((s) => s.state === 'working')) {
-        const minute = Math.floor((now - startOfToday) / 60_000);
+        // The wall-clock minute in the office's zone, not an offset from its
+        // midnight — the same number a 0.2 collector computes for itself, and
+        // the only one that stays inside 0-1439 on a day a DST transition made
+        // 23 or 25 hours long.
+        const minute = minuteOfDayIn(now, timeZone);
         if (this.markMinute(memberIdValue, today, minute)) changed = true;
       }
     });
@@ -510,7 +538,7 @@ export class TokenLedger {
     memberIdValue: string,
     session: SessionSnapshot,
     today: string,
-    startOfToday: number,
+    timeZone: string,
     now: number,
   ): boolean {
     const reported = session.usage;
@@ -531,7 +559,7 @@ export class TokenLedger {
 
     // Half of an invariant whose other half lives in the collector: the
     // collector drops a resumed request while the original's claim is under
-    // 24h old, and this guard absorbs everything older.
+    // 24h old (`CLAIM_RETENTION_MS`), and this guard absorbs everything older.
     //
     // `--resume` replays a transcript verbatim under a NEW session id, so the
     // server sees an unfamiliar session whose watermark is absent and would
@@ -543,15 +571,43 @@ export class TokenLedger {
     // original's first timestamp (see `claim` in the claude-code adapter), so
     // it is always old; a session that genuinely started minutes ago never is.
     //
-    // Also comparing the *bucket's* day against today looks like it would
-    // narrow this usefully, and it is unsafe in one direction. The server runs
-    // UTC (node:22-alpine, no TZ set anywhere; `primary_region` is geography,
-    // not a clock), days are cut on the collector's clock by design, and a
-    // collector east of UTC stamps work done in the server's evening with what
-    // is already tomorrow locally. A replay of that carries the server's own
-    // `today`, sails past `day < today`, and is banked a second time. Nothing
-    // on the wire carries the collector's offset, so the server cannot tell
-    // that date apart from a genuine one.
+    // ## What "today" is here, and what that costs the invariant
+    //
+    // The office's day, in the office's timezone — not the container's. The
+    // two halves meet like this: a session starting at T is banked rather than
+    // seeded until the office's next midnight, so the collector's claim has to
+    // outlive that gap. It used to be provable at a glance, because the server
+    // cut days on a clock that never moved: the gap was under 24h always, and
+    // `CLAIM_RETENTION_MS` is 24h.
+    //
+    // An office on a DST-observing zone breaks that proof on exactly one day a
+    // year. The autumn transition makes the local day 25 hours long (30
+    // minutes on Lord Howe), so the honest bound is now **the length of the
+    // office's longest local day**, not 24h. The exposure is a session that
+    // started inside the first hour of that day and is resumed more than 24h
+    // later while the office is still on the same date: the claim has retired,
+    // the guard has not engaged, and that request's tokens count twice. Fixed
+    // offsets — UTC, Asia/Kolkata, the default — keep the original 24h bound
+    // and are unaffected.
+    //
+    // Left standing rather than papered over: closing it means either raising
+    // `CLAIM_RETENTION_MS` past the longest day any office might keep, or
+    // widening this test to `startedAt < max(midnight, now - 24h)`, and
+    // neither is worth doing blind to which way the owner wants the coupling
+    // to run. It is written down here so the next person finds a stated bound
+    // rather than a proof that quietly stopped holding.
+    //
+    // ## Why the bucket's own day still is not consulted
+    //
+    // Comparing the *bucket's* day against today looks like it would narrow
+    // this usefully, and it is unsafe in one direction. Days are cut on the
+    // collector's clock by design, and a collector east of the office stamps
+    // work done in the office's evening with what is already tomorrow locally.
+    // A replay of that carries a date at or past the office's `today`, sails
+    // past `day < today`, and is banked a second time. Nothing on the wire
+    // carries the collector's offset, so the server cannot tell that date
+    // apart from a genuine one — and an office timezone does not help, because
+    // it says where the *office* is, not where each member is.
     //
     // The cost of leaving it out is real, and is the conservative direction: a
     // session that started before today and is first seen now has its
@@ -559,7 +615,12 @@ export class TokenLedger {
     // counts only from this moment on. That is what shipped before buckets
     // existed, and on a number people compete over, understating beats
     // overstating.
-    const startedEarlier = session.startedAt < startOfToday;
+    //
+    // Compared as day strings rather than against a midnight instant. It is
+    // the same question — did this start before the office's current date —
+    // and it needs no epoch-midnight arithmetic to ask, which is what keeps it
+    // right when the zone's offset changed between then and now.
+    const startedEarlier = dayIn(session.startedAt, timeZone) < today;
 
     // Changing how a session's spend is *attributed* is not new spend. The
     // flat path banks under `unknown`, the bucketed path under real model
@@ -624,9 +685,11 @@ export class TokenLedger {
       // after the flat total is summed — recovers nothing rather than inventing
       // a refund.
       //
-      // It is filed under `unknown` on the day it arrived, and that is the
-      // honest place for it: we know the amount and genuinely do not know the
-      // day or the model it belongs to. Spreading it across the reported
+      // It is filed under `unknown` on the office's day it arrived on, and
+      // that is the honest place for it: we know the amount and genuinely do
+      // not know the day or the model it belongs to — so it goes where the
+      // board is looking, which is the one place somebody will see it.
+      // Spreading it across the reported
       // buckets would be a guess dressed as data, and would price tokens we
       // cannot attribute. Under `unknown` the day's `estimatedCostUsd` goes
       // null, which is the correct answer.
@@ -856,15 +919,22 @@ export class TokenLedger {
     return fullBitmap(row?.minutes);
   }
 
-  todayFor(memberIdValue: string, now: number): DailyStats {
-    return this.dayFor(memberIdValue, dayOf(now));
+  /**
+   * One member's day, as the office currently reckons "today".
+   *
+   * `timeZone` is the office's; it defaults to UTC, which is the clock the
+   * production server was already cutting days on, so an office that has never
+   * set one reads exactly as it did before this parameter existed.
+   */
+  todayFor(memberIdValue: string, now: number, timeZone: string = DEFAULT_TIMEZONE): DailyStats {
+    return this.dayFor(memberIdValue, dayIn(now, timeZone));
   }
 
   /**
    * One member's one day, keyed by the day string the work was filed under.
    *
-   * `todayFor` is this with the server's own day supplied. Split out so that
-   * asking for a past day is the same read as asking for the present one,
+   * `todayFor` is this with the office's current day supplied. Split out so
+   * that asking for a past day is the same read as asking for the present one,
    * rather than a second implementation that could drift from it.
    */
   dayFor(memberIdValue: string, day: string): DailyStats {

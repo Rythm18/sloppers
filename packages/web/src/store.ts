@@ -58,18 +58,24 @@ const initialState = {
   historyPending: false,
   /**
    * The client-local day the answer landed on. Not a second definition of
-   * "today" — never compared against `history.days` — only against *itself
-   * later*: when this browser's date is no longer the one the answer arrived
-   * on, a night has passed and every cached label ("Yesterday") is off by
-   * one. A reconnect already clears the cache; this catches the connection
-   * that quietly outlives midnight.
+   * "today" — never compared against `history.days`, which are the office's
+   * days and may well be a different date — only against *itself later*: when
+   * this browser's date is no longer the one the answer arrived on, a night
+   * has passed and every cached label ("Yesterday") is worth re-asking about.
+   * A reconnect already clears the cache; this catches the connection that
+   * quietly outlives midnight. Deliberately the browser's own midnight and not
+   * the office's: it is a hint about how long this answer has been sitting
+   * here, and being an hour early or late about that costs one extra request.
    */
   historyFetchedDay: null as string | null,
   /**
    * Which day the board is showing: 0 today, 1 yesterday — an index into
    * `history.days`, not a date this browser worked out for itself. The days
-   * are cut on the server's clock, and a client doing its own arithmetic is
-   * exactly how a panel ends up with two definitions of today in it.
+   * are cut in the *office's* timezone, which this browser is not necessarily
+   * in and never needs to know: a client doing its own arithmetic is exactly
+   * how a panel ends up with two definitions of today in it. The one clock
+   * question the browser answers for itself is `historyFetchedDay`, which is a
+   * staleness hint and never a label.
    */
   boardDay: 0,
   joinError: null as string | null,

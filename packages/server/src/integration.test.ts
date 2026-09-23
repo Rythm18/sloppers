@@ -1,7 +1,9 @@
 import {
+  dayIn,
   dayOf,
   type KnockView,
   type PairRedeemResponse,
+  recentDays,
   type ServerToWeb,
   serverToWebSchema,
   type WebWorld,
@@ -103,7 +105,15 @@ describe('server integration', () => {
     client.send(
       officeCode
         ? { type: 'join', roomCode: officeCode, displayName: name }
-        : { type: 'join', createRoom: 'the lab', displayName: name },
+        : // The office is created the way a browser creates one, this machine's
+          // zone included — so the day the board serves is the day `dayOf` cuts
+          // here, and the assertions below can name one date for both.
+          {
+            type: 'join',
+            createRoom: 'the lab',
+            displayName: name,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          },
     );
     const world = (await client.next((m) => m.type === 'world')) as WebWorld;
     // Entering also carries the office's own state; swallow it here so a test
@@ -234,6 +244,76 @@ describe('server integration', () => {
       body: JSON.stringify({ deviceKey: 'f'.repeat(48) }),
     });
     expect(bogus.status).toBe(403);
+  });
+
+  /**
+   * An office with a clock of its own, opened the way a browser opens one.
+   * Its own client, because the shared `join` above funnels everybody into a
+   * single office and these cases need two side by side.
+   */
+  async function openOfficeIn(name: string, timezone: string): Promise<WebClientHarness> {
+    const client = new WebClientHarness(server.port);
+    clients.push(client);
+    await client.open();
+    client.send({ type: 'join', createRoom: name, displayName: 'ridham', timezone });
+    await client.next((m) => m.type === 'world');
+    return client;
+  }
+
+  /**
+   * Which day the office is in is the office's answer, and history is anchored
+   * on it — so two offices looking at the same wall clock hand back two
+   * different `days[0]`, each its own.
+   *
+   * Asserted against `dayIn` in each office's own zone rather than against a
+   * hardcoded date, because this runs at whatever time of day it runs at.
+   * There are five and a half hours every day when these two genuinely differ,
+   * and the point is that each is right about itself in all twenty-four.
+   */
+  it('anchors history on the office’s own timezone', async () => {
+    const kolkata = await openOfficeIn('the lab', 'Asia/Kolkata');
+    const utc = await openOfficeIn('the annex', 'UTC');
+
+    kolkata.send({ type: 'history', days: 2 });
+    const theirs = await kolkata.next((m) => m.type === 'history');
+    utc.send({ type: 'history', days: 2 });
+    const ours = await utc.next((m) => m.type === 'history');
+    if (theirs.type !== 'history' || ours.type !== 'history') throw new Error('unreachable');
+
+    const now = Date.now();
+    expect(theirs.days[0]).toBe(dayIn(now, 'Asia/Kolkata'));
+    expect(ours.days[0]).toBe(dayIn(now, 'UTC'));
+    // Whatever each anchor is, the day under it is the one before it.
+    expect(theirs.days[1]).toBe(recentDays(dayIn(now, 'Asia/Kolkata'), 2)[1]);
+  });
+
+  /**
+   * The owner's own choice, unlike the creator's browser hint, is refused
+   * outright when it is not a zone — the message never reaches the ledger,
+   * and the office's clock does not move.
+   */
+  it('refuses a settings op carrying a zone that is not one', async () => {
+    const { client: owner } = await join('ridham');
+    owner.send({
+      type: 'admin',
+      op: {
+        kind: 'settings',
+        settings: { joinMode: 'link', publicLeaderboard: false, timezone: 'Mars/Olympus' },
+      },
+    });
+    const refusal = await owner.next((m) => m.type === 'error');
+    expect(refusal.type === 'error' && refusal.code).toBe('bad-message');
+
+    // ...and the real one lands, on the same wire, a moment later.
+    owner.send({
+      type: 'admin',
+      op: {
+        kind: 'settings',
+        settings: { joinMode: 'link', publicLeaderboard: false, timezone: 'Asia/Kolkata' },
+      },
+    });
+    const state = await owner.next((m) => m.type === 'workspace');
+    expect(state.type === 'workspace' && state.settings.timezone).toBe('Asia/Kolkata');
   });
 
   it('movement relays to other members only', async () => {

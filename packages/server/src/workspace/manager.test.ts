@@ -436,14 +436,69 @@ describe('WorkspaceManager', () => {
   it('rename and settings write through to the live room', () => {
     const room = manager.createRoom('the lab');
     if (!room) throw new Error('room not created');
-    expect(room.settings).toEqual({ joinMode: 'link', publicLeaderboard: false });
+    expect(room.settings).toEqual({
+      joinMode: 'link',
+      publicLeaderboard: false,
+      timezone: 'UTC',
+    });
     manager.rename(room.id, 'the annex');
-    manager.setSettings(room.id, { joinMode: 'knock', publicLeaderboard: true });
+    manager.setSettings(room.id, {
+      joinMode: 'knock',
+      publicLeaderboard: true,
+      timezone: 'UTC',
+    });
     expect(room.name).toBe('the annex');
     expect(room.settings.joinMode).toBe('knock');
     // ...and survive a reload from the database.
     const reloaded = new WorkspaceManager(db).getRoom(room.code);
     expect(reloaded?.name).toBe('the annex');
     expect(reloaded?.settings.joinMode).toBe('knock');
+  });
+
+  /**
+   * The office's clock, set once at creation from the browser that opened it.
+   *
+   * Taken as a hint and not as a promise: the value is `Intl` output from
+   * whatever runtime the visitor happened to be on, nobody typed it, and
+   * turning somebody away from their first office over it would be a poor
+   * trade for a field they have never heard of. The settings op is where an
+   * owner chooses deliberately, and that one refuses instead.
+   */
+  describe('the office’s timezone', () => {
+    it('opens on the creator’s zone', () => {
+      const room = manager.createRoom('the lab', 'Asia/Kolkata');
+      expect(room?.settings.timezone).toBe('Asia/Kolkata');
+      // ...and it survives a reload, because it is in the stored blob.
+      expect(new WorkspaceManager(db).roomById(room?.id ?? '')?.settings.timezone).toBe(
+        'Asia/Kolkata',
+      );
+    });
+
+    it('falls back to UTC rather than refusing a zone it cannot use', () => {
+      expect(manager.createRoom('nowhere', 'Mars/Olympus')?.settings.timezone).toBe('UTC');
+      expect(manager.createRoom('nothing', '')?.settings.timezone).toBe('UTC');
+      expect(manager.createRoom('silence')?.settings.timezone).toBe('UTC');
+    });
+
+    it('takes an alias the zone list leaves out but Intl accepts', () => {
+      expect(manager.createRoom('the lab', 'Asia/Calcutta')?.settings.timezone).toBe(
+        'Asia/Calcutta',
+      );
+    });
+
+    it('re-reads the board when the owner moves the day boundary', () => {
+      const room = office();
+      const refreshed = vi.spyOn(room, 'refreshDayWindow');
+
+      // A settings change that leaves the clock alone changes no numbers.
+      manager.setSettings(room.id, { ...room.settings, joinMode: 'knock' });
+      expect(refreshed).not.toHaveBeenCalled();
+
+      // Moving it means every total on screen is now about a different 24
+      // hours, and the room has to say so rather than wait for a collector.
+      manager.setSettings(room.id, { ...room.settings, timezone: 'Asia/Kolkata' });
+      expect(refreshed).toHaveBeenCalledTimes(1);
+      expect(room.settings.timezone).toBe('Asia/Kolkata');
+    });
   });
 });

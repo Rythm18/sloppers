@@ -1320,6 +1320,13 @@ button {
   color: var(--wire);
 }
 
+/* The timezone picker. A native select, so four hundred zones scroll and
+   type-to-search the way the platform already does them. */
+.settings-select {
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
 .settings-note code {
   color: var(--crt);
   word-break: break-all;

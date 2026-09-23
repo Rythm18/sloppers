@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import {
   defaultWorkspaceSettings,
+  isKnownTimeZone,
   type MemberRole,
   type MemberStatus,
   parseSettings,
@@ -178,12 +179,22 @@ export class WorkspaceManager {
    * Mint a new office: slugified vanity name plus a random suffix. The full
    * code is the capability — invite links carry it, nothing else guards the
    * door. Returns null at the workspace cap.
+   *
+   * `timezone` is whatever the creator's browser said it was in. Taken as a
+   * hint rather than a promise: an unrecognized zone falls back to the default
+   * instead of refusing the join, because somebody opening their first office
+   * on an unusual runtime should get an office, not an error about a field
+   * they never filled in. The owner can set it deliberately in Settings, and
+   * *that* path refuses garbage outright.
    */
-  createRoom(vanityName: string): Room | null {
+  createRoom(vanityName: string, timezone?: string): Room | null {
     const count = this.db.prepare('SELECT COUNT(*) AS n FROM workspaces').get() as { n: number };
     if (count.n >= MAX_WORKSPACES) return null;
     const slug = slugify(vanityName);
-    const settings = JSON.stringify(defaultWorkspaceSettings);
+    const settings = JSON.stringify({
+      ...defaultWorkspaceSettings,
+      ...(timezone && isKnownTimeZone(timezone) ? { timezone } : {}),
+    });
     // Suffix collisions are ~one in a billion; retry regardless.
     for (let attempt = 0; attempt < 3; attempt++) {
       const id = workspaceId();
@@ -507,7 +518,14 @@ export class WorkspaceManager {
       .prepare('UPDATE workspaces SET settings = ? WHERE id = ?')
       .run(JSON.stringify(settings), workspace);
     const room = this.rooms.get(workspace);
-    if (room) room.settings = settings;
+    if (!room) return;
+    // Changing the timezone changes which 24 hours every number on the board
+    // is about. No rows move — the day keys are the days the work was done —
+    // but the room has to re-read and re-announce, or the office goes on
+    // showing the old window until something else happens to push.
+    const dayWindowMoved = room.settings.timezone !== settings.timezone;
+    room.settings = settings;
+    if (dayWindowMoved) room.refreshDayWindow();
   }
 
   /**

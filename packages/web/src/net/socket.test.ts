@@ -235,6 +235,27 @@ describe('OfficeSocket', () => {
   describe('what a reconnect asks the office for', () => {
     beforeEach(() => vi.useFakeTimers());
 
+    /**
+     * A new office opens on the clock of whoever opened it. The alternative —
+     * a fresh office defaulting to UTC and its owner discovering at five in
+     * the afternoon that the board has zeroed — is the bug this whole setting
+     * exists to end, and asking somebody to find their zone in a list of four
+     * hundred before they have seen the room is not a first screen.
+     *
+     * Only on the create path: every other way in reaches an office that
+     * already has one, and a visitor's browser has no business moving it.
+     */
+    it('opens a new office on the creator’s own clock', () => {
+      const created = start(CREATE);
+      expect(joinSentOn(created)).toMatchObject({
+        createRoom: 'test office',
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      });
+
+      const invited = start(INVITED);
+      expect(joinSentOn(invited)).not.toHaveProperty('timezone');
+    });
+
     it('resumes the office it created instead of opening a second one', () => {
       // The tab that created an office keeps a `create` intent. Replayed on a
       // reconnect, the server has no credentials to read, takes the create
