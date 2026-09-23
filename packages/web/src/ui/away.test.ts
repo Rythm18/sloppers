@@ -112,6 +112,27 @@ describe('what happened while you were away', () => {
   });
 
   /**
+   * The same rule, against a wire that carried the days anyway. Today's server
+   * never does, and the flag is what the board's own `isPrivate` reads — so a
+   * greeting that named and numbered somebody the board beside it refuses to
+   * rank would be the panel contradicting the room.
+   */
+  it('refuses a withholding member even when their days arrive filled in', () => {
+    const loud: MemberHistory = {
+      ...member('lodo', { '2026-09-24': 9_000_000 }),
+      tokensShared: false,
+    };
+    const report = awayReport(
+      history([member('me', {}), loud, member('nina', { '2026-09-24': 5 })]),
+      '2026-09-23',
+      'me',
+    );
+
+    expect(report?.top).toEqual({ displayName: 'nina', total: 5 });
+    expect(report?.office).toBe(5);
+  });
+
+  /**
    * Their own numbers are their own, and this is the shape that makes that a
    * non-question: a withholding member's collector never sent them, so the
    * office has nothing of theirs to hand back and their own line simply is not

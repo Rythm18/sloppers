@@ -39,17 +39,21 @@ export interface AwayReport {
 }
 
 /**
- * Sum one member's history entry across a set of days.
+ * One member's burn across a set of days, or zero for somebody who keeps their
+ * numbers to themselves.
  *
- * A member who withholds arrives with `days: []` — the office refuses to read
- * their stored days at all once their collector says token sharing is off — so
- * this returns zero for them without any special case, and they can neither
- * lead the office nor be counted into its total. That is the withheld rule
- * holding at the only place it can hold: the wire never carried the numbers.
+ * The office already refuses to read a withholding member's stored days —
+ * `days` arrives empty and `tokensShared` says why — so the flag is the second
+ * of two locks on the same door. It is here anyway, because it is the lock this
+ * file owns: the board's `isPrivate` makes the same check on the same field and
+ * declines to rank them, and a greeting that would name and number somebody the
+ * board beside it will not is the panel contradicting the room. It also means
+ * the rule survives a wire that one day carries both.
  */
-function burnAcross(days: MemberHistory['days'], window: ReadonlySet<string>): number {
+function burnAcross(member: MemberHistory, window: ReadonlySet<string>): number {
+  if (member.tokensShared === false) return 0;
   let total = 0;
-  for (const entry of days) {
+  for (const entry of member.days) {
     if (window.has(entry.day)) total += processedTokens(entry.stats.tokens);
   }
   return total;
@@ -81,7 +85,7 @@ export function awayReport(
   let movers = 0;
   let top: Mover | null = null;
   for (const member of history.members) {
-    const total = burnAcross(member.days, window);
+    const total = burnAcross(member, window);
     office += total;
     if (member.memberId === you) {
       mine = total;

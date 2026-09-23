@@ -67,22 +67,18 @@ function history(
   };
 }
 
-/**
- * Arrive in an office, optionally as somebody the server judged to be coming
- * back. `sharing` is what decides whether the empty-avatar nudge is in play.
- */
-function arrive({
-  lastHereDay,
-  members = ['me'],
-  sharing = true,
-}: {
+interface Arrival {
   lastHereDay?: string;
   members?: string[];
   sharing?: boolean;
-} = {}): void {
-  useStore.getState().reset();
-  localStorage.clear();
-  apply({
+}
+
+/**
+ * The `world` message one arrival produces — a reconnect's, which is the same
+ * message and carries no `lastHereDay` unless the office says otherwise.
+ */
+function world({ lastHereDay, members = ['me'], sharing = true }: Arrival): ServerToWeb {
+  return {
     type: 'world',
     you: { memberId: 'me' },
     roomCode: 'the-lab-k4xp2q',
@@ -90,7 +86,18 @@ function arrive({
     members: members.map((id) => member(id, id === 'me' ? sharing : true)),
     leaderboard: [],
     ...(lastHereDay ? { lastHereDay } : {}),
-  });
+  };
+}
+
+/**
+ * Arrive in a fresh browser, optionally as somebody the server judged to be
+ * coming back. `sharing` is what decides whether the empty-avatar nudge is in
+ * play.
+ */
+function arrive(arrival: Arrival = {}): void {
+  useStore.getState().reset();
+  localStorage.clear();
+  apply(world(arrival));
 }
 
 describe('the arrival greeting', () => {
@@ -201,10 +208,14 @@ describe('the arrival greeting', () => {
     const { rerender } = render(<Greeting />);
     expect(screen.getByText(/While you were away/)).toBeTruthy();
 
-    arrive();
+    // The socket drops and comes back. Nothing is reset here on purpose: this
+    // is the same store, the same tab, and the only thing that has changed is
+    // that a second `world` arrived without the field on it.
+    apply(world({}));
     apply(history([{ id: 'me', perDay: { '2026-09-24': 1_000 } }]));
     rerender(<Greeting />);
 
+    expect(useStore.getState().lastHereDay).toBeNull();
     expect(screen.queryByText(/While you were away/)).toBeNull();
   });
 
