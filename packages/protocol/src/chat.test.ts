@@ -52,6 +52,18 @@ describe('normalizeChatText', () => {
     expect(normalizeChatText(`${ISOLATE_START}isolated${ISOLATE_END}`)).toBe('isolated');
   });
 
+  it('takes out the quieter ones too, which only look harmless', () => {
+    // The implicit marks reorder the neutral characters beside them rather
+    // than a whole run, so they read as a weaker version of an override — but
+    // punctuation walking to the other end of a line is the same surprise,
+    // and none of these is visible enough to notice in a text box. U+FFF9 is
+    // an unpaired annotation delimiter and soft hyphen breaks a word wherever
+    // it is dropped.
+    for (const invisible of ['‎', '‏', '؜', '­', '￹']) {
+      expect(normalizeChatText(`a${invisible}b`)).toBe('a b');
+    }
+  });
+
   it('leaves an emoji whole', () => {
     // Stripping every invisible would be the tidier rule and would take a
     // family apart into three separate people. This is a chat between friends.

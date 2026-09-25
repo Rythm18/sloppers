@@ -1,5 +1,5 @@
 import type { ChatMessage } from '@sloppers/protocol';
-import { CHAT_KEPT, MAX_CHAT_LENGTH, normalizeChatText } from '@sloppers/protocol';
+import { CHAT_BACKLOG, MAX_CHAT_LENGTH, normalizeChatText } from '@sloppers/protocol';
 import { useEffect, useRef, useState } from 'react';
 import { sendAdmin, sendChat } from '../net/socket.js';
 import { useStore } from '../store.js';
@@ -128,9 +128,14 @@ export function Chat() {
         onScroll={rememberScroll}
       >
         {messages.length === 0 ? (
+          // What somebody can actually read, not what the table holds: the
+          // office keeps CHAT_KEPT lines, but arriving hands you CHAT_BACKLOG
+          // and there is nothing to scroll further back with. Quoting the
+          // larger number promises a history the panel cannot show.
           <p className="chat-empty">
-            Nobody has said anything yet. The office keeps the last {CHAT_KEPT} lines — long enough
-            that something said at midnight is still here in the morning.
+            Nobody has said anything yet. Whatever is said here stays for a month, and walking back
+            in shows you the last {CHAT_BACKLOG} lines — long enough that something said at midnight
+            is still here in the morning.
           </p>
         ) : (
           messages.map((message, i) => {

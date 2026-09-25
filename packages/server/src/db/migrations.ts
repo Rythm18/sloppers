@@ -361,11 +361,13 @@ export const migrations: Migration[] = [
       // `members`: see `chatMessageSchema` for why a line keeps the name it
       // was said under.
       //
-      // Both foreign keys are load-bearing. `member_id` is what makes
-      // `deleteMember` take somebody's messages with them — the erase list in
-      // the manager names this table, and the constraint is what would catch
-      // it being dropped from that list. `workspace_id` is what keeps a
-      // message from outliving the office it was said in.
+      // Both foreign keys stop a message outliving what it belongs to: a
+      // member's words go when the member does, and an office's go with the
+      // office. What the `member_id` constraint does *not* do is police the
+      // erase list in the manager — `admin.ts` evicts somebody from the live
+      // room before the delete runs, so a constraint firing there arrives
+      // after their sockets are shut and leaves the room and the row
+      // disagreeing. The test that names this table is the actual guard.
       db.exec(`
         CREATE TABLE chat_messages (
           id TEXT PRIMARY KEY,

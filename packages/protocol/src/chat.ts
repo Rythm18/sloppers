@@ -56,7 +56,16 @@ export const CHAT_BACKLOG = 50;
  * is a chat between friends; emoji are most of what it is for.
  */
 const CONTROLS = /\p{Cc}/gu;
-const BIDI = /[\u202a-\u202e\u2066-\u2069]/g;
+/**
+ * The embeds, overrides and isolates, plus the three implicit marks (LRM, RLM,
+ * ALM) and the interlinear annotation characters. The marks are weaker than an
+ * override \u2014 they reorder neighbouring neutral characters rather than a whole
+ * run \u2014 but "weaker" is not "nothing", and a line whose punctuation walks to
+ * the other end is the same class of surprise. U+FFF9\u2013FFFB are unpaired
+ * annotation delimiters, which have no business in a sentence. Soft hyphen
+ * goes too: invisible, and it splits a word wherever it is dropped.
+ */
+const BIDI = /[\u00ad\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ufff9-\ufffb]/g;
 
 /**
  * One line, as the office will keep it.

@@ -47,8 +47,12 @@ const STALE_MEMBER_MS = 7 * 24 * 60 * 60 * 1000;
  * "Delete me" has to mean the office stops holding their sentences, or it does
  * not mean much; a member row removed while their words stay on the wall is
  * the thin version of the promise. It is also the one table here with a
- * foreign key back to `members`, so dropping it from this list does not
- * silently strand rows — it fails the delete outright.
+ * foreign key back to `members`, which makes dropping it from this list loud
+ * rather than silent — but loud in the wrong place: `admin.ts` evicts the
+ * member from the live room *before* calling this, so the constraint fires
+ * after their sockets are already shut and leaves the room and the row
+ * disagreeing. The test is the guard here; the foreign key is only the noise
+ * that would send somebody looking for it.
  */
 const MEMBER_OWNED_TABLES = [
   'chat_messages',
