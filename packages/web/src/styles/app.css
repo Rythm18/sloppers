@@ -702,6 +702,13 @@ button {
   overflow-y: auto;
 }
 
+/* With chat open below it, the board takes its half of the column and no
+   more — see `--column-share`. With chat shut it keeps the whole cap above,
+   because there is nothing under it to run into. */
+.app:has(.chat) .leaderboard-rows {
+  max-height: min(44dvh, var(--column-share));
+}
+
 .lb-sort {
   display: inline-flex;
   border: 1px solid var(--panel-line);
@@ -888,6 +895,29 @@ button {
   z-index: 8;
 }
 
+/*
+ * How much room one of the two may take, once the other's furniture is paid
+ * for.
+ *
+ * The board and chat share the right-hand column — board pinned to the top of
+ * it, chat to the bottom — and each has a part that grows with its contents:
+ * the rows, and the log. Capping those as a fraction of the viewport alone is
+ * what lets a sixty-person office on an eight-hundred-pixel window draw a
+ * board that ends below where chat begins, with the later element simply
+ * painting over the earlier one.
+ *
+ * The three hundred is everything in the column that is a fixed height: two
+ * panel headers, the day switch, the compose box, and the gaps at the top and
+ * the bottom. What is left is split in two, and each panel takes the smaller
+ * of its own comfortable cap and its half — so on a tall screen nothing
+ * changes at all, and on a short one they give way together rather than one of
+ * them disappearing under the other.
+ */
+.chat,
+.leaderboard {
+  --column-share: max(64px, calc((100dvh - 300px) / 2));
+}
+
 .chat-head {
   display: flex;
   justify-content: space-between;
@@ -914,11 +944,11 @@ button {
   align-content: start;
   gap: 2px;
   padding: 8px 0;
-  /* Deliberately short. This sits under a board that may be open above it, and
-     a chat that grows until the two meet is a chat that hides the scores it is
-     about. `dvh` for the reason the whole file uses it: `vh` on iOS is the
-     viewport with the address bar hidden, which it usually is not. */
-  max-height: 30dvh;
+  /* Deliberately short: this sits under a board that may be open above it.
+     `dvh` for the reason the whole file uses it — `vh` on iOS is the viewport
+     with the address bar hidden, which it usually is not — and the share for
+     the reason above it. */
+  max-height: min(30dvh, var(--column-share));
   overflow-y: auto;
   overflow-wrap: anywhere;
 }
@@ -1942,9 +1972,10 @@ button {
   }
 
   /* Roughly a third of the screen, so the office is still visible behind the
-     conversation — the whole reason this is a sheet and not a page. With the
-     keyboard up the browser shrinks the viewport `dvh` measures, and this
-     shrinks with it. */
+     conversation — the whole reason this is a sheet and not a page. No share
+     to pay here: a sheet is alone on the bottom edge by the rule above, so
+     there is nothing above it to run into. With the keyboard up the browser
+     shrinks the viewport `dvh` measures, and this shrinks with it. */
   .chat-log {
     max-height: 34dvh;
   }
@@ -1992,9 +2023,10 @@ button {
 
   /* Sideways, there is barely room for a board and a conversation in one
      column. The log gives back most of its height rather than the panel going
-     away — the compose box is the part that has to survive. */
+     away — the compose box is the part that has to survive, and the share is
+     what keeps the board off it. */
   .chat-log {
-    max-height: 22dvh;
+    max-height: min(22dvh, var(--column-share));
   }
 
   .leaderboard-rows {
