@@ -1928,7 +1928,15 @@ describe('server integration', () => {
       expect(stored().map((r) => r.body)).toEqual(['actually here']);
     });
 
-    /** And somebody still waiting at the door is not in the conversation. */
+    /**
+     * And somebody still waiting at the door is not in the conversation —
+     * being let in is the whole thing they are standing there for.
+     *
+     * The owner's own line is the marker rather than a filter, because a leak
+     * that broadcast without writing would slip past a check on the table
+     * alone. The knocker's message is sent strictly first, so if anything at
+     * all got through, it is what arrives here.
+     */
     it('hears nothing from a socket knocking at the door', async () => {
       const { client: owner, world } = await join('ridham');
       await setJoinMode(owner, 'knock');
@@ -1937,7 +1945,9 @@ describe('server integration', () => {
       expect((await knocker.next((m) => m.type === 'knocking')).type).toBe('knocking');
       knocker.send({ type: 'chat', text: 'let me in' });
 
-      await say(owner, 'nobody home');
+      owner.send({ type: 'chat', text: 'nobody home' });
+      const first = await owner.next((m) => m.type === 'chat');
+      expect(first.type === 'chat' && first.message.text).toBe('nobody home');
       expect(stored().map((r) => r.body)).toEqual(['nobody home']);
     });
 
