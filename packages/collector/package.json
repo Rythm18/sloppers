@@ -21,7 +21,7 @@
     "build": "node scripts/build.mjs && tsc -p tsconfig.json --emitDeclarationOnly",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "pnpm --filter @sloppers/protocol build && pnpm build"
   },
   "dependencies": {
     "chokidar": "^4.0.3",
