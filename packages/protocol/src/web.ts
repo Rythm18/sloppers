@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CHAT_BACKLOG, chatMessageSchema, chatTextSchema } from './chat.js';
 import {
   avatarIdSchema,
   dailyStatsSchema,
@@ -102,12 +103,33 @@ export const webHistorySchema = z.object({
 });
 export type WebHistoryRequest = z.infer<typeof webHistorySchema>;
 
+/**
+ * Something one person wants to say to the room.
+ *
+ * The first message on this wire a human composes. Everything else a browser
+ * sends is either plumbing (`move`, `activity`) or a click on a control the
+ * office drew (`admin`, `history`) — refuse one of those and the worst case is
+ * a button that does nothing. Refuse this one and somebody's sentence is gone,
+ * which is why it is the only client message whose refusal has a code of its
+ * own; see `webErrorSchema`.
+ *
+ * Carries no timestamp and no id. Both are the office's to mint: a client
+ * clock decides where a line sorts, and a client id decides what a moderator's
+ * delete addresses.
+ */
+export const webChatSchema = z.object({
+  type: z.literal('chat'),
+  text: chatTextSchema,
+});
+export type WebChat = z.infer<typeof webChatSchema>;
+
 export const webToServerSchema = z.discriminatedUnion('type', [
   webJoinSchema,
   webMoveSchema,
   webActivitySchema,
   webAdminSchema,
   webHistorySchema,
+  webChatSchema,
 ]);
 export type WebToServer = z.infer<typeof webToServerSchema>;
 
@@ -192,6 +214,16 @@ export const webLeaderboardSchema = z.object({
 
 export const webErrorSchema = z.object({
   type: z.literal('error'),
+  /**
+   * `chat-refused` is the one code here that names *where the answer goes*
+   * rather than what went wrong, and it exists because the browser cannot work
+   * that out for itself. Every other error arriving inside an open office is
+   * the office saying no to a control somebody clicked, and the client puts it
+   * beside that control. A refused chat message is not that: the person is
+   * looking at a text box, and their sentence did not land. Without a code of
+   * its own the refusal goes to the panel holding the admin controls — which
+   * may well be shut — and the chat box sits there looking like it worked.
+   */
   code: z.enum([
     'bad-join',
     'room-not-found',
@@ -201,6 +233,7 @@ export const webErrorSchema = z.object({
     'forbidden',
     'workspace-locked',
     'knock-pending',
+    'chat-refused',
   ]),
   message: z.string(),
 });
@@ -313,6 +346,53 @@ export const webHistoryResultSchema = z.object({
 });
 export type WebHistoryResult = z.infer<typeof webHistoryResultSchema>;
 
+/** One line somebody just said, to everybody in the office including them. */
+export const webChatMessageSchema = z.object({
+  type: z.literal('chat'),
+  message: chatMessageSchema,
+});
+export type WebChatMessage = z.infer<typeof webChatMessageSchema>;
+
+/**
+ * The conversation as it stands, to one browser that has just walked in.
+ *
+ * The last N, always — not "the N since you were last here", which reads well
+ * until somebody reloads the tab and the panel they were reading goes blank.
+ * A reload and a week away are the same event to a WebSocket, and only one of
+ * them wants an empty room.
+ *
+ * `unreadSince` is what separates them: the moment this member's browser was
+ * last actually in the office (the same clock the "while you were away"
+ * greeting is measured on), present only when at least one line in `messages`
+ * landed after it. It is the office's number and never the browser's — what
+ * counts as "here" is server-side knowledge, and a client that guessed would
+ * mark a page refresh as an absence.
+ *
+ * Sent on the arriving socket alone rather than to every tab this member has
+ * open: it is an answer about *this* arrival, and pushing it to a tab that has
+ * been sitting here all afternoon would reset a conversation somebody is in
+ * the middle of reading.
+ */
+export const webChatLogSchema = z.object({
+  type: z.literal('chat-log'),
+  /** Oldest first, so a panel appends downward without reversing anything. */
+  messages: z.array(chatMessageSchema).max(CHAT_BACKLOG),
+  unreadSince: z.number().int().positive().optional(),
+});
+export type WebChatLog = z.infer<typeof webChatLogSchema>;
+
+/**
+ * A line is gone — its author took it back, or somebody who can moderate did.
+ *
+ * The id alone, not the log again: the rest of the conversation did not
+ * change, and re-sending it would scroll everybody who is reading.
+ */
+export const webChatRemovedSchema = z.object({
+  type: z.literal('chat-removed'),
+  id: z.string().min(1).max(64),
+});
+export type WebChatRemoved = z.infer<typeof webChatRemovedSchema>;
+
 export const serverToWebSchema = z.discriminatedUnion('type', [
   webWorldSchema,
   webMemberUpsertSchema,
@@ -328,5 +408,8 @@ export const serverToWebSchema = z.discriminatedUnion('type', [
   webRemovedSchema,
   webDeviceLinkSchema,
   webHistoryResultSchema,
+  webChatMessageSchema,
+  webChatLogSchema,
+  webChatRemovedSchema,
 ]);
 export type ServerToWeb = z.infer<typeof serverToWebSchema>;

@@ -86,6 +86,14 @@ export const adminOpSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('knock-deny'), knockId: z.string().min(1) }),
   z.object({ kind: z.literal('link-device') }),
   z.object({ kind: z.literal('roster') }),
+  /**
+   * Take one line of the conversation down. Not only a moderator's verb: its
+   * author may use it too, and in a friends' office that is the common case —
+   * somebody pastes a key into chat and wants it gone before they want a
+   * moderator. Who may do which is `handleAdminOp`'s to decide, through the
+   * same permission choke point as everything else here.
+   */
+  z.object({ kind: z.literal('chat-delete'), messageId: z.string().min(1).max(64) }),
 ]);
 export type AdminOp = z.infer<typeof adminOpSchema>;
 

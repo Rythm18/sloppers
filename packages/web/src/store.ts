@@ -1,4 +1,5 @@
 import type {
+  ChatMessage,
   KnockView,
   LeaderboardRow,
   MemberRole,
@@ -11,7 +12,7 @@ import type {
   WebRemoved,
   WorkspaceSettings,
 } from '@sloppers/protocol';
-import { dayOf } from '@sloppers/protocol';
+import { CHAT_KEPT, dayOf } from '@sloppers/protocol';
 import { create } from 'zustand';
 import { routeServerMessage } from './game/bridge.js';
 import { isStackedLayout } from './ui/viewport.js';
@@ -106,6 +107,50 @@ const initialState = {
    */
   doorAnswerable: null as boolean | null,
   settingsOpen: false,
+  /** The conversation, oldest first — the office's `chat-log` and what follows it. */
+  chat: [] as ChatMessage[],
+  /**
+   * Open where the panel sits beside the office, shut where it would arrive as
+   * a sheet across the room. The board's own reasoning, word for word (see
+   * `leaderboardOpen`), and for a stronger reason: this panel carries a text
+   * field, so on a phone it brings a keyboard with it. The first thing an
+   * invited friend should meet is the room, not a keyboard over it — and the
+   * Chat button is right there, wearing the dot when somebody has spoken.
+   */
+  chatOpen: !isStackedLayout(),
+  /**
+   * How many lines have arrived that this browser has not put on screen. Only
+   * ever counts up while the panel is shut, and only for other people's
+   * messages — your own coming back is the office confirming it landed.
+   *
+   * Rendered as a dot rather than a number, so it does not matter that a
+   * message deleted while unread leaves this one too high. The count is kept
+   * anyway because the button has to *say* something to a screen reader, and
+   * "chat, 3 new" is that sentence.
+   */
+  chatUnread: 0,
+  /**
+   * The moment the first unseen line landed, so the panel can draw a rule
+   * where somebody stopped reading. The office's number — see the wire's
+   * `unreadSince` — and null on every arrival that missed nothing, which is
+   * most of them.
+   *
+   * Cleared by saying something rather than by opening the panel: on a laptop
+   * the panel is already open when this arrives, so clearing it on open would
+   * mean nobody with a wide screen ever saw the mark. Answering is the moment
+   * somebody is demonstrably caught up.
+   */
+  chatUnreadSince: null as number | null,
+  /**
+   * The office refusing something somebody typed — a flood, or a line with
+   * nothing in it once the office had flattened it.
+   *
+   * Its own field rather than `adminError`, and the reason is the shape of the
+   * two: an admin refusal answers a click on a control that is on screen, and
+   * a chat refusal answers a sentence in a text box. Routed apart on the wire
+   * too (`chat-refused`), because a browser cannot tell which it is holding.
+   */
+  chatError: null as string | null,
   /**
    * The office's answer to something somebody just did in here — "they
    * outrank you", "that knock is gone", "only the owner renames the office".
@@ -136,6 +181,11 @@ interface SloppersStore extends State {
   dismissGreeting(): void;
   setJoinError(error: string | null): void;
   setSettingsOpen(open: boolean): void;
+  /** Show or hide the conversation. Opening it is what marks it read. */
+  setChatOpen(open: boolean): void;
+  /** Somebody answered: drop the "new since you left" rule and any refusal. */
+  chatCaughtUp(): void;
+  setChatError(message: string | null): void;
   setAdminError(message: string | null): void;
   setDeviceLink(link: DeviceLink | null): void;
   applyServer(msg: ServerToWeb): void;
@@ -180,6 +230,9 @@ export const useStore = create<SloppersStore>((set) => ({
   dismissGreeting: () => set({ lastHereDay: null }),
   setJoinError: (joinError) => set({ joinError }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setChatOpen: (chatOpen) => set(chatOpen ? { chatOpen, chatUnread: 0 } : { chatOpen }),
+  chatCaughtUp: () => set({ chatUnreadSince: null, chatError: null }),
+  setChatError: (chatError) => set({ chatError }),
   setAdminError: (adminError) => set({ adminError }),
   setDeviceLink: (deviceLink) => set({ deviceLink }),
 
@@ -221,6 +274,16 @@ export const useStore = create<SloppersStore>((set) => ({
           // in — and that absence of a field has to *clear* the greeting, or a
           // dropped socket would re-open a panel somebody already read.
           lastHereDay: msg.lastHereDay ?? null,
+          // Emptied, not carried across: a `chat-log` is on its way behind
+          // this message and is the office's own account of what was said.
+          // Keeping the old lines until it lands would show a conversation
+          // that may have been trimmed, deleted from, or aged out while this
+          // browser was away. `chatOpen` is deliberately not reset — a
+          // reconnect must not close a panel somebody is reading.
+          chat: [],
+          chatUnread: 0,
+          chatUnreadSince: null,
+          chatError: null,
         });
         break;
       }
@@ -273,6 +336,39 @@ export const useStore = create<SloppersStore>((set) => ({
       case 'history':
         set({ history: msg, historyPending: false, historyFetchedDay: dayOf(Date.now()) });
         break;
+      case 'chat-log':
+        // The office's account of the conversation, replacing whatever was
+        // held. Whether any of it is unread is the office's judgement too —
+        // it knows when a browser of this member's was last actually here, and
+        // this browser does not.
+        set((s) => ({
+          chat: msg.messages,
+          chatUnreadSince: msg.unreadSince ?? null,
+          // A panel that is already open is a panel being read, so there is
+          // nothing to announce on the button behind it.
+          chatUnread:
+            s.chatOpen || msg.unreadSince === undefined
+              ? 0
+              : msg.messages.filter((m) => m.at >= (msg.unreadSince ?? 0) && m.memberId !== s.you)
+                  .length,
+        }));
+        break;
+      case 'chat':
+        set((s) => {
+          // Capped at what the office itself keeps, so a tab left open for a
+          // week holds exactly the scrollback the office would hand back on
+          // the next visit — and cannot grow without bound either way.
+          const chat = [...s.chat, msg.message].slice(-CHAT_KEPT);
+          const mine = msg.message.memberId === s.you;
+          return {
+            chat,
+            chatUnread: s.chatOpen || mine ? s.chatUnread : s.chatUnread + 1,
+          };
+        });
+        break;
+      case 'chat-removed':
+        set((s) => ({ chat: s.chat.filter((m) => m.id !== msg.id) }));
+        break;
       case 'knocking':
         // Waiting on an owner/moderator decision at a knock-mode door. Sent
         // again, unprompted, whenever the office gains or loses everyone who
@@ -313,6 +409,13 @@ export const useStore = create<SloppersStore>((set) => ({
         break;
       case 'error':
         set((s) => {
+          // The one refusal on this wire that says where it belongs. Ahead of
+          // everything below because it is the exception to all of it: it is
+          // neither a door refusing a join nor the office refusing a click,
+          // and it deliberately does *not* release `historyPending` — the
+          // blanket release below exists because the wire cannot say which
+          // answerable message an error is about, and this one can.
+          if (msg.code === 'chat-refused') return { chatError: msg.message };
           // Inside the office, on an open connection, this browser sends
           // moves, presence, admin ops and history requests — and the first two
           // are never answered. So an error arriving here is the office

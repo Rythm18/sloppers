@@ -171,6 +171,11 @@ export class OfficeSocket {
     this.send(days === undefined ? { type: 'history' } : { type: 'history', days });
   }
 
+  /** Say something to the room. Comes back as a broadcast, this socket included. */
+  sendChat(text: string): void {
+    this.send({ type: 'chat', text });
+  }
+
   private connect(): void {
     if (this.closed) return;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -422,6 +427,19 @@ export async function mintPairingCode(roomCode: string): Promise<MintResult> {
  */
 export function sendAdmin(op: AdminOp): void {
   activeSocket?.sendAdmin(op);
+}
+
+/**
+ * Say something to the room, if there is a room to say it to.
+ *
+ * Nothing is echoed locally first. The office's broadcast comes back to the
+ * socket that sent it, carrying the id and the moment it minted, and that is
+ * the line the panel draws — so a message on screen is a message the office
+ * has, rather than one this tab is hoping about. A no-op while disconnected,
+ * which is the case the reconnect banner is already describing.
+ */
+export function sendChat(text: string): void {
+  activeSocket?.sendChat(text);
 }
 
 /**

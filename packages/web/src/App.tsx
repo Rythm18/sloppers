@@ -11,6 +11,7 @@ import {
 } from './net/socket.js';
 import { useStore } from './store.js';
 import { BubbleLayer } from './ui/BubbleLayer.js';
+import { Chat } from './ui/Chat.js';
 import { DeviceLinkModal } from './ui/DeviceLinkModal.js';
 import { HUD } from './ui/HUD.js';
 import { JoinScreen } from './ui/JoinScreen.js';
@@ -208,6 +209,10 @@ export function App() {
       <BubbleLayer />
       <HUD />
       <Leaderboard />
+      {/* After the board and before the card, which is the order they stack in
+          on a narrow screen: each one comes off the bottom edge, and the
+          stylesheet lets the more specific request win. */}
+      <Chat />
       <MemberCard />
       <ShareModal />
       {/* One at a time. Both are modal and both trap Tab, and two traps on

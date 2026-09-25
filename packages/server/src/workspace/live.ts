@@ -1,4 +1,6 @@
 import {
+  CHAT_BACKLOG,
+  type ChatMessage,
   type CollectorSnapshot,
   type DailyStats,
   type LeaderboardRow,
@@ -25,6 +27,7 @@ import { relinkToken } from '../ids.js';
 // day the live board is serving.
 import { TokenLedger } from '../ledger.js';
 import { derivePresence } from '../presence.js';
+import { appendChat, chatAuthor, recentChat, removeChat } from './chat.js';
 import { type Knock, KnockRegistry, knockIsLive } from './knocks.js';
 import type { MemberRecord, WorkspaceManager } from './manager.js';
 
@@ -581,6 +584,64 @@ export class Room {
             },
       ),
     };
+  }
+
+  /**
+   * Somebody said something. Written first, then broadcast — in that order,
+   * because a line everybody read and the office did not keep is worse than a
+   * line the office kept and nobody saw: the second is fixed by a reload.
+   *
+   * Goes to the author's own browsers too, unlike a position update. The
+   * message coming back is how a person learns their sentence actually landed,
+   * and it is what keeps a second tab of theirs in step without either tab
+   * having to guess at an id or a timestamp the office has not minted yet.
+   *
+   * False for somebody the room does not have, which is not a case a live
+   * socket can reach — `ws.ts` refuses a chat from anything that is not a
+   * member — but is what a kick landing between the parse and this line would
+   * look like.
+   */
+  say(memberId: string, text: string, now: number): boolean {
+    const runtime = this.members.get(memberId);
+    if (!runtime) return false;
+    const message = appendChat(this.db, this.id, runtime, text, now);
+    this.broadcast({ type: 'chat', message });
+    return true;
+  }
+
+  /**
+   * The conversation as it stands, for one browser walking in.
+   *
+   * `lastPresentAt` is read by the caller *before* this member is registered
+   * as present, for the same reason the greeting reads it there: this is the
+   * value the absence is measured from, and registering ends the absence.
+   *
+   * The mark is the first message that landed after it, so a browser can draw
+   * a line where somebody stopped reading. It can run up to a minute early —
+   * `last_present_at` is stamped on arrival, on departure, and once a minute
+   * in between — which means a person who was here when a message arrived and
+   * then crashed may see one of their own last minute's lines under the mark.
+   * Erring towards showing a line twice rather than hiding one is the whole of
+   * that trade.
+   */
+  chatLog(lastPresentAt: number): ServerToWeb {
+    const messages = recentChat(this.db, this.id, CHAT_BACKLOG);
+    const first = messages.find((message) => message.at > lastPresentAt);
+    return { type: 'chat-log', messages, ...(first ? { unreadSince: first.at } : {}) };
+  }
+
+  /** Who said this, for the permission check that decides whether it may go. */
+  chatAuthorOf(messageId: string): ChatMessage['memberId'] | null {
+    const found = chatAuthor(this.db, messageId);
+    // Scoped to this office, so holding an id from one room can never reach
+    // into another — the same check every admin op makes against `workspaceId`.
+    return found && found.workspaceId === this.id ? found.memberId : null;
+  }
+
+  /** Take one line out of the conversation, everywhere. */
+  forgetChat(messageId: string): void {
+    removeChat(this.db, messageId);
+    this.broadcast({ type: 'chat-removed', id: messageId });
   }
 
   /** Recompute time-driven presence (timeouts, idle drift) for everyone. */

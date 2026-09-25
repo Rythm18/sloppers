@@ -205,6 +205,33 @@ export function handleAdminOp(ctx: AdminContext, op: AdminOp): AdminResult {
       return { ok: true };
     }
 
+    case 'chat-delete': {
+      const author = room.chatAuthorOf(op.messageId);
+      // Already gone, or never in this office. One sentence for both, because
+      // the alternative tells anybody holding an id whether it names something
+      // in a room they are not in.
+      if (!author) return notFound('that message is already gone');
+      if (author !== actor.id) {
+        if (!can(actor.role, 'chat.delete')) {
+          return forbidden('only moderators can take somebody else’s message down');
+        }
+        // Their row outlives them leaving the room, and it has to be consulted
+        // rather than assumed: the same rank rule that stops a moderator
+        // kicking a peer stops them editing one out of the conversation. A
+        // member whose row is gone has no messages left to find — deleting
+        // them took these with it — so `author` would not have resolved.
+        const who = manager.memberById(author, { includeRemoved: true });
+        if (who && !canActOn(actor.role, who.role)) return forbidden('they outrank you');
+      }
+      room.forgetChat(op.messageId);
+      // Worth a row for the same reason a kick is: taking something out of a
+      // shared conversation is the kind of thing friends argue about later.
+      // The target is the author, not the message — the message is gone, and
+      // an id nothing can resolve answers no question anybody will ask.
+      manager.logEvent(room.id, actor.id, 'chat.delete', author);
+      return { ok: true };
+    }
+
     case 'link-device': {
       // Any member may link their own devices — but the link is a credential
       // that signs a browser in as them, so the office keeps a record of it.

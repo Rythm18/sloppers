@@ -2,6 +2,7 @@ import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import {
   collectorToServerSchema,
+  normalizeChatText,
   type ServerToCollector,
   type ServerToWeb,
   type WebJoin,
@@ -264,6 +265,12 @@ function handleWeb(
       ...(secret ? { you: { ...world.you, memberSecret: secret } } : {}),
       ...(away ? { lastHereDay: away } : {}),
     });
+    // The conversation, on this socket alone — like `world` above and unlike
+    // the two pushes below, which go to every tab this member has open. A
+    // second tab opening must not re-seed the one that has been sitting here
+    // reading. `lastPresent` is the value read before `addWebClient`, which is
+    // the line that ended the absence it describes.
+    sendWeb(ws, entered.chatLog(lastPresent));
     // Settings ride their own message, and it is only sent when they change —
     // so an office that has been left alone would never tell anyone how its
     // door is set.
@@ -423,7 +430,16 @@ function handleWeb(
     // spent before any of those states are even consulted.
     if (!messages.allow(msg.type, Date.now())) {
       if (messages.abusive()) return ws.close();
-      return sendWeb(ws, { type: 'error', code: 'bad-message', message: 'slow down' });
+      // Every other kind here is plumbing or a click, and "slow down" lands
+      // wherever the client puts a generic refusal. A refused chat message is
+      // the one case where a person is watching a text box and their sentence
+      // did not go, so it answers in the chat's own channel instead.
+      return sendWeb(
+        ws,
+        msg.type === 'chat'
+          ? { type: 'error', code: 'chat-refused', message: 'easy — the office is catching up' }
+          : { type: 'error', code: 'bad-message', message: 'slow down' },
+      );
     }
 
     if (msg.type === 'join') {
@@ -448,9 +464,42 @@ function handleWeb(
       return;
     }
 
+    // Nothing below this line is available to a socket that is not a member:
+    // not to a browser that has connected and said nothing, and not to one
+    // waiting at the door. A knocker is emphatically not in the conversation —
+    // being let in is the whole thing they are waiting for.
     if (!room || !client) return;
     if (msg.type === 'move') {
       room.updatePosition(client.memberId, msg.position);
+    } else if (msg.type === 'chat') {
+      // Flattened once, here, and stored and broadcast as exactly what comes
+      // out — so the line in the table and the line on the screen cannot be
+      // two different strings. The schema has already bounded the length; this
+      // is the only place that can tell whether there is anything left after
+      // the control characters and the whitespace have gone.
+      const text = normalizeChatText(msg.text);
+      if (!text) {
+        return sendWeb(ws, {
+          type: 'error',
+          code: 'chat-refused',
+          message: 'there was nothing in that',
+        });
+      }
+      // A write, and the same boundary the other three writing paths carry:
+      // this process is every office on the server, and one busy table must
+      // not be able to take the rest of them down. The refusal goes back
+      // rather than being swallowed, because the person who typed it is
+      // watching an input that would otherwise just look like it worked.
+      try {
+        room.say(client.memberId, text, Date.now());
+      } catch (error) {
+        console.error(`chat from member ${client.memberId} failed:`, error);
+        sendWeb(ws, {
+          type: 'error',
+          code: 'chat-refused',
+          message: 'that did not reach the office — try it again',
+        });
+      }
     } else if (msg.type === 'activity') {
       room.setWebPresent(client, msg.present);
     } else if (msg.type === 'history') {

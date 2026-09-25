@@ -18,6 +18,16 @@ export function memberSecret(): string {
   return randomBytes(24).toString('hex');
 }
 
+/**
+ * One line of an office's conversation. Random rather than a row counter,
+ * because this id travels to every browser in the room and then comes back on
+ * a delete: a sequential one would let anybody in the office count how much
+ * has ever been said anywhere on the server.
+ */
+export function chatMessageId(): string {
+  return `c_${randomBytes(8).toString('hex')}`;
+}
+
 export function deviceKey(): string {
   return randomBytes(24).toString('hex');
 }

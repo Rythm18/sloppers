@@ -22,10 +22,13 @@ export function HUD() {
   const sharing = useStore((s) => (you ? (s.members[you]?.sharing ?? false) : false));
   const alone = useStore((s) => Object.keys(s.members).length <= 1);
   const leaderboardOpen = useStore((s) => s.leaderboardOpen);
+  const chatOpen = useStore((s) => s.chatOpen);
+  const chatUnread = useStore((s) => s.chatUnread);
   const knocks = useStore((s) => s.knocks);
   const myRole = useStore((s) => s.myRole);
   const setShareOpen = useStore((s) => s.setShareOpen);
   const setLeaderboardOpen = useStore((s) => s.setLeaderboardOpen);
+  const setChatOpen = useStore((s) => s.setChatOpen);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const [copied, setCopied] = useState(false);
   /**
@@ -98,6 +101,23 @@ export function HUD() {
           onClick={() => setLeaderboardOpen(!leaderboardOpen)}
         >
           {leaderboardOpen ? 'Hide board' : 'Board'}
+        </button>
+        {/* The dot is the same signal the door already uses, in the same ink
+            as the office's one lit button — a lamp on a piece of furniture,
+            not a red count on a badge. It says only that somebody spoke while
+            the panel was shut, which is the whole of what a closed panel can
+            honestly promise; the number rides in the accessible name, where a
+            sentence has room to be exact. */}
+        <button
+          type="button"
+          className="btn btn-quiet"
+          aria-label={
+            chatUnread > 0 ? `Chat, ${chatUnread} new` : chatOpen ? 'Hide chat' : 'Show chat'
+          }
+          onClick={() => setChatOpen(!chatOpen)}
+        >
+          {!chatOpen && chatUnread > 0 ? <i className="chat-dot" /> : null}
+          {chatOpen ? 'Hide chat' : 'Chat'}
         </button>
         <button type="button" className="btn btn-quiet" onClick={() => setSettingsOpen(true)}>
           Settings

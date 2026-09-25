@@ -426,6 +426,19 @@ button {
 }
 
 /*
+ * Somebody spoke while the chat was shut. The door's dot, in the door's
+ * rhythm — a lamp on a piece of furniture rather than a red numbered badge.
+ * The ink differs only because the alert button under the knock dot is lit and
+ * this one sits on a quiet button, where ink on dusk would be invisible.
+ */
+.chat-dot {
+  width: 7px;
+  height: 7px;
+  background: var(--lamp);
+  animation: blink 0.9s steps(2, jump-none) infinite;
+}
+
+/*
  * "Your avatar has nothing to show." Quiet furniture rather than an
  * interruption: no scrim, the office stays walkable behind it, and one word
  * sends it away for good.
@@ -849,6 +862,190 @@ button {
   font-style: italic;
   border-bottom: 1px dotted var(--wire);
   cursor: help;
+}
+
+/* ------------------------------------------------------------------ chat */
+
+/*
+ * The conversation, in the same column as the board and under it: the right
+ * edge is where the office keeps its chrome, and a panel that talks to the
+ * whole room belongs with the one that ranks it rather than opposite the
+ * member card.
+ *
+ * `--kb` is however much of the window a software keyboard is covering, set
+ * from JavaScript because nothing in CSS can see it (see `useKeyboardInset`).
+ * It is 0 on every desktop and on every phone with the keyboard down, so this
+ * reads as an ordinary bottom offset until the moment it matters.
+ */
+.chat {
+  position: absolute;
+  right: calc(14px + env(safe-area-inset-right));
+  bottom: calc(14px + var(--kb, 0px) + env(safe-area-inset-bottom));
+  /* The board's width, so the two read as one column rather than two panels
+     that happen to be near each other. */
+  width: 278px;
+  display: grid;
+  z-index: 8;
+}
+
+.chat-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--panel-line);
+}
+
+.chat-close {
+  background: none;
+  border: none;
+  color: var(--wire);
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+.chat-close:hover {
+  color: var(--parchment);
+}
+
+.chat-log {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  padding: 8px 0;
+  /* Deliberately short. This sits under a board that may be open above it, and
+     a chat that grows until the two meet is a chat that hides the scores it is
+     about. `dvh` for the reason the whole file uses it: `vh` on iOS is the
+     viewport with the address bar hidden, which it usually is not. */
+  max-height: 30dvh;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.chat-empty {
+  padding: 4px 12px 6px;
+  color: var(--wire);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.chat-line {
+  position: relative;
+  padding: 2px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.chat-who {
+  margin-right: 6px;
+  color: var(--lamp);
+  font-family: var(--font-display);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: help;
+}
+
+/* Your own name in parchment rather than lamp gold: the lamp is the office
+   pointing at something, and pointing at yourself every time you speak is
+   noise. The line still reads as yours because the name is on it. */
+.chat-line-mine .chat-who {
+  color: var(--parchment);
+}
+
+.chat-text {
+  color: var(--parchment);
+}
+
+/*
+ * Where somebody stopped reading. A rule across the panel with the word on it,
+ * in the alert ink — the one place in chat that is allowed to be loud, because
+ * it is the only thing here that is about *you* rather than about the room.
+ */
+.chat-mark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 4px;
+  color: var(--alert);
+  font-family: var(--font-display);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.chat-mark::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--alert);
+  opacity: 0.5;
+}
+
+/*
+ * Taking a line down. Hidden until the row is pointed at or the button itself
+ * is focused, so a conversation is a conversation rather than a column of
+ * delete buttons — and unconditionally visible on a touch screen, where there
+ * is no such thing as pointing at a row without committing to it.
+ */
+.chat-remove {
+  margin-left: 6px;
+  padding: 0 3px;
+  background: none;
+  border: none;
+  color: var(--wire);
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+}
+
+.chat-line:hover .chat-remove,
+.chat-remove:focus-visible {
+  opacity: 1;
+}
+
+.chat-remove:hover {
+  color: var(--alert);
+}
+
+.chat-remove:focus-visible {
+  outline: 2px solid var(--crt);
+  outline-offset: 1px;
+}
+
+/* The office saying no to something somebody typed. Above the box rather than
+   below it, because below it is where the keyboard is. */
+.chat-error {
+  padding: 6px 12px;
+  border-top: 1px solid var(--panel-line);
+  color: var(--alert);
+  font-size: 11.5px;
+}
+
+.chat-compose {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid var(--panel-line);
+}
+
+.chat-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+}
+
+.chat-compose .btn {
+  flex: none;
+  padding: 8px 10px;
+}
+
+.chat-left {
+  padding: 0 12px 8px;
+  color: var(--wire);
+  font-size: 10.5px;
+  text-align: right;
 }
 
 /* ------------------------------------------------------------ member card */
@@ -1534,12 +1731,23 @@ button {
      padding it did not have. */
   .member-card-head .close,
   .share-modal-head .close,
-  .settings-head .close {
+  .settings-head .close,
+  .chat-head .chat-close {
     display: grid;
     place-items: center;
     min-width: 44px;
     min-height: 44px;
     padding: 0;
+  }
+
+  /* There is no hovering a row with a finger, so the delete on a chat line
+     is either always there or unreachable. Always there, and given a real
+     target — squeezed between two 12px lines it would otherwise be a glyph
+     you aim at and miss into the message above. */
+  .chat-remove {
+    opacity: 1;
+    min-width: 28px;
+    min-height: 28px;
   }
 
   .settings-choice input {
@@ -1609,6 +1817,11 @@ button {
   .leaderboard {
     top: calc(60px + env(safe-area-inset-top));
     right: calc(8px + env(safe-area-inset-right));
+  }
+
+  .chat {
+    right: calc(8px + env(safe-area-inset-right));
+    bottom: calc(8px + var(--kb, 0px) + env(safe-area-inset-bottom));
   }
 
   .member-card {
@@ -1694,9 +1907,12 @@ button {
     margin-top: auto;
   }
 
-  /* Both panels come off the bottom edge as sheets, which is the edge a
-     thumb reaches. */
+  /* All three panels come off the bottom edge as sheets, which is the edge a
+     thumb reaches. Chat keeps `--kb` in its offset: it is the one sheet with
+     a text field in it, and `bottom: 0` under a raised keyboard is a box
+     somebody can type into and never see. */
   .leaderboard,
+  .chat,
   .member-card {
     top: auto;
     right: 0;
@@ -1708,13 +1924,29 @@ button {
     padding-bottom: env(safe-area-inset-bottom);
   }
 
+  .chat {
+    bottom: var(--kb, 0px);
+  }
+
   /* One sheet at a time. They come off the same edge, and the taller of the
-     two showing a few pixels of itself over the top of the other reads as a
-     rendering fault rather than as a stack. Opening somebody's card is the
-     more specific request, so it wins outright — and closing it puts the
-     board back, because this is the card being on screen and nothing else. */
-  .app:has(.member-card) .leaderboard {
+     three showing a few pixels of itself over the top of another reads as a
+     rendering fault rather than as a stack. They rank by how specific the
+     request was: opening somebody's card is about one person and wins
+     outright, chat is about the room, and the board is what is showing when
+     nobody has asked for anything — and closing one puts the next back,
+     because this is entirely about what is on screen right now. */
+  .app:has(.member-card) .leaderboard,
+  .app:has(.member-card) .chat,
+  .app:has(.chat) .leaderboard {
     display: none;
+  }
+
+  /* Roughly a third of the screen, so the office is still visible behind the
+     conversation — the whole reason this is a sheet and not a page. With the
+     keyboard up the browser shrinks the viewport `dvh` measures, and this
+     shrinks with it. */
+  .chat-log {
+    max-height: 34dvh;
   }
 
   .leaderboard-rows {
@@ -1758,6 +1990,13 @@ button {
     top: calc(54px + env(safe-area-inset-top));
   }
 
+  /* Sideways, there is barely room for a board and a conversation in one
+     column. The log gives back most of its height rather than the panel going
+     away — the compose box is the part that has to survive. */
+  .chat-log {
+    max-height: 22dvh;
+  }
+
   .leaderboard-rows {
     max-height: 46dvh;
   }
@@ -1789,6 +2028,7 @@ button {
 @media (prefers-reduced-motion: reduce) {
   .bubble,
   .knock-dot,
+  .chat-dot,
   .knock-wait i,
   .share-paired-mark,
   .presence-attention .presence-dot,

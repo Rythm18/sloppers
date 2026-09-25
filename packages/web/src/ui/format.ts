@@ -329,6 +329,27 @@ export function countdown(seconds: number): string {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
 }
 
+/**
+ * A moment on a 24-hour clock: `09:07`.
+ *
+ * In the reader's own timezone, which is the opposite of what `dayLabel` does
+ * two hundred lines up — and the difference is worth naming, because the two
+ * look like the same kind of function. A day key is a *label* cut from
+ * somebody else's calendar, and rewriting it into the reader's clock would
+ * move Monday's work under Sunday. A chat timestamp is a moment: the same
+ * instant for everybody, and the only useful way to show it is as the time it
+ * was where the person reading is.
+ *
+ * Built by hand rather than through `toLocaleTimeString`, which would render
+ * the same conversation as `09:07` for one friend and `9:07 AM` for another
+ * sitting beside them, and would drift with whatever ICU data the browser
+ * shipped.
+ */
+export function chatTime(at: number): string {
+  const when = new Date(at);
+  return `${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`;
+}
+
 export const PRESENCE_LABEL: Record<PresenceState, string> = {
   active: 'at the desk',
   grinding: 'agents cooking',

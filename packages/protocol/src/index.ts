@@ -8,6 +8,7 @@
  */
 export const PROTOCOL_VERSION = 1;
 
+export * from './chat.js';
 export * from './collector.js';
 export * from './core.js';
 export * from './pricing.js';

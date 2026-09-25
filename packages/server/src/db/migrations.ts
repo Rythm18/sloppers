@@ -342,6 +342,47 @@ export const migrations: Migration[] = [
       db.exec('UPDATE members SET last_present_at = last_seen_at');
     },
   },
+  {
+    version: 7,
+    name: 'chat',
+    up(db) {
+      // What people said to each other, on disk rather than in memory — which
+      // is the whole decision this table represents.
+      //
+      // A ring buffer in the process would be free and would work perfectly
+      // right up until the process stops, and this one stops constantly: the
+      // office runs scale-to-zero, so the machine genuinely shuts down every
+      // time the last tab closes, which for a handful of friends is most of
+      // the day and all of the night. "Shipped it, look at the board" said at
+      // one in the morning would be gone before anybody woke up, and the
+      // failure would look exactly like the feature working.
+      //
+      // `display_name` is stored beside the author rather than joined from
+      // `members`: see `chatMessageSchema` for why a line keeps the name it
+      // was said under.
+      //
+      // Both foreign keys are load-bearing. `member_id` is what makes
+      // `deleteMember` take somebody's messages with them — the erase list in
+      // the manager names this table, and the constraint is what would catch
+      // it being dropped from that list. `workspace_id` is what keeps a
+      // message from outliving the office it was said in.
+      db.exec(`
+        CREATE TABLE chat_messages (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+          member_id TEXT NOT NULL REFERENCES members(id),
+          display_name TEXT NOT NULL,
+          body TEXT NOT NULL,
+          at INTEGER NOT NULL
+        );
+        -- Every read of this table is "the newest lines of one office", and
+        -- every write is followed by a trim that asks the same question.
+        CREATE INDEX chat_messages_room ON chat_messages(workspace_id, at);
+        -- The age sweep, which is the only query that crosses offices.
+        CREATE INDEX chat_messages_at ON chat_messages(at);
+      `);
+    },
+  },
 ];
 
 /**

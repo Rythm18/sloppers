@@ -48,6 +48,47 @@ export function isStackedLayout(): boolean {
 }
 
 /**
+ * How many pixels of the window an on-screen keyboard is currently covering.
+ *
+ * The one thing about a phone that no media query and no CSS unit answers.
+ * `dvh` is the viewport as the *browser* chrome leaves it, which is what it
+ * was added for and is why every height cap in `app.css` uses it — but a
+ * software keyboard is not browser chrome. It slides over the page without
+ * changing the layout viewport at all, so a panel pinned to `bottom: 0` with
+ * a text field in it puts that field squarely underneath the keys somebody is
+ * about to press.
+ *
+ * `visualViewport` is what knows: it reports the part of the page actually on
+ * screen, and the difference between that and `innerHeight` is the keyboard.
+ * Absent on older browsers and in jsdom, where the answer is zero — which is
+ * the desktop answer, which changes nothing.
+ *
+ * Clamped at zero, and against `offsetTop` as well as height: iOS scrolls the
+ * visual viewport up when a field is focused near the bottom, and reading the
+ * height alone would under-report the inset by exactly that scroll.
+ */
+export function useKeyboardInset(): number {
+  const [inset, setInset] = useState(0);
+
+  useEffect(() => {
+    const viewport = globalThis.visualViewport;
+    if (!viewport) return;
+    const measure = () => {
+      setInset(Math.max(0, Math.round(window.innerHeight - viewport.height - viewport.offsetTop)));
+    };
+    measure();
+    viewport.addEventListener('resize', measure);
+    viewport.addEventListener('scroll', measure);
+    return () => {
+      viewport.removeEventListener('resize', measure);
+      viewport.removeEventListener('scroll', measure);
+    };
+  }, []);
+
+  return inset;
+}
+
+/**
  * `isTouchSession`, but the component asking is re-rendered when it changes.
  * Plugging in a mouse must not leave a phone's wording on the screen.
  */

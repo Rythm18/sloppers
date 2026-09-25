@@ -11,6 +11,7 @@ import {
 import type { Db } from '../db/index.js';
 import { memberId, memberSecret, randomAvatar, roomSuffix, workspaceId } from '../ids.js';
 import { TokenLedger } from '../ledger.js';
+import { pruneChat } from './chat.js';
 import { Room } from './live.js';
 
 /**
@@ -38,8 +39,19 @@ const STALE_MEMBER_MS = 7 * 24 * 60 * 60 * 1000;
  * Safe as written because the two are erased in one transaction and member ids
  * are random 16-hex that are never reused, so nothing can bank against a
  * half-erased member. Keep it that way.
+ *
+ * `chat_messages` is here for a different reason from everything else in the
+ * list, and a stronger one. The rest is measurement — how many tokens somebody
+ * burned on a Tuesday — and deleting a member erases it because attribution
+ * with nobody to attribute to is just clutter. Chat is what a person wrote.
+ * "Delete me" has to mean the office stops holding their sentences, or it does
+ * not mean much; a member row removed while their words stay on the wall is
+ * the thin version of the promise. It is also the one table here with a
+ * foreign key back to `members`, so dropping it from this list does not
+ * silently strand rows — it fails the delete outright.
  */
 const MEMBER_OWNED_TABLES = [
+  'chat_messages',
   'daily_usage',
   'daily_activity',
   'usage_watermarks',
@@ -398,6 +410,10 @@ export class WorkspaceManager {
    */
   cleanupStaleMembers(now: number = Date.now()): number {
     const cutoff = now - STALE_MEMBER_MS;
+    // Retention, run where the other daily forgetting happens. Ahead of the
+    // member sweep rather than after it, so a conversation ages out on its own
+    // schedule whether or not anybody in it turned out to be stale.
+    pruneChat(this.db, now);
     const stale = this.db
       .prepare(`
         SELECT id, workspace_id FROM members
@@ -436,9 +452,16 @@ export class WorkspaceManager {
       .all(cutoff) as { id: string; invite_code: string }[];
     const drop = this.db.transaction((ids: string[]) => {
       const events = this.db.prepare('DELETE FROM workspace_events WHERE workspace_id = ?');
+      // Every message here belongs to a member, and every member of this
+      // office has just been erased — so this should always find nothing. It
+      // is not decoration: `chat_messages` references `workspaces(id)`, and if
+      // the invariant ever failed, the line below would not leave an orphan,
+      // it would throw and take the whole sweep down with it.
+      const chat = this.db.prepare('DELETE FROM chat_messages WHERE workspace_id = ?');
       const workspace = this.db.prepare('DELETE FROM workspaces WHERE id = ?');
       for (const id of ids) {
         events.run(id);
+        chat.run(id);
         workspace.run(id);
       }
     });

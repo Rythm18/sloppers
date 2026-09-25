@@ -40,7 +40,7 @@ export class TokenBucket {
 }
 
 /** The complete client-to-server message union — see `webToServerSchema`. */
-export type MessageKind = 'join' | 'move' | 'activity' | 'admin' | 'history';
+export type MessageKind = 'join' | 'move' | 'activity' | 'admin' | 'history' | 'chat';
 
 /**
  * Budgets per kind. `move` is generous — it is the tick-rate stream driving
@@ -57,6 +57,17 @@ export type MessageKind = 'join' | 'move' | 'activity' | 'admin' | 'history';
  * yesterday, and reads three teammates' weeks spends exactly one. Five in a
  * burst covers a reconnect and a few deliberate refreshes; six a minute
  * sustained is far past anyone clicking, and far short of a loop.
+ *
+ * `chat` is the first kind on this wire a *person* generates quickly and
+ * legitimately, which is why it is the only one sized against a human rather
+ * than against a click. The numbers come from the two ends of that: ten in a
+ * burst is more than anybody fires off in one breath (three or four short
+ * lines while something is exciting is the real shape of it), and one a second
+ * sustained is about twice the fastest anyone talks in here. Nobody typing
+ * ever meets this. A script sending twenty in two seconds gets twelve through
+ * and is told to slow down; keeping going trips `abusive()` and the socket
+ * goes. The refusal is the one on this wire a human can actually see, so it
+ * carries its own code — see `webErrorSchema`.
  */
 const BUDGETS: Record<MessageKind, { ratePerSecond: number; burst: number }> = {
   move: { ratePerSecond: 20, burst: 40 },
@@ -64,6 +75,7 @@ const BUDGETS: Record<MessageKind, { ratePerSecond: number; burst: number }> = {
   admin: { ratePerSecond: 10 / 60, burst: 15 },
   join: { ratePerSecond: 1 / 60, burst: 5 },
   history: { ratePerSecond: 6 / 60, burst: 5 },
+  chat: { ratePerSecond: 1, burst: 10 },
 };
 
 /** How close two full-bucket drains have to land to count as abuse. */
@@ -89,6 +101,7 @@ export function createMessageLimiter(): MessageLimiter {
     admin: new TokenBucket(BUDGETS.admin.ratePerSecond, BUDGETS.admin.burst),
     join: new TokenBucket(BUDGETS.join.ratePerSecond, BUDGETS.join.burst),
     history: new TokenBucket(BUDGETS.history.ratePerSecond, BUDGETS.history.burst),
+    chat: new TokenBucket(BUDGETS.chat.ratePerSecond, BUDGETS.chat.burst),
   };
 
   // The recorded history `abusive()` answers from: the two most recent

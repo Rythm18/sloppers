@@ -1,6 +1,6 @@
 /**
- * The only place a role is ever compared. Chat deletion and voice muting
- * will extend Action rather than inventing their own checks.
+ * The only place a role is ever compared. Voice muting will extend Action
+ * rather than inventing its own check, the way `chat.delete` did.
  */
 export type Role = 'owner' | 'moderator' | 'member';
 
@@ -15,13 +15,24 @@ export type Action =
   | 'member.promote'
   | 'member.demote'
   | 'member.delete'
-  | 'knock.decide';
+  | 'knock.decide'
+  /**
+   * Take somebody *else's* line out of the conversation. Taking your own back
+   * needs no permission at all and never asks this — see `handleAdminOp`,
+   * which checks authorship first, exactly as `member.delete` checks for self.
+   */
+  | 'chat.delete';
 
 const MODERATOR_ACTIONS: ReadonlySet<Action> = new Set([
   'member.kick',
   'member.ban',
   'member.unban',
   'knock.decide',
+  // Anybody who can show a person the door can take down a line they said.
+  // The realistic need in a friends' office is not abuse, it is a secret
+  // pasted into the wrong window — and making that wait for the owner to wake
+  // up is the difference between a tool and a gesture.
+  'chat.delete',
 ]);
 
 export function can(role: Role, action: Action): boolean {
