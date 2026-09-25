@@ -63,9 +63,13 @@ export function isStackedLayout(): boolean {
  * Absent on older browsers and in jsdom, where the answer is zero — which is
  * the desktop answer, which changes nothing.
  *
- * Clamped at zero, and against `offsetTop` as well as height: iOS scrolls the
- * visual viewport up when a field is focused near the bottom, and reading the
- * height alone would under-report the inset by exactly that scroll.
+ * `offsetTop` is in the sum because the keyboard's top edge sits at
+ * `offsetTop + height`, not at `height`: iOS shifts the visual viewport down
+ * inside the layout viewport when a focused field would otherwise be hidden,
+ * and a panel lifted by the height alone would then float above the keyboard
+ * by exactly that shift. Clamped at zero, because pinch-zoom can make the
+ * visual viewport the taller of the two and there is no such thing as a
+ * keyboard of minus sixty pixels.
  */
 export function useKeyboardInset(): number {
   const [inset, setInset] = useState(0);

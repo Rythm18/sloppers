@@ -121,6 +121,60 @@ describe('HUD', () => {
     expect(screen.queryByRole('button', { name: /at the door/ })).toBeNull();
   });
 
+  /**
+   * A chat that can be closed needs a way to say somebody spoke. It is the
+   * signal the door already uses — a small lamp on a piece of furniture, in
+   * the same blink — rather than a red numbered badge, which is a different
+   * product's idea of urgency. The count still rides in the accessible name,
+   * where a sentence has room to be exact.
+   */
+  describe('the chat dot', () => {
+    it('lights when somebody spoke while the panel was shut', () => {
+      seed('member');
+      act(() => useStore.getState().setChatOpen(false));
+      const { container, rerender } = render(<HUD />);
+      expect(container.querySelector('.chat-dot')).toBeNull();
+
+      apply({
+        type: 'chat',
+        message: {
+          id: 'c1',
+          memberId: 'nina',
+          displayName: 'nina',
+          text: 'nice',
+          at: 1_700_000_000_000,
+        },
+      });
+      rerender(<HUD />);
+
+      expect(container.querySelector('.chat-dot')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Chat, 1 new' })).toBeTruthy();
+    });
+
+    it('goes out when the panel is opened, which is what reads it', () => {
+      seed('member');
+      act(() => useStore.getState().setChatOpen(false));
+      apply({
+        type: 'chat',
+        message: {
+          id: 'c1',
+          memberId: 'nina',
+          displayName: 'nina',
+          text: 'nice',
+          at: 1_700_000_000_000,
+        },
+      });
+      const { container } = render(<HUD />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Chat, 1 new' }));
+
+      expect(useStore.getState().chatOpen).toBe(true);
+      expect(useStore.getState().chatUnread).toBe(0);
+      expect(container.querySelector('.chat-dot')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Hide chat' })).toBeTruthy();
+    });
+  });
+
   // The office's one instruction. Offering WASD to a phone is not a smaller
   // help than none — it is the screen telling somebody the controls they can
   // see are all there is, and there is no keyboard coming.

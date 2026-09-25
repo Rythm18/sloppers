@@ -1,5 +1,6 @@
+import { webToServerSchema } from '@sloppers/protocol';
 import { describe, expect, it } from 'vitest';
-import { createMessageLimiter, TokenBucket } from './rate-limit.js';
+import { createMessageLimiter, type MessageKind, TokenBucket } from './rate-limit.js';
 
 describe('TokenBucket', () => {
   it('allows a burst then refuses until refilled', () => {
@@ -114,11 +115,51 @@ describe('createMessageLimiter', () => {
     expect(limiter.abusive()).toBe(true);
   });
 
+  /**
+   * Chat is the first kind on this wire a *person* generates quickly and
+   * legitimately, so its budget is sized against a fast typist rather than
+   * against a click. Both ends of that are pinned here: nobody typing can
+   * reach the burst, and a script that ignores the first refusal is gone.
+   */
+  it('lets a fast typist run and stops a script', () => {
+    const limiter = createMessageLimiter();
+    const t0 = 10_000_000;
+    // Ten lines fired off in one breath — more than anybody actually does —
+    // all land, with no pause between them at all.
+    for (let i = 0; i < 10; i++) expect(limiter.allow('chat', t0)).toBe(true);
+    expect(limiter.allow('chat', t0)).toBe(false);
+    // One a second sustained, which is about twice the fastest anyone talks.
+    expect(limiter.allow('chat', t0 + 1_000)).toBe(true);
+    expect(limiter.allow('chat', t0 + 1_000)).toBe(false);
+    // Somebody typing at a human pace never approaches it: four lines four
+    // seconds apart leave the bucket nearly full the whole way.
+    const relaxed = createMessageLimiter();
+    for (let i = 0; i < 4; i++) expect(relaxed.allow('chat', t0 + i * 4_000)).toBe(true);
+  });
+
+  it('keeps a flood of chat out of everybody else’s budget', () => {
+    const limiter = createMessageLimiter();
+    const t0 = 11_000_000;
+    for (let i = 0; i < 10; i++) limiter.allow('chat', t0);
+    expect(limiter.allow('chat', t0)).toBe(false);
+    // A drained chat bucket must still leave somebody able to walk out of the
+    // room and answer the door.
+    expect(limiter.allow('move', t0)).toBe(true);
+    expect(limiter.allow('admin', t0)).toBe(true);
+  });
+
+  /**
+   * A kind with no bucket is a kind with no limit, and it is one line in a
+   * union away at all times. Read off the schema rather than listed by hand:
+   * a hand-written list is exactly what was here when `history` and `chat`
+   * were each added, and it went on passing without them.
+   */
   it('governs every kind in the client-to-server union', () => {
     const limiter = createMessageLimiter();
     const t0 = 8_000_000;
-    for (const kind of ['join', 'move', 'activity', 'admin'] as const) {
-      expect(limiter.allow(kind, t0)).toBe(true);
-    }
+    const kinds = webToServerSchema.options.map((option) => option.shape.type.value as MessageKind);
+    expect(kinds).toEqual(expect.arrayContaining(['join', 'move', 'activity', 'admin', 'history']));
+    expect(kinds).toContain('chat');
+    for (const kind of kinds) expect(limiter.allow(kind, t0)).toBe(true);
   });
 });

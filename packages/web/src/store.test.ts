@@ -1,3 +1,4 @@
+import { CHAT_KEPT } from '@sloppers/protocol';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from './store.js';
 
@@ -296,6 +297,10 @@ describe('store', () => {
     expect(state.doorAnswerable).toBeNull();
     expect(state.settingsOpen).toBe(false);
     expect(state.adminError).toBeNull();
+    expect(state.chat).toEqual([]);
+    expect(state.chatUnread).toBe(0);
+    expect(state.chatUnreadSince).toBeNull();
+    expect(state.chatError).toBeNull();
   });
 
   const history = {
@@ -350,6 +355,170 @@ describe('store', () => {
     expect(useStore.getState().historyPending).toBe(false);
     expect(useStore.getState().adminError).toBe('slow down');
   });
+
+  describe('the conversation', () => {
+    const line = (id: string, memberId: string, at: number, text = id) => ({
+      id,
+      memberId,
+      displayName: memberId,
+      text,
+      at,
+    });
+
+    /** In the office, connected, with the panel shut — the unread case. */
+    function inTheOfficeWithChatShut(): void {
+      useStore.getState().applyServer(world as never);
+      useStore.getState().setConnection('open');
+      useStore.getState().setChatOpen(false);
+    }
+
+    it('takes the backlog the office hands over and the mark that came with it', () => {
+      useStore.getState().applyServer(world as never);
+      useStore.getState().setChatOpen(false);
+      useStore.getState().applyServer({
+        type: 'chat-log',
+        messages: [line('a', 'nina', 100), line('b', 'nina', 200)],
+        unreadSince: 200,
+      } as never);
+
+      const state = useStore.getState();
+      expect(state.chat.map((m) => m.id)).toEqual(['a', 'b']);
+      expect(state.chatUnreadSince).toBe(200);
+      expect(state.chatUnread).toBe(1);
+    });
+
+    it('announces nothing on a backlog that missed nothing', () => {
+      useStore.getState().applyServer(world as never);
+      useStore.getState().setChatOpen(false);
+      useStore
+        .getState()
+        .applyServer({ type: 'chat-log', messages: [line('a', 'nina', 100)] } as never);
+
+      expect(useStore.getState().chatUnread).toBe(0);
+      expect(useStore.getState().chatUnreadSince).toBeNull();
+    });
+
+    it('counts a missed line, and never one of your own', () => {
+      inTheOfficeWithChatShut();
+      useStore.getState().applyServer({ type: 'chat', message: line('a', 'nina', 100) } as never);
+      expect(useStore.getState().chatUnread).toBe(1);
+
+      // `m1` is this browser. Its own message coming back is the office
+      // confirming the sentence landed, which is not news to announce.
+      useStore.getState().applyServer({ type: 'chat', message: line('b', 'm1', 200) } as never);
+      expect(useStore.getState().chatUnread).toBe(1);
+      expect(useStore.getState().chat).toHaveLength(2);
+    });
+
+    it('counts nothing while the panel is open, and opening it clears the count', () => {
+      inTheOfficeWithChatShut();
+      useStore.getState().applyServer({ type: 'chat', message: line('a', 'nina', 100) } as never);
+      useStore.getState().setChatOpen(true);
+      expect(useStore.getState().chatUnread).toBe(0);
+
+      useStore.getState().applyServer({ type: 'chat', message: line('b', 'nina', 200) } as never);
+      expect(useStore.getState().chatUnread).toBe(0);
+    });
+
+    it('keeps the mark until somebody answers, not merely until they look', () => {
+      // On a laptop the panel is already open when the backlog arrives, so
+      // clearing the mark on open would mean nobody with a wide screen ever
+      // saw where they stopped reading.
+      useStore.getState().applyServer(world as never);
+      useStore.getState().applyServer({
+        type: 'chat-log',
+        messages: [line('a', 'nina', 100)],
+        unreadSince: 100,
+      } as never);
+      useStore.getState().setChatOpen(true);
+      expect(useStore.getState().chatUnreadSince).toBe(100);
+
+      useStore.getState().chatCaughtUp();
+      expect(useStore.getState().chatUnreadSince).toBeNull();
+    });
+
+    it('never holds more than the office itself keeps', () => {
+      useStore.getState().applyServer(world as never);
+      useStore.getState().setChatOpen(true);
+      for (let i = 0; i < CHAT_KEPT + 20; i++) {
+        useStore
+          .getState()
+          .applyServer({ type: 'chat', message: line(`c${i}`, 'nina', 1000 + i) } as never);
+      }
+      const chat = useStore.getState().chat;
+      expect(chat).toHaveLength(CHAT_KEPT);
+      // The end of the conversation, not the start: a tab open for a week
+      // shows what the office would hand back on the next visit.
+      expect(chat.at(-1)?.id).toBe(`c${CHAT_KEPT + 19}`);
+    });
+
+    it('drops a line the office took down, and leaves the rest alone', () => {
+      useStore.getState().applyServer(world as never);
+      useStore.getState().applyServer({
+        type: 'chat-log',
+        messages: [line('a', 'nina', 100), line('b', 'nina', 200)],
+      } as never);
+      useStore.getState().applyServer({ type: 'chat-removed', id: 'a' } as never);
+
+      expect(useStore.getState().chat.map((m) => m.id)).toEqual(['b']);
+    });
+
+    /**
+     * The routing this whole error code exists for. Every other refusal inside
+     * an open office answers a click on a control, and lands beside it. A
+     * refused chat message answers a sentence in a text box — put it in the
+     * admin channel and the person typing watches nothing happen, possibly
+     * with the panel holding their answer closed.
+     */
+    it('puts a refused message in the chat’s own channel, not the admin panel', () => {
+      useStore.getState().applyServer(world as never);
+      useStore.getState().setConnection('open');
+      useStore.getState().applyServer({
+        type: 'error',
+        code: 'chat-refused',
+        message: 'easy — the office is catching up',
+      } as never);
+
+      const state = useStore.getState();
+      expect(state.chatError).toBe('easy — the office is catching up');
+      expect(state.adminError).toBeNull();
+      // And it is not about being in the office: a refused line must not throw
+      // somebody back to the join form.
+      expect(state.phase).toBe('world');
+    });
+
+    it('leaves a waiting history request alone when chat is what was refused', () => {
+      // The blanket release above exists because the wire cannot say which
+      // answerable message an error is about. This one can.
+      useStore.getState().applyServer(world as never);
+      useStore.getState().setConnection('open');
+      useStore.getState().setHistoryPending(true);
+      useStore
+        .getState()
+        .applyServer({ type: 'error', code: 'chat-refused', message: 'nothing in that' } as never);
+
+      expect(useStore.getState().historyPending).toBe(true);
+    });
+
+    it('empties the conversation on a fresh world without closing the panel', () => {
+      useStore.getState().applyServer(world as never);
+      useStore.getState().setChatOpen(true);
+      useStore
+        .getState()
+        .applyServer({ type: 'chat-log', messages: [line('a', 'nina', 100)] } as never);
+      useStore.getState().setChatError('nothing in that');
+
+      // A reconnect: the office's own `chat-log` is right behind this, and it
+      // may have been trimmed or deleted from while we were gone.
+      useStore.getState().applyServer(world as never);
+      const state = useStore.getState();
+      expect(state.chat).toEqual([]);
+      expect(state.chatError).toBeNull();
+      expect(state.chatUnread).toBe(0);
+      // But the panel somebody is reading stays open across a dropped socket.
+      expect(state.chatOpen).toBe(true);
+    });
+  });
 });
 
 /**
@@ -390,5 +559,23 @@ describe('the board on arrival', () => {
     // comes back in.
     store.useStore.getState().reset();
     expect(store.useStore.getState().leaderboardOpen).toBe(false);
+  });
+
+  /**
+   * Chat answers the same question the same way, and for a stronger reason:
+   * the panel carries a text field, so on a phone it arrives with a keyboard
+   * over the room. The button in the HUD wears the dot when somebody speaks.
+   */
+  it('takes chat with it: open beside the office, shut where it would cover it', async () => {
+    screenSays(false);
+    vi.resetModules();
+    expect((await import('./store.js')).useStore.getState().chatOpen).toBe(true);
+
+    screenSays(true);
+    vi.resetModules();
+    const narrow = await import('./store.js');
+    expect(narrow.useStore.getState().chatOpen).toBe(false);
+    narrow.useStore.getState().reset();
+    expect(narrow.useStore.getState().chatOpen).toBe(false);
   });
 });

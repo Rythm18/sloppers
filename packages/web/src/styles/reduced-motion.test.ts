@@ -51,4 +51,22 @@ describe('prefers-reduced-motion', () => {
     expect(blockAt(app)).toBeGreaterThan(-1);
     expect(app.slice(blockAt(app))).toContain('.btn:hover');
   });
+
+  /**
+   * Every blinking thing in the office, listed. Both dots run the same
+   * `blink` keyframes and it is one line of CSS to add a third that nobody
+   * remembers to answer — so the list is checked against the stylesheet
+   * rather than trusted.
+   */
+  it('answers everything in the office that blinks', () => {
+    const block = app.slice(blockAt(app));
+    for (const selector of ['.knock-dot', '.chat-dot', '.presence-attention .presence-dot']) {
+      expect(block).toContain(selector);
+    }
+    // And nothing else in the file is wearing that animation unanswered.
+    const blinking = [
+      ...app.slice(0, blockAt(app)).matchAll(/^\.([\w-]+) \{\n[^}]*animation: blink/gm),
+    ];
+    for (const [, name] of blinking) expect(block).toContain(`.${name}`);
+  });
 });

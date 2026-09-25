@@ -7,6 +7,7 @@ import {
   COST_FLOOR_RANK_NOTE,
   COST_UNKNOWN,
   COST_UNKNOWN_TITLE,
+  chatTime,
   costFloorTitle,
   costTitle,
   countdown,
@@ -361,6 +362,22 @@ describe('sessionLine', () => {
     );
     expect(sessionLine({ ...base, project: 'app' })).toBe('app');
     expect(sessionLine(base)).toBe('claude session');
+  });
+});
+
+/**
+ * The exception to everything the day labels below are careful about, and the
+ * exception is the point: a chat timestamp is a *moment*, the same instant for
+ * everybody, so the only useful way to show it is as the time it was where the
+ * person reading is. A day key is a label cut from somebody else's calendar,
+ * and rewriting one into the reader's clock moves Monday's work under Sunday.
+ */
+describe('chatTime', () => {
+  it('reads a moment as the clock of whoever is looking at it', () => {
+    const when = new Date(2026, 8, 2, 9, 7);
+    expect(chatTime(when.getTime())).toBe('09:07');
+    expect(chatTime(new Date(2026, 8, 2, 23, 59).getTime())).toBe('23:59');
+    expect(chatTime(new Date(2026, 8, 2, 0, 0).getTime())).toBe('00:00');
   });
 });
 

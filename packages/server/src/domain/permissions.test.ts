@@ -15,6 +15,7 @@ describe('can', () => {
       'member.demote',
       'member.delete',
       'knock.decide',
+      'chat.delete',
     ] as const) {
       expect(can('owner', action)).toBe(true);
     }
@@ -24,6 +25,10 @@ describe('can', () => {
     expect(can('moderator', 'member.kick')).toBe(true);
     expect(can('moderator', 'member.ban')).toBe(true);
     expect(can('moderator', 'knock.decide')).toBe(true);
+    // Anybody who can show a person the door can take down a line they said —
+    // the realistic case is a secret pasted into the wrong window, and making
+    // that wait for the owner to wake up is a gesture rather than a tool.
+    expect(can('moderator', 'chat.delete')).toBe(true);
     expect(can('moderator', 'workspace.settings')).toBe(false);
     expect(can('moderator', 'workspace.rotate-invite')).toBe(false);
     expect(can('moderator', 'member.promote')).toBe(false);
@@ -34,6 +39,9 @@ describe('can', () => {
     expect(can('member', 'member.kick')).toBe(false);
     expect(can('member', 'knock.decide')).toBe(false);
     expect(can('member', 'workspace.rename')).toBe(false);
+    // Taking back their *own* message asks nothing of this — `handleAdminOp`
+    // checks authorship first, the way `member.delete` checks for self.
+    expect(can('member', 'chat.delete')).toBe(false);
   });
 });
 
